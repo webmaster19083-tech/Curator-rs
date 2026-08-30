@@ -1,0 +1,75 @@
+Curator — Full Reference Documentation
+=======================================
+
+QUICK START
+-----------
+1. Install gallery-dl: pip install gallery-dl
+2. Put 'curator.exe' next to the 'static/' folder
+3. Run: curator.exe
+4. Open http://localhost:8642
+
+DATA DIRECTORY
+--------------
+Resolution order:
+  1. CURATOR_DATA_DIR environment variable
+  2. data_dir field in config.json (same folder as the exe)
+  3. ~/Curator (home directory fallback)
+
+To move your data: stop Curator, move the folder, update config.json.
+
+config.json example:
+  {"data_dir": "E:/CuratorData"}
+
+REMOTE ACCESS (Tailscale / LAN)
+--------------------------------
+Curator binds 0.0.0.0 — reachable from any device on the same network.
+For internet access, install Tailscale on both machines.
+Use the Tailscale IP: http://100.x.x.x:8642
+
+GALLERY-DL
+----------
+Curator shells out to 'gallery-dl' on PATH, or the path in GALLERY_DL_BIN env var.
+Configure cookies, rate limits, etc. in gallery-dl's own config file (~/.config/gallery-dl/config.json).
+
+GROUPS AND TAGS
+---------------
+Sources can be placed in groups. Groups can be nested (parent/child).
+Tags on a group are inherited by all sources in it and their descendants.
+A group's own name counts as a tag for filtering purposes.
+This means: tag a group "OnlyFans" and every source in it is filterable by "onlyfans".
+
+Effective tags for a media item = own tags ∪ source's group tags ∪ ancestor group tags ∪ ancestor group names.
+
+RATINGS
+-------
+1-5 stars, stored per media item. Click the current rating again to clear it (→ 0 = unrated).
+
+COCKHERO .CHPACK EXPORT
+-----------------------
+Click "🎮 export .chpack" in the sidebar footer.
+If you're viewing a specific source, only that source's media is exported.
+Otherwise the entire library is exported.
+
+Rating → CockHero speed tag mapping:
+  1★ = slow     (softcore / clothed / teasing)
+  2★ = medium   (nudity, no penetration)
+  3★ = fast     (explicit / penetration)
+  4★ = cum      (climax / orgasm)
+  5★ = succubus (extreme challenge, no items, rapid speed)
+  0  = no tag   (game distributes randomly across all difficulties)
+
+Drop the resulting .chpack into Win64/packs/ in the game folder.
+
+TROUBLESHOOTING
+---------------
+- "gallery-dl not found": install it (pip install gallery-dl) or set GALLERY_DL_BIN env var
+- Source stuck at 'downloading': use pause/resume, or check /api/log
+- Thumbnails missing: Curator generates them on demand; large libraries may take time
+- Long filenames on Windows: enable long path support in Windows settings (regedit or Group Policy)
+- 429 errors from bunkr.cr: lower max_concurrent in Settings
+
+FLAGS
+-----
+  --port PORT    Listen port (default: 8642)
+  --docs         Print this documentation and exit
+  --help         Print flag summary and exit

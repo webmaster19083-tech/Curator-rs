@@ -1,0 +1,398 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Curator — a gallery-dl browser</title>
+<link rel="icon" href="data:,">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Space+Grotesk:wght@500;600;700&family=IBM+Plex+Sans:wght@400;500;600&family=IBM+Plex+Mono:wght@400;500&display=swap" rel="stylesheet">
+<link rel="stylesheet" href="/style.css">
+</head>
+<body>
+
+<div id="download-bar" class="download-bar" hidden>
+  <div id="download-bar-fill" class="download-bar-fill"></div>
+</div>
+<div id="download-bar-label" class="download-bar-label mono small" hidden></div>
+
+<button id="sidebar-open-btn" class="sidebar-open-btn" aria-label="Open menu" aria-expanded="false">☰</button>
+<div id="sidebar-backdrop" class="sidebar-backdrop" hidden></div>
+
+<div class="app-shell">
+  <aside class="sidebar">
+    <header class="brand">
+      <span class="brand-mark">◧</span>
+      <div>
+        <h1>Curator</h1>
+        <p class="tagline">site-agnostic gallery-dl browser</p>
+      </div>
+      <button id="sidebar-close-btn" class="sidebar-close-btn" aria-label="Close menu">✕</button>
+    </header>
+
+    <div id="export-reminder-banner" class="export-reminder-banner mono small" hidden>
+      <span id="export-reminder-text"></span>
+      <div class="export-reminder-actions">
+        <button id="export-reminder-export-btn" class="link-btn">export now</button>
+        <span class="muted">·</span>
+        <button id="export-reminder-snooze-btn" class="link-btn">remind me later</button>
+      </div>
+    </div>
+
+    <div class="quick-add">
+      <input id="quick-add-input" type="text" class="quick-add-input" placeholder="paste a creator URL…" autocomplete="off">
+      <button id="quick-add-btn" class="btn btn-accent" title="Add this source">+</button>
+    </div>
+    <div id="quick-add-warning" class="quick-add-warning mono small" hidden></div>
+    <button id="add-source-btn" class="link-btn add-bulk-link">+ add multiple at once</button>
+
+    <div class="sidebar-row-pair">
+      <button id="resync-all-btn" class="btn btn-ghost resync-all-btn" title="Re-sync every source">⟳ resync all</button>
+      <button id="pause-downloads-btn" class="btn btn-ghost" title="Stop all downloads right now">⏸ pause</button>
+    </div>
+
+    <div class="sidebar-select-row">
+      <span class="mono small muted">selection</span>
+      <div class="sidebar-select-actions">
+        <button id="select-all-btn" class="link-btn">all</button>
+        <span class="muted">·</span>
+        <button id="select-none-btn" class="link-btn">none</button>
+        <span class="muted">·</span>
+        <button id="new-group-btn" class="link-btn">+ group</button>
+      </div>
+    </div>
+
+    <ul id="source-list" class="source-list"></ul>
+
+    <footer class="sidebar-footer">
+      <div id="stats-line" class="mono muted small"></div>
+      <div class="sidebar-footer-actions">
+        <button id="settings-btn" class="link-btn">⚙ settings</button>
+        <span class="muted">·</span>
+        <button id="export-btn" class="link-btn">⬇ export list</button>
+        <span class="muted">·</span>
+        <button id="import-trigger-btn" class="link-btn">⬆ import list</button>
+        <input id="import-file-input" type="file" accept="application/json" hidden>
+        <span class="muted">·</span>
+        <a id="view-log-link" class="link-btn" href="/api/log" target="_blank" rel="noopener noreferrer">⚠ view log</a>
+        <span class="muted">·</span>
+        <button id="chpack-export-btn" class="link-btn" title="Export selected source as CockHero .chpack">🎮 export .chpack</button>
+      </div>
+    </footer>
+  </aside>
+
+  <main class="main">
+    <header class="toolbar">
+      <div class="view-tabs" role="tablist">
+        <button class="tab active" data-view="all">Selected · shuffled</button>
+        <span id="context-tab-divider" class="tab-divider" hidden>/</span>
+        <span id="context-tab-label" class="tab" hidden></span>
+      </div>
+      <div class="toolbar-actions">
+        <a id="open-source-link" class="btn btn-ghost" href="#" target="_blank" rel="noopener noreferrer" hidden>↗ open page</a>
+        <button id="refresh-banner" class="btn btn-ghost banner-btn" hidden>↻ new items — refresh</button>
+        <div class="type-filter" role="group" aria-label="Filter by media type">
+          <button class="type-filter-btn active" data-type-filter="all">all</button>
+          <button class="type-filter-btn" data-type-filter="image">photos</button>
+          <button class="type-filter-btn" data-type-filter="video">videos</button>
+        </div>
+        <select id="sort-select" class="btn btn-ghost" title="Sort order">
+          <option value="default">sort: default</option>
+          <option value="rating_desc">rating ↓</option>
+          <option value="rating_asc">rating ↑</option>
+          <option value="date_desc">newest first</option>
+          <option value="date_asc">oldest first</option>
+          <option value="filename_asc">filename A→Z</option>
+          <option value="filename_desc">filename Z→A</option>
+        </select>
+        <select id="tag-filter-select" class="btn btn-ghost" title="Filter by tag">
+          <option value="">all tags</option>
+        </select>
+        <button id="shuffle-btn" class="btn btn-ghost" title="Reshuffle current view">⤮ shuffle</button>
+        <button id="portrait-wall-btn" class="btn btn-ghost" title="3 portrait files at once, each swapping out independently">▦ portrait wall</button>
+        <button id="feed-btn" class="btn btn-ghost" title="Full-screen scrolling feed">▤ feed</button>
+        <button id="vr-btn" class="btn btn-ghost" title="View in VR" hidden>🥽 VR</button>
+        <button id="live-browse-btn" class="btn btn-ghost" title="Browse any URL live — streams from the source, downloads nothing">◍ live browse</button>
+        <button id="slideshow-btn" class="btn btn-accent">▶ slideshow</button>
+      </div>
+    </header>
+
+    <section id="empty-state" class="empty-state" hidden>
+      <p class="mono">0000 frames</p>
+      <h2>Nothing here yet</h2>
+      <p class="muted">Add a creator URL from the sidebar to start pulling in content.</p>
+    </section>
+
+    <section id="grid" class="grid"></section>
+    <div id="grid-sentinel"></div>
+  </main>
+</div>
+
+<!-- Add sources modal -->
+<div id="add-modal" class="modal-overlay" hidden>
+  <div class="modal">
+    <h2>Add sources</h2>
+    <p class="muted">Paste one or more creator URLs, one per line. Works with any site gallery-dl supports — no need to pick a platform first.</p>
+    <textarea id="add-textarea" rows="7" placeholder="https://www.deviantart.com/artistname&#10;https://www.pixiv.net/en/users/12345&#10;twitter.com/handle"></textarea>
+    <div id="add-textarea-warning" class="quick-add-warning mono small" hidden></div>
+    <div class="modal-actions">
+      <button id="add-cancel" class="btn btn-ghost">Cancel</button>
+      <button id="add-confirm" class="btn btn-accent">Add sources</button>
+    </div>
+  </div>
+</div>
+
+<!-- Settings modal -->
+<div id="settings-modal" class="modal-overlay" hidden>
+  <div class="modal">
+    <h2>Settings</h2>
+    <p class="muted">
+      Downloading is limited by network requests per source, not by CPU or GPU — so this
+      controls how many sources sync <em>at once</em>, not how fast any single one downloads.
+      Push it higher if your connection and the sites you use can take it; bring it back down
+      if sources start landing on "error" from rate limiting.
+    </p>
+    <label class="settings-field mono small">
+      max concurrent downloads
+      <input id="settings-max-concurrent" type="number" min="1" max="20" step="1">
+    </label>
+
+    <h2 class="settings-subhead">Appearance</h2>
+    <label class="settings-field mono small">
+      theme
+      <select id="settings-theme">
+        <option value="system">System</option>
+        <option value="yotsuba">Yotsuba</option>
+        <option value="yotsuba-b">Yotsuba B</option>
+        <option value="futaba">Futaba</option>
+        <option value="burichan">Burichan</option>
+        <option value="tomorrow">Tomorrow</option>
+        <option value="photon">Photon</option>
+        <option value="light">Light</option>
+        <option value="oled-dark">OLED dark</option>
+      </select>
+    </label>
+
+    <h2 class="settings-subhead">Slideshow defaults</h2>
+    <p class="muted">Applied every time you open the slideshow or portrait wall. Changing the
+      speed/loop/shuffle controls inside a slideshow only affects that session.</p>
+    <label class="settings-field mono small">
+      default speed
+      <select id="settings-default-speed">
+        <option value="2000">2s</option>
+        <option value="3000">3s</option>
+        <option value="5000">5s</option>
+        <option value="8000">8s</option>
+        <option value="15000">15s</option>
+        <option value="30000">30s</option>
+      </select>
+    </label>
+    <label class="settings-checkbox mono small">
+      <input id="settings-default-loop" type="checkbox"> loop by default
+    </label>
+    <label class="settings-checkbox mono small">
+      <input id="settings-default-shuffle" type="checkbox"> shuffle by default
+    </label>
+
+    <h2 class="settings-subhead">Backup reminders</h2>
+    <p class="muted">
+      The source list is the one thing here that's genuinely hard to recreate if lost —
+      the downloaded files are just a cache. This shows a dismissible sidebar reminder
+      once it's been this many days since your last export.
+    </p>
+    <label class="settings-field mono small">
+      remind me every
+      <input id="settings-export-reminder-days" type="number" min="1" max="365" step="1"> days
+    </label>
+
+    <div class="modal-actions">
+      <button id="settings-cancel" class="btn btn-ghost">Cancel</button>
+      <button id="settings-save" class="btn btn-accent">Save</button>
+    </div>
+  </div>
+</div>
+
+<!-- Lightbox -->
+<div id="lightbox" class="lightbox" hidden>
+  <button class="lightbox-close" id="lightbox-close" title="Close (Esc)">✕</button>
+  <button class="lightbox-nav prev" id="lightbox-prev" title="Previous (←)">‹</button>
+  <div class="lightbox-stage" id="lightbox-stage"></div>
+  <button class="lightbox-nav next" id="lightbox-next" title="Next (→)">›</button>
+  <div class="lightbox-footer">
+    <div class="lightbox-footer-row">
+      <div class="lightbox-meta mono small" id="lightbox-meta"></div>
+      <button class="btn btn-accent" id="lightbox-start-slideshow">▶ slideshow from here</button>
+    </div>
+    <div class="lightbox-footer-row">
+      <div id="lightbox-rating" class="star-rating"></div>
+      <div id="lightbox-tags" class="tag-row"></div>
+      <div class="tag-add">
+        <input id="lightbox-tag-input" type="text" placeholder="add tag…" class="mono small" maxlength="40">
+        <button id="lightbox-tag-add-btn" class="btn btn-ghost btn-sm">+ tag</button>
+      </div>
+    </div>
+  </div>
+</div>
+
+<!-- Slideshow -->
+<div id="slideshow" class="slideshow" hidden>
+  <button class="slideshow-close" id="slideshow-close" title="Exit (Esc)">✕</button>
+  <div class="slideshow-progress"><div id="slideshow-progress-fill" class="slideshow-progress-fill"></div></div>
+  <div class="slideshow-stage" id="slideshow-stage"></div>
+  <div class="slideshow-controls">
+    <span id="slideshow-index" class="mono"></span>
+    <button id="ss-prev" class="btn btn-ghost">‹ prev</button>
+    <button id="ss-playpause" class="btn btn-accent">⏸ pause</button>
+    <button id="ss-next" class="btn btn-ghost">next ›</button>
+    <button id="ss-fullscreen" class="btn btn-ghost">⛶ fullscreen</button>
+    <label class="mono small ss-field">speed
+      <select id="ss-speed">
+        <option value="2000">2s</option>
+        <option value="3000" selected>3s</option>
+        <option value="5000">5s</option>
+        <option value="8000">8s</option>
+        <option value="15000">15s</option>
+        <option value="30000">30s</option>
+      </select>
+    </label>
+    <label class="mono small ss-field"><input type="checkbox" id="ss-loop" checked> loop</label>
+    <label class="mono small ss-field"><input type="checkbox" id="ss-shuffle"> shuffle</label>
+    <button id="ss-exit" class="btn btn-ghost">exit ✕</button>
+  </div>
+  <p class="slideshow-hint mono small">videos play to completion before advancing (use the video's own controls to pause/seek/mute) · space = play/pause · ←/→ or swipe = step · f = fullscreen · esc = exit</p>
+</div>
+
+<div id="portrait-wall" class="portrait-wall" hidden>
+  <button class="pw-fullscreen" id="pw-fullscreen" title="Fullscreen (f)">⛶</button>
+  <button class="pw-close" id="pw-close" title="Exit (Esc)">✕</button>
+  <div class="pw-panes">
+    <div class="pw-pane">
+      <div class="pw-pane-media" id="pw-pane-media-0"></div>
+    </div>
+    <div class="pw-pane">
+      <div class="pw-pane-media" id="pw-pane-media-1"></div>
+    </div>
+    <div class="pw-pane">
+      <div class="pw-pane-media" id="pw-pane-media-2"></div>
+    </div>
+  </div>
+  <p class="pw-hint mono small">pictures swap on the slideshow's speed setting · videos swap when they finish · f = fullscreen · esc = exit</p>
+</div>
+
+<div id="feed" class="feed" hidden>
+  <button class="feed-close" id="feed-close" title="Exit (Esc)">✕</button>
+  <div class="feed-scroll" id="feed-scroll"></div>
+</div>
+
+<!-- Live browse (merged in from the separate "Contact Sheet" project) —
+     streams straight from gallery-dl's listing output, downloads nothing. -->
+<div id="live-browse" class="live-browse" hidden>
+  <header class="pv-topbar">
+    <div class="pv-topbar-row">
+      <span class="pv-title mono small">◍ live browse — streams from the source, nothing saved to disk</span>
+      <button id="pv-close" class="btn btn-ghost" title="Close (Esc)">✕ close</button>
+    </div>
+    <form id="pv-add-form" class="pv-add-row">
+      <textarea id="pv-add-url" class="pv-add-textarea mono small" rows="1" placeholder="paste one or more creator/gallery URLs (one per line, or comma-separated)…" spellcheck="false"></textarea>
+      <button type="submit" id="pv-add-btn" class="btn btn-accent">Add</button>
+      <button type="button" id="pv-search-toggle" class="btn btn-ghost">🔍 search</button>
+    </form>
+    <div id="pv-add-status" class="pv-status mono small"></div>
+  </header>
+
+  <section id="pv-search-panel" class="pv-search-panel" hidden>
+    <div class="pv-search-row">
+      <input id="pv-search-query" type="text" class="mono small" placeholder="creator name…" spellcheck="false">
+      <button id="pv-search-btn" class="btn btn-accent">Search</button>
+      <button id="pv-manage-sites-btn" class="btn btn-ghost">⚙ sites</button>
+    </div>
+    <div id="pv-search-chips" class="pv-chips"></div>
+    <div id="pv-search-status" class="pv-status mono small"></div>
+    <div id="pv-search-batch-bar" class="pv-batch-bar" hidden>
+      <label class="mono small"><input type="checkbox" id="pv-search-select-all"> select all</label>
+      <button id="pv-search-add-selected" class="btn btn-ghost btn-sm">+ add selected (<span id="pv-search-selected-count">0</span>)</button>
+    </div>
+    <div id="pv-search-results" class="pv-results"></div>
+  </section>
+
+  <div class="pv-body">
+    <aside class="pv-sidebar">
+      <div class="pv-sidebar-label mono small muted">live sources</div>
+      <div class="pv-view-toggle" role="tablist">
+        <button class="pv-view-btn active" data-pv-view="creator" type="button">by source</button>
+        <button class="pv-view-btn" data-pv-view="all" type="button">all, shuffled</button>
+      </div>
+      <div id="pv-source-list" class="pv-source-list">
+        <div class="pv-empty-hint mono small muted">no sources yet — paste a URL above</div>
+      </div>
+    </aside>
+    <main class="pv-main">
+      <div class="pv-toolbar">
+        <span id="pv-status" class="mono small muted">0 items</span>
+        <div class="pv-toolbar-actions">
+          <button id="pv-shuffle-btn" class="btn btn-ghost btn-sm">⤮ shuffle</button>
+          <button id="pv-slideshow-btn" class="btn btn-accent btn-sm">▶ slideshow</button>
+          <select id="pv-speed-select" class="btn btn-ghost btn-sm mono small">
+            <option value="3000">3s</option>
+            <option value="5000" selected>5s</option>
+            <option value="8000">8s</option>
+            <option value="12000">12s</option>
+            <option value="20000">20s</option>
+          </select>
+        </div>
+      </div>
+      <div id="pv-grid" class="pv-grid"></div>
+      <div id="pv-grid-empty" class="pv-grid-empty mono small muted" hidden>Add a creator URL above to start browsing.</div>
+    </main>
+  </div>
+</div>
+
+<div id="pv-lightbox" class="lightbox" hidden>
+  <button class="lightbox-close" id="pv-lb-close" title="Close (Esc)">✕</button>
+  <button class="lightbox-nav prev" id="pv-lb-prev" title="Previous (←)">‹</button>
+  <div class="lightbox-stage" id="pv-lb-stage"></div>
+  <button class="lightbox-nav next" id="pv-lb-next" title="Next (→)">›</button>
+  <div class="lightbox-footer">
+    <div class="lightbox-footer-row">
+      <div class="lightbox-meta mono small" id="pv-lb-meta"></div>
+      <button class="btn btn-accent btn-sm" id="pv-lb-add-to-library">+ add to library</button>
+    </div>
+  </div>
+</div>
+
+<div id="pv-sites-modal" class="modal-overlay" hidden>
+  <div class="modal">
+    <h2>Search sites</h2>
+    <p class="muted">
+      Each site needs a search-URL template with <code>{query}</code> where the creator name goes,
+      e.g. <code>https://example.com/search?q={query}</code>. It only works if gallery-dl has an
+      extractor that treats that URL as a listing/search page — test it yourself first:
+      <code>gallery-dl -j "&lt;url with a real name filled in&gt;"</code>. If that doesn't print
+      JSON, the template won't work here either.
+    </p>
+    <div id="pv-sites-editor" class="pv-sites-editor"></div>
+    <div class="pv-sites-add-row">
+      <input id="pv-site-label" type="text" class="mono small" placeholder="label (e.g. MySite)">
+      <input id="pv-site-url" type="text" class="mono small" placeholder="https://.../search?q={query}">
+      <button id="pv-site-add-btn" class="btn btn-ghost btn-sm">Add site</button>
+    </div>
+    <div class="modal-actions">
+      <button id="pv-sites-close-btn" class="btn btn-accent">Done</button>
+    </div>
+  </div>
+</div>
+
+<div id="toast" class="toast" hidden></div>
+<div id="source-menu" class="source-menu" hidden></div>
+
+<div id="vr-overlay" class="vr-overlay" hidden>
+  <button class="vr-exit" id="vr-exit" title="Exit VR view">✕ exit</button>
+  <p class="vr-hint mono small">put on your headset and use its "Enter VR" control — this screen is the fallback flat view</p>
+  <div id="vr-container"></div>
+</div>
+
+<script src="https://cdnjs.cloudflare.com/ajax/libs/three.js/r128/three.min.js"></script>
+<script src="/app.js"></script>
+</body>
+</html>

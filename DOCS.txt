@@ -126,6 +126,37 @@ toolbar, and both apply to groups too (see above) — tag a group from its
 sidebar tag button (🏷).
 
 
+NSFW AUTO-RATING (OPTIONAL)
+------------------------------
+Curator can run newly-downloaded photos through a local NSFW classifier and
+set their star rating automatically for anything not already rated by
+hand — 1★ clothed/safe up to 5★ extremely explicit, five even bands across
+the classifier's 0-1 score. It also works backward through your existing
+library in the background. A rating you (or a previous auto-rating pass)
+already set is never overwritten. This reuses the same rating system as
+manual ratings above — there's no separate "NSFW score" anywhere — so once
+it's run, the "all ratings" dropdown in the toolbar doubles as a content
+filter: "hide 3★+ (explicit)" hides anything auto-rated (or manually rated)
+explicit or worse, while leaving not-yet-rated files visible so your library
+doesn't appear to empty out while a big backlog is still being scored.
+
+This is entirely optional and off by default. To use it:
+
+  1. Install Python 3 if you don't already have it.
+  2. pip install "numpy<2" opennsfw-standalone
+  3. Turn on "enable NSFW auto-rating" in Settings, then restart Curator —
+     enabling/disabling this needs a restart, since it decides whether the
+     classifier process gets started at all.
+
+Curator writes its own copy of the worker script (nsfw_worker.py) into your
+data directory on every startup, so there's nothing else to install or copy
+by hand. If the Python dependencies aren't installed, or Python itself
+isn't on your PATH, this fails quietly — curator.log will show a warning,
+but nothing else in Curator depends on this or is affected by it.
+
+Video files aren't scored (photos only, for now).
+
+
 EXPORT / IMPORT
 -----------------
 "export list" in the sidebar footer downloads a JSON backup of every
@@ -179,6 +210,9 @@ TROUBLESHOOTING
 - "gallery-dl could not be launched" -> ensure gallery-dl is installed and on your PATH.
 - A source stuck on "error" -> hover its row for the last bit of gallery-dl's output.
 - Port already in use -> another curator.exe is running, or change the port in source.
+- NSFW auto-rating stuck off / nothing getting rated -> check curator.log for
+  "nsfw worker" warnings; usually means Python isn't on PATH or
+  opennsfw-standalone (and numpy<2) aren't installed for that Python.
 
 A NOTE ON USE
 ---------------

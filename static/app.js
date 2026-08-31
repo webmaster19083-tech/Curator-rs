@@ -87,6 +87,7 @@ const state = {
   typeFilter: 'all',       // 'all' | 'image' | 'video' — applied client-side in loadView()
   sortOrder: 'default',    // one of _MEDIA_SORT_ORDERS' keys server-side
   tagFilter: '',           // tag name, or '' for no filter
+  maxRatingFilter: '',     // '' for no filter, else '1'..'4' — hide rating > this (0/unrated always shown)
   downloadsPaused: false,
   lightboxIndex: -1,
   page: 0,
@@ -239,6 +240,10 @@ function bindGlobalUI() {
   });
   el('#tag-filter-select').addEventListener('change', (e) => {
     state.tagFilter = e.target.value;
+    loadView();
+  });
+  el('#max-rating-select').addEventListener('change', (e) => {
+    state.maxRatingFilter = e.target.value;
     loadView();
   });
   document.querySelectorAll('.type-filter-btn').forEach((btn) => {
@@ -861,6 +866,7 @@ async function openSettingsModal() {
   el('#settings-default-loop').checked = !!appSettings.default_slideshow_loop;
   el('#settings-default-shuffle').checked = !!appSettings.default_slideshow_shuffle;
   el('#settings-export-reminder-days').value = appSettings.export_reminder_days;
+  el('#settings-nsfw-filter-enabled').checked = !!appSettings.nsfw_filter_enabled;
   el('#settings-modal').hidden = false;
 }
 function closeSettingsModal() { el('#settings-modal').hidden = true; }
@@ -870,6 +876,8 @@ async function saveSettings() {
   const maxConcurrent = Number.isFinite(rawConcurrent) ? Math.max(1, Math.min(20, rawConcurrent)) : 6;
   const rawReminderDays = parseInt(el('#settings-export-reminder-days').value, 10);
   const reminderDays = Number.isFinite(rawReminderDays) ? Math.max(1, Math.min(365, rawReminderDays)) : 30;
+  const nsfwFilterEnabled = el('#settings-nsfw-filter-enabled').checked;
+  const nsfwFilterChanged = !!appSettings.nsfw_filter_enabled !== nsfwFilterEnabled;
   const body = {
     max_concurrent: maxConcurrent,
     theme: el('#settings-theme').value,
@@ -877,13 +885,14 @@ async function saveSettings() {
     default_slideshow_loop: el('#settings-default-loop').checked,
     default_slideshow_shuffle: el('#settings-default-shuffle').checked,
     export_reminder_days: reminderDays,
+    nsfw_filter_enabled: nsfwFilterEnabled,
   };
   try {
     const data = await api('/api/settings', { method: 'PATCH', body: JSON.stringify(body) });
     appSettings = { ...appSettings, ...data };
     applyTheme(appSettings.theme);
     closeSettingsModal();
-    toast('Settings saved');
+    toast(nsfwFilterChanged ? 'Settings saved — restart Curator for NSFW auto-rating to take effect' : 'Settings saved');
     renderExportReminderBanner();
   } catch (e) {
     toast('Could not save settings: ' + e.message, true);
@@ -1253,7 +1262,8 @@ async function loadView() {
   const sorting = state.sortOrder && state.sortOrder !== 'default';
   const extraParams =
     (sorting ? `&sort=${state.sortOrder}` : '') +
-    (state.tagFilter ? `&tag=${encodeURIComponent(state.tagFilter)}` : '');
+    (state.tagFilter ? `&tag=${encodeURIComponent(state.tagFilter)}` : '') +
+    (state.maxRatingFilter !== '' ? `&max_rating=${state.maxRatingFilter}` : '');
   try {
     if (state.view.type === 'creator') {
       const data = await api(`/api/media?source_id=${state.view.id}${extraParams}`);

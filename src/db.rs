@@ -62,6 +62,16 @@ pub struct Settings {
 
     #[serde(default = "default_ch_default_media_type")]
     pub ch_default_media_type: String,
+
+    // NSFW auto-rating (opt-in, requires the Python worker's dependencies
+    // to be installed — see nsfw_worker.py). Enabling/disabling takes effect
+    // on next restart, since it decides whether the worker process gets
+    // started at all. Classified items get their existing star `rating`
+    // set automatically (1=clothed .. 5=extremely explicit) — see nsfw.rs —
+    // so filtering/sorting by rating "just works" with no separate score
+    // column or threshold setting needed.
+    #[serde(default)]
+    pub nsfw_filter_enabled: bool,
 }
 
 impl Default for Settings {
@@ -80,6 +90,7 @@ impl Default for Settings {
             ch_default_limit:               default_ch_default_limit(),
             ch_default_shuffle:             default_ch_default_shuffle(),
             ch_default_media_type:          default_ch_default_media_type(),
+            nsfw_filter_enabled:            false,
         }
     }
 }

@@ -109,6 +109,13 @@
         <select id="tag-filter-select" class="btn btn-ghost" title="Filter by tag">
           <option value="">all tags</option>
         </select>
+        <select id="max-rating-select" class="btn btn-ghost" title="Hide anything rated above this — includes NSFW auto-rating, if enabled in settings. Unrated items always stay visible.">
+          <option value="">all ratings</option>
+          <option value="4">hide 5★</option>
+          <option value="3">hide 4★+</option>
+          <option value="2">hide 3★+ (explicit)</option>
+          <option value="1">hide 2★+</option>
+        </select>
         <button id="shuffle-btn" class="btn btn-ghost" title="Reshuffle current view">⤮ shuffle</button>
         <button id="portrait-wall-btn" class="btn btn-ghost" title="3 portrait files at once, each swapping out independently">▦ portrait wall</button>
         <button id="feed-btn" class="btn btn-ghost" title="Full-screen scrolling feed">▤ feed</button>
@@ -204,6 +211,20 @@
     <label class="settings-field mono small">
       remind me every
       <input id="settings-export-reminder-days" type="number" min="1" max="365" step="1"> days
+    </label>
+
+    <h2 class="settings-subhead">NSFW auto-rating</h2>
+    <p class="muted">
+      Runs newly-downloaded (and, in the background, existing) photos through a local
+      classifier and sets their star rating automatically — 1★ clothed/safe up to 5★
+      extremely explicit — for anything not already rated by hand. Use the
+      "all ratings" dropdown in the toolbar to hide content above a rating cutoff.
+      Requires Python plus the <code>opennsfw-standalone</code> package to be installed
+      separately (see <code>curator --docs</code>) — nothing else in Curator depends on
+      this, so it's fine to leave off. Toggling this needs a restart to take effect.
+    </p>
+    <label class="settings-checkbox mono small">
+      <input id="settings-nsfw-filter-enabled" type="checkbox"> enable NSFW auto-rating (restart required)
     </label>
 
     <div class="modal-actions">

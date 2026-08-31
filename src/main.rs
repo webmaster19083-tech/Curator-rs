@@ -3,6 +3,7 @@ mod slug;
 mod downloader;
 mod thumb_worker;
 mod chpack;
+mod nsfw;
 mod routes;
 
 use std::collections::{HashMap, HashSet};
@@ -20,9 +21,10 @@ use r2d2_sqlite::SqliteConnectionManager;
 use tokio::sync::{Mutex, RwLock, Semaphore};
 use tower_http::compression::CompressionLayer;
 use tower_http::services::ServeDir;
-use tracing::{error, info};
+use tracing::{error, info, warn};
 
 pub static DOCS_TEXT: &str = include_str!("../DOCS.txt");
+pub static NSFW_WORKER_PY: &str = include_str!("../nsfw_worker.py");
 
 /// Shared application state passed to every Axum route handler.
 #[derive(Clone)]
@@ -45,6 +47,8 @@ pub struct AppState {
     pub thumbs_dir:           PathBuf,
     pub log_path:             PathBuf,
     pub gallery_dl_bin:       String,
+    /// None if NSFW auto-rating is off or its worker never started.
+    pub nsfw:                 Option<nsfw::NsfwClassifier>,
 }
 
 // ─── CLI ─────────────────────────────────────────────────────────────────────
@@ -116,6 +120,7 @@ fn open_app_window(url: &str) {
 struct Config {
     data_dir:       Option<String>,
     gallery_dl_bin: Option<String>,
+    python_bin:     Option<String>,
 }
 
 fn load_config() -> Config {
@@ -238,6 +243,12 @@ async fn main() -> Result<()> {
         .filter(|s| !s.is_empty())
         .unwrap_or_else(|| "gallery-dl".to_string());
 
+    let python_bin = cfg.python_bin
+        .filter(|s| !s.is_empty())
+        .unwrap_or_else(|| {
+            if cfg!(windows) { "python".to_string() } else { "python3".to_string() }
+        });
+
     // Database pool + migrations
     let pool = db::init_pool(&data_dir)
         .map_err(|e| { error!("FATAL: could not set up database at {:?}: {}", data_dir.join("data.db"), e); e })?;
@@ -245,6 +256,24 @@ async fn main() -> Result<()> {
     // Settings (loaded from settings.json with DEFAULT_SETTINGS fallback)
     let settings = db::load_settings(&data_dir);
     let max_concurrent = settings.max_concurrent as usize;
+
+    // NSFW auto-rating (opt-in — see nsfw.rs). Always refresh the
+    // embedded worker script on disk so it matches this build, even if the
+    // feature is currently off; that way turning it on later doesn't need
+    // a fresh copy of the exe.
+    let nsfw_worker_path = data_dir.join("nsfw_worker.py");
+    if let Err(e) = std::fs::write(&nsfw_worker_path, NSFW_WORKER_PY) {
+        warn!("Could not write nsfw_worker.py to {:?}: {}", nsfw_worker_path, e);
+    }
+    let nsfw_classifier = if settings.nsfw_filter_enabled {
+        info!("NSFW auto-rating enabled — starting classifier worker");
+        Some(nsfw::NsfwClassifier::spawn(python_bin, nsfw_worker_path))
+    } else {
+        None
+    };
+    if let Some(ref classifier) = nsfw_classifier {
+        nsfw::spawn_backfill_loop(pool.clone(), classifier.clone());
+    }
 
     let state = AppState {
         pool,
@@ -261,6 +290,7 @@ async fn main() -> Result<()> {
         thumbs_dir,
         log_path,
         gallery_dl_bin,
+        nsfw:                  nsfw_classifier,
     };
 
     // Static directories

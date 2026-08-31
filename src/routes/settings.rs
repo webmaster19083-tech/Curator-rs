@@ -32,6 +32,8 @@ pub struct PatchSettingsBody {
     pub ch_default_limit:             Option<u32>,
     pub ch_default_shuffle:           Option<bool>,
     pub ch_default_media_type:        Option<String>,
+    // NSFW auto-rating
+    pub nsfw_filter_enabled:          Option<bool>,
 }
 
 // ─── GET /api/settings ───────────────────────────────────────────────────────
@@ -82,6 +84,9 @@ pub async fn patch(
     if let Some(v) = body.ch_default_limit        { settings.ch_default_limit = v; }
     if let Some(v) = body.ch_default_shuffle      { settings.ch_default_shuffle = v; }
     if let Some(v) = body.ch_default_media_type  { settings.ch_default_media_type = v; }
+    if let Some(v) = body.nsfw_filter_enabled {
+        settings.nsfw_filter_enabled = v;
+    }
 
     save_settings(&state.data_dir, &*settings);
     Ok(Json(serde_json::to_value(&*settings).unwrap_or_default()))

@@ -35,6 +35,10 @@ pub struct MediaQuery {
     only_included: Option<bool>,
     tag:           Option<String>,
     sort:          Option<String>,
+    /// Hide anything rated above this (0 = unrated is always shown
+    /// regardless, since it hasn't been rated — manually or by the NSFW
+    /// auto-rater — yet).
+    max_rating:    Option<i64>,
 }
 
 pub async fn list(
@@ -69,7 +73,7 @@ pub async fn list(
     // Build scope SQL. Constructed here (after the awaits above) rather than
     // at the top of the function, since `scope_params` holds `Box<dyn ToSql>`
     // trait objects which are !Send and must not be live across an `.await`.
-    let (scope_sql, scope_params): (&str, Vec<Box<dyn rusqlite::ToSql>>) =
+    let (scope_sql, mut scope_params): (&str, Vec<Box<dyn rusqlite::ToSql>>) =
         if let Some(sid) = q.source_id {
             ("SELECT id FROM media WHERE source_id=?1", vec![Box::new(sid)])
         } else if let Some(gid) = q.group_id {
@@ -94,15 +98,24 @@ pub async fn list(
             ("SELECT id FROM media", vec![])
         };
 
+    // rating=0 (unrated — by a user or by the NSFW auto-rater) always stays
+    // visible; only rows rated *above* the cutoff are excluded.
+    let rating_clause = if let Some(max_r) = q.max_rating {
+        scope_params.push(Box::new(max_r));
+        format!(" AND (m.rating = 0 OR m.rating <= ?{})", scope_params.len())
+    } else {
+        String::new()
+    };
+
     let query = format!(
         "SELECT m.*, s.group_id AS _source_group_id, \
             (SELECT GROUP_CONCAT(t.name, ',') FROM media_tags mt \
              JOIN tags t ON t.id = mt.tag_id WHERE mt.media_id = m.id) AS tags_csv \
          FROM media m \
          JOIN sources s ON s.id = m.source_id \
-         WHERE m.id IN ({}) \
+         WHERE m.id IN ({}){} \
          ORDER BY {}",
-        scope_sql, order
+        scope_sql, rating_clause, order
     );
 
     let rows: Vec<HashMap<String, Value>> = {

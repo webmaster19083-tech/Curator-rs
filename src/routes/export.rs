@@ -1,213 +1,242 @@
 use std::sync::Arc;
+
 use axum::{
+    body::Body,
     extract::State,
-    http::header,
-    response::IntoResponse,
+    http::{header, StatusCode},
+    response::{IntoResponse, Response},
     Json,
 };
-use rusqlite::params;
 use serde::Deserialize;
-use serde_json::json;
+use serde_json::{json, Value};
+use tokio::fs::File;
+use tokio_util::io::ReaderStream;
 
-use crate::{chpack, db, slug::{derive_name_from_url, normalize_for_compare, normalize_url, slugify}, state::AppState};
-use super::{bad_request, AppError};
+use crate::AppState;
+use crate::chpack::{build_chpack, safe_pack_filename, ExportRow};
+use crate::db::{now_iso, save_settings};
+use crate::routes::media::db_err;
+use crate::routes::sources::create_sources_from_urls;
+use crate::slug::normalize_for_compare;
 
-// ── Source list export ───────────────────────────────────────────────────────
+// ─── GET /api/export ─────────────────────────────────────────────────────────
 
-pub async fn export_sources(
-    State(state): State<Arc<AppState>>,
-) -> Result<impl IntoResponse, AppError> {
-    let conn = state.pool.get().map_err(anyhow::Error::from)?;
-    let sources: Vec<serde_json::Value> = {
+pub async fn export_sources(State(state): State<Arc<AppState>>) -> Result<Json<Value>, (StatusCode, Json<Value>)> {
+    // rusqlite's Connection/Statement are !Send, so they must be dropped
+    // before the `.await` below rather than held across it.
+    let sources: Vec<Value> = {
+        let conn = state.pool.get().map_err(db_err)?;
         let mut stmt = conn.prepare(
-            "SELECT s.url, s.name, s.slug, s.added_at, s.synced_at, g.name AS group_name,
-                (SELECT GROUP_CONCAT(t.name, ',') FROM group_tags gt
-                 JOIN tags t ON t.id=gt.tag_id WHERE gt.group_id=s.group_id) AS tags_csv
-             FROM sources s LEFT JOIN groups g ON g.id=s.group_id
-             ORDER BY s.added_at",
-        )?;
-        let sources: Vec<serde_json::Value> = stmt.query_map([], |r| {
-            Ok(json!({
-                "url": r.get::<_,String>(0)?,
-                "name": r.get::<_,String>(1)?,
-                "slug": r.get::<_,String>(2)?,
-                "added_at": r.get::<_,String>(3)?,
-                "synced_at": r.get::<_,Option<String>>(4)?,
-                "group": r.get::<_,Option<String>>(5)?,
-                "tags": r.get::<_,Option<String>>(6)?
-                    .as_deref().unwrap_or("")
-                    .split(',').filter(|s| !s.is_empty())
-                    .collect::<Vec<_>>(),
-            }))
-        })?.filter_map(|r| r.ok()).collect();
-        sources
+            "SELECT s.name, s.url, s.included, g.name AS group_name \
+             FROM sources s LEFT JOIN groups g ON g.id = s.group_id \
+             ORDER BY s.added_at"
+        ).map_err(db_err)?;
+
+        let out = stmt.query_map([], |r| Ok(json!({
+            "name":     r.get::<_, String>(0)?,
+            "url":      r.get::<_, String>(1)?,
+            "included": r.get::<_, i64>(2)? != 0,
+            "group":    r.get::<_, Option<String>>(3)?,
+        }))).map_err(db_err)?
+        .filter_map(|r| r.ok())
+        .collect();
+        out
     };
 
-    // Update last_export_at + clear snooze
-    let now = db::now_iso();
+    let exported_at = now_iso();
+
+    // Reset backup reminder clock
     {
-        let mut s = state.settings.write().await;
-        s.last_export_at = Some(now.clone());
-        s.export_reminder_snoozed_until = None;
-        s.save(&state.data_dir).map_err(anyhow::Error::from)?;
+        let mut settings = state.settings.write().await;
+        settings.last_export_at               = Some(exported_at.clone());
+        settings.export_reminder_snoozed_until = None;
+        save_settings(&state.data_dir, &*settings);
     }
 
-    let payload = json!({
-        "version": 1,
-        "exported_at": now,
-        "sources": sources,
-    });
-
-    let json_bytes = serde_json::to_vec_pretty(&payload).map_err(anyhow::Error::from)?;
-    Ok((
-        [
-            (header::CONTENT_TYPE, "application/json"),
-            (header::CONTENT_DISPOSITION, "attachment; filename=\"curator-sources.json\""),
-        ],
-        json_bytes,
-    ).into_response())
+    Ok(Json(json!({ "exported_at": exported_at, "sources": sources })))
 }
 
-// ── Source list import ───────────────────────────────────────────────────────
+// ─── POST /api/import ────────────────────────────────────────────────────────
+
+#[derive(Deserialize)]
+pub struct ImportBody {
+    pub sources: Vec<Value>,
+}
 
 pub async fn import_sources(
     State(state): State<Arc<AppState>>,
-    Json(body): Json<serde_json::Value>,
-) -> Result<impl IntoResponse, AppError> {
-    let sources = body["sources"].as_array()
-        .ok_or_else(|| bad_request("Expected {\"sources\": [...]}"))?;
+    Json(body):   Json<ImportBody>,
+) -> Result<Json<Value>, (StatusCode, Json<Value>)> {
+    let urls: Vec<String> = body.sources.iter()
+        .filter_map(|s| s.get("url").and_then(|v| v.as_str()).map(|s| s.to_string()))
+        .collect();
 
-    let conn = state.pool.get().map_err(anyhow::Error::from)?;
-    let existing: std::collections::HashMap<String, ()> = {
-        let mut stmt = conn.prepare("SELECT url FROM sources")?;
-        let existing: std::collections::HashMap<String, ()> = stmt.query_map([], |r| r.get::<_,String>(0))?
-            .filter_map(|r| r.ok())
-            .map(|url| (normalize_for_compare(&url), ()))
-            .collect();
-        existing
-    };
-
-    let mut added = 0usize;
-    let mut skipped = 0usize;
-
-    for entry in sources {
-        let url = entry["url"].as_str().unwrap_or("").trim().to_string();
-        if url.is_empty() { skipped += 1; continue; }
-        let url = normalize_url(&url);
-        if existing.contains_key(&normalize_for_compare(&url)) { skipped += 1; continue; }
-
-        let name = entry["name"].as_str().unwrap_or("")
-            .trim().to_string();
-        let name = if name.is_empty() { derive_name_from_url(&url) } else { name };
-        let ts = db::now_iso();
-        let id: i64 = conn.query_row(
-            "INSERT INTO sources (name, url, slug, status, added_at) VALUES (?,?,?,'pending',?) RETURNING id",
-            params![name, url, "__tmp__", ts],
-            |r| r.get(0),
-        ).map_err(anyhow::Error::from)?;
-        let slug = format!("{id}-{}", slugify(&name));
-        conn.execute("UPDATE sources SET slug=? WHERE id=?", params![slug, id])?;
-        tokio::spawn(crate::downloader::run_download(Arc::clone(&state), id));
-        added += 1;
+    if urls.is_empty() {
+        return Err((StatusCode::BAD_REQUEST, Json(json!({"error": "No valid entries to import"}))));
     }
 
-    Ok(Json(json!({"added": added, "skipped": skipped})))
+    let result = create_sources_from_urls(Arc::clone(&state), urls).await?;
+
+    // Best-effort: restore group assignments from the import file
+    if result["sources"].as_array().map(|a| !a.is_empty()).unwrap_or(false) {
+        let entries_by_url: std::collections::HashMap<String, String> = body.sources.iter()
+            .filter_map(|s| {
+                let url   = s.get("url")?.as_str()?.to_string();
+                let group = s.get("group")?.as_str()?.to_string();
+                if group.is_empty() { return None; }
+                Some((normalize_for_compare(&url), group))
+            })
+            .collect();
+
+        if !entries_by_url.is_empty() {
+            let conn = state.pool.get().map_err(db_err)?;
+            let mut group_by_name: std::collections::HashMap<String, i64> = {
+                let mut stmt = conn.prepare("SELECT id, name FROM groups").map_err(db_err)?;
+                let rows = stmt.query_map([], |r| Ok((r.get::<_, String>(1)?, r.get::<_, i64>(0)?)))
+                    .map_err(db_err)?
+                    .filter_map(|r| r.ok())
+                    .collect();
+                rows
+            };
+
+            if let Some(created) = result["sources"].as_array() {
+                for src in created {
+                    let url   = src["url"].as_str().unwrap_or("");
+                    let src_id = src["id"].as_i64().unwrap_or(0);
+                    if src_id == 0 { continue; }
+
+                    let gname = match entries_by_url.get(&normalize_for_compare(url)) {
+                        Some(g) => g.clone(),
+                        None    => continue,
+                    };
+
+                    let gid = if let Some(&id) = group_by_name.get(&gname) {
+                        id
+                    } else {
+                        conn.execute("INSERT INTO groups (name, added_at) VALUES (?1,?2)", rusqlite::params![gname, now_iso()])
+                            .map_err(db_err)?;
+                        let new_id = conn.last_insert_rowid();
+                        group_by_name.insert(gname, new_id);
+                        new_id
+                    };
+
+                    let _ = conn.execute("UPDATE sources SET group_id=?1 WHERE id=?2", rusqlite::params![gid, src_id]);
+                }
+            }
+
+            // Invalidate group tag cache
+            *state.group_tag_cache.write().await = None;
+        }
+    }
+
+    Ok(Json(result))
 }
 
-// ── CockHero .chpack export ──────────────────────────────────────────────────
+// ─── POST /api/export/chpack ─────────────────────────────────────────────────
 
 #[derive(Deserialize)]
-pub struct ChpackRequest {
-    pub source_id: Option<i64>,
-    pub name: Option<String>,
+pub struct ChpackBody {
+    pub source_id:   Option<i64>,
+    pub name:        Option<String>,
     #[serde(default = "default_author")]
-    pub author: String,
+    pub author:      String,
     #[serde(default)]
     pub description: String,
     #[serde(default)]
     pub unlock_cost: i64,
 }
-
 fn default_author() -> String { "Curator".into() }
 
 pub async fn export_chpack(
     State(state): State<Arc<AppState>>,
-    Json(body): Json<ChpackRequest>,
-) -> Result<impl IntoResponse, AppError> {
-    let conn = state.pool.get().map_err(anyhow::Error::from)?;
-
-    // Resolve pack name
-    let pack_name = if let Some(ref n) = body.name {
-        if !n.trim().is_empty() { n.trim().to_string() } else { default_pack_name(&conn, body.source_id) }
-    } else {
-        default_pack_name(&conn, body.source_id)
+    Json(body):   Json<ChpackBody>,
+) -> Response {
+    let conn = match state.pool.get() {
+        Ok(c)  => c,
+        Err(e) => return (StatusCode::INTERNAL_SERVER_ERROR, Json(json!({"error": e.to_string()}))).into_response(),
     };
 
-    // Fetch media rows
-    let rows: Vec<chpack::MediaRow> = {
-        let (where_sql, id_param): (&str, Option<i64>) = match body.source_id {
-            Some(sid) => ("AND m.source_id=?", Some(sid)),
-            None => ("", None),
-        };
-        let sql = format!(
-            "SELECT m.filepath, m.rating, m.type,
-                (SELECT GROUP_CONCAT(t.name, ',') FROM media_tags mt
-                 JOIN tags t ON t.id=mt.tag_id WHERE mt.media_id=m.id) AS tags_csv
-             FROM media m WHERE m.downloaded=1 {where_sql} ORDER BY m.id"
-        );
-        let mut stmt = conn.prepare(&sql).map_err(anyhow::Error::from)?;
-        let params_vec: Vec<&dyn rusqlite::ToSql> = match &id_param {
-            Some(sid) => vec![sid],
-            None => vec![],
-        };
-        let out: Vec<_> = stmt.query_map(params_vec.as_slice(), |r| Ok(chpack::MediaRow {
-            filepath: r.get(0)?,
-            rating: r.get(1)?,
-            media_type: r.get(2)?,
-            tags_csv: r.get(3)?,
-        }))?.filter_map(|r| r.ok()).collect();
-        out
+    struct Row { filepath: String, kind: String, rating: i64, tags_csv: Option<String> }
+
+    let (pack_name, rows) = if let Some(sid) = body.source_id {
+        let src_name: Option<String> = conn.query_row(
+            "SELECT name FROM sources WHERE id=?1", [sid], |r| r.get(0)
+        ).ok();
+        if src_name.is_none() {
+            return (StatusCode::NOT_FOUND, Json(json!({"error": "Source not found"}))).into_response();
+        }
+        let pname = body.name.as_deref().unwrap_or(src_name.as_deref().unwrap_or("Curator Export")).to_string();
+
+        let mut stmt = conn.prepare(
+            "SELECT m.filepath, m.type, m.rating, \
+                (SELECT GROUP_CONCAT(t.name, ',') FROM media_tags mt JOIN tags t ON t.id=mt.tag_id WHERE mt.media_id=m.id) AS tags_csv \
+             FROM media m WHERE m.source_id=?1 AND m.downloaded=1 ORDER BY m.id"
+        ).unwrap();
+        let rows: Vec<Row> = stmt.query_map([sid], |r| Ok(Row {
+            filepath: r.get(0)?, kind: r.get(1)?, rating: r.get(2)?, tags_csv: r.get(3)?
+        })).unwrap().filter_map(|r| r.ok()).collect();
+
+        (pname, rows)
+    } else {
+        let pname = body.name.as_deref().unwrap_or("Curator Export").to_string();
+        let mut stmt = conn.prepare(
+            "SELECT m.filepath, m.type, m.rating, \
+                (SELECT GROUP_CONCAT(t.name, ',') FROM media_tags mt JOIN tags t ON t.id=mt.tag_id WHERE mt.media_id=m.id) AS tags_csv \
+             FROM media m WHERE m.downloaded=1 ORDER BY m.id"
+        ).unwrap();
+        let rows: Vec<Row> = stmt.query_map([], |r| Ok(Row {
+            filepath: r.get(0)?, kind: r.get(1)?, rating: r.get(2)?, tags_csv: r.get(3)?
+        })).unwrap().filter_map(|r| r.ok()).collect();
+
+        (pname, rows)
     };
 
     if rows.is_empty() {
-        return Err(bad_request("No downloaded media found for this selection"));
+        return (StatusCode::BAD_REQUEST, Json(json!({"error": "No downloaded media found for this selection"}))).into_response();
     }
 
-    let library_dir = state.data_dir.join("library");
-    let opts = chpack::ChpackOptions {
-        name: pack_name.clone(),
-        author: body.author.clone(),
-        description: body.description.clone(),
-        unlock_cost: body.unlock_cost,
-    };
+    let export_rows: Vec<ExportRow> = rows.into_iter().map(|r| ExportRow {
+        filepath: r.filepath,
+        kind:     r.kind,
+        rating:   r.rating,
+        tags:     r.tags_csv.as_deref().unwrap_or("").split(',')
+            .filter(|s| !s.is_empty())
+            .map(|s| s.trim().to_lowercase())
+            .collect(),
+    }).collect();
 
-    let tmp = tokio::task::spawn_blocking(move || {
-        chpack::build_chpack(&rows, &library_dir, &opts)
-    }).await.map_err(anyhow::Error::from)??;
+    let library_dir = state.library_dir.clone();
+    let filename    = safe_pack_filename(&pack_name);
+    let author      = body.author.clone();
+    let description = body.description.clone();
+    let unlock_cost = body.unlock_cost;
 
-    let bytes = tokio::fs::read(tmp.path()).await.map_err(anyhow::Error::from)?;
-    let safe_name = pack_name
-        .chars()
-        .map(|c| if c.is_alphanumeric() || c == '-' || c == '_' || c == '.' { c } else { '_' })
-        .collect::<String>();
-    let filename = format!("{safe_name}.chpack");
+    let result = tokio::task::spawn_blocking(move || {
+        build_chpack(pack_name, author, description, unlock_cost, export_rows, &library_dir)
+    }).await;
 
-    use axum::http::{HeaderMap, HeaderValue};
-    let mut headers = HeaderMap::new();
-    headers.insert(header::CONTENT_TYPE, HeaderValue::from_static("application/zip"));
-    headers.insert(
-        header::CONTENT_DISPOSITION,
-        HeaderValue::from_str(&format!("attachment; filename=\"{filename}\""))
-            .unwrap_or(HeaderValue::from_static("attachment")),
-    );
-    Ok((headers, bytes).into_response())
-}
-
-fn default_pack_name(conn: &rusqlite::Connection, source_id: Option<i64>) -> String {
-    if let Some(sid) = source_id {
-        conn.query_row("SELECT name FROM sources WHERE id=?", [sid], |r| r.get(0))
-            .unwrap_or_else(|_| "Curator Pack".into())
-    } else {
-        "Curator Pack".into()
+    match result {
+        Ok(Ok(tmp)) => {
+            match File::open(tmp.path()).await {
+                Ok(f) => {
+                    let stream = ReaderStream::new(f);
+                    let body   = Body::from_stream(stream);
+                    let cd = format!("attachment; filename=\"{}\"", filename);
+                    let mut resp = body.into_response();
+                    resp.headers_mut().insert(
+                        header::CONTENT_TYPE,
+                        "application/zip".parse().unwrap(),
+                    );
+                    resp.headers_mut().insert(
+                        header::CONTENT_DISPOSITION,
+                        cd.parse().unwrap(),
+                    );
+                    resp
+                }
+                Err(e) => (StatusCode::INTERNAL_SERVER_ERROR, Json(json!({"error": e.to_string()}))).into_response(),
+            }
+        }
+        Ok(Err(e)) => (StatusCode::BAD_REQUEST, Json(json!({"error": e.to_string()}))).into_response(),
+        Err(e)     => (StatusCode::INTERNAL_SERVER_ERROR, Json(json!({"error": e.to_string()}))).into_response(),
     }
 }

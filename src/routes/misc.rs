@@ -1,52 +1,107 @@
 use std::sync::Arc;
+
 use axum::{
-    extract::State,
-    http::header,
-    response::IntoResponse,
+    extract::{Path, State},
+    http::{header, StatusCode},
+    response::{IntoResponse, Response},
     Json,
 };
-use serde_json::json;
+use serde_json::{json, Value};
 
-use crate::state::AppState;
-use super::AppError;
+use crate::AppState;
+use crate::routes::media::db_err;
 
-pub async fn stats(State(state): State<Arc<AppState>>) -> Result<impl IntoResponse, AppError> {
-    let conn = state.pool.get().map_err(anyhow::Error::from)?;
+// ─── GET /api/stats ──────────────────────────────────────────────────────────
 
-    let source_count: i64 = conn.query_row("SELECT COUNT(*) FROM sources", [], |r| r.get(0))?;
-    let media_count: i64 = conn.query_row(
-        "SELECT COUNT(*) FROM media WHERE downloaded=1", [], |r| r.get(0),
-    )?;
-    let tag_count: i64 = conn.query_row("SELECT COUNT(*) FROM tags", [], |r| r.get(0))?;
-    let group_count: i64 = conn.query_row("SELECT COUNT(*) FROM groups", [], |r| r.get(0))?;
+pub async fn stats(State(state): State<Arc<AppState>>) -> Result<Json<Value>, (StatusCode, Json<Value>)> {
+    let conn = state.pool.get().map_err(db_err)?;
 
-    let video_count: i64 = conn.query_row(
-        "SELECT COUNT(*) FROM media WHERE type='video' AND downloaded=1", [], |r| r.get(0),
-    )?;
-    let image_count: i64 = conn.query_row(
-        "SELECT COUNT(*) FROM media WHERE type='image' AND downloaded=1", [], |r| r.get(0),
-    )?;
+    let total_media: i64 = conn.query_row(
+        "SELECT COUNT(*) FROM media WHERE downloaded=1", [], |r| r.get(0)
+    ).unwrap_or(0);
 
-    let rated_count: i64 = conn.query_row(
-        "SELECT COUNT(*) FROM media WHERE rating > 0 AND downloaded=1", [], |r| r.get(0),
-    )?;
+    let total_sources: i64 = conn.query_row(
+        "SELECT COUNT(*) FROM sources", [], |r| r.get(0)
+    ).unwrap_or(0);
+
+    let sources_done: i64 = conn.query_row(
+        "SELECT COUNT(*) FROM sources WHERE status='done'", [], |r| r.get(0)
+    ).unwrap_or(0);
+
+    let sources_error: i64 = conn.query_row(
+        "SELECT COUNT(*) FROM sources WHERE status='error'", [], |r| r.get(0)
+    ).unwrap_or(0);
+
+    let sources_downloading: i64 = conn.query_row(
+        "SELECT COUNT(*) FROM sources WHERE status='downloading'", [], |r| r.get(0)
+    ).unwrap_or(0);
+
+    let total_groups: i64 = conn.query_row(
+        "SELECT COUNT(*) FROM groups", [], |r| r.get(0)
+    ).unwrap_or(0);
+
+    let total_tags: i64 = conn.query_row(
+        "SELECT COUNT(*) FROM tags", [], |r| r.get(0)
+    ).unwrap_or(0);
+
+    // Placeholder count (pre-scanned but not yet on disk)
+    let placeholder_count: i64 = conn.query_row(
+        "SELECT COUNT(*) FROM media WHERE downloaded=0", [], |r| r.get(0)
+    ).unwrap_or(0);
+
+    let settings = state.settings.read().await;
 
     Ok(Json(json!({
-        "source_count": source_count,
-        "media_count": media_count,
-        "image_count": image_count,
-        "video_count": video_count,
-        "tag_count": tag_count,
-        "group_count": group_count,
-        "rated_count": rated_count,
+        "total_media":            total_media,
+        "placeholder_count":      placeholder_count,
+        "total_sources":          total_sources,
+        "sources_done":           sources_done,
+        "sources_error":          sources_error,
+        "sources_downloading":    sources_downloading,
+        "total_groups":           total_groups,
+        "total_tags":             total_tags,
+        "last_export_at":         settings.last_export_at,
+        "export_reminder_days":   settings.export_reminder_days,
+        "export_reminder_snoozed_until": settings.export_reminder_snoozed_until,
     })))
 }
 
-pub async fn log(State(state): State<Arc<AppState>>) -> Result<impl IntoResponse, AppError> {
-    let log_path = state.data_dir.join("curator.log");
-    let content = tokio::fs::read_to_string(&log_path).await.unwrap_or_default();
-    Ok((
+// ─── GET /api/log ────────────────────────────────────────────────────────────
+// Streams the last 5000 lines of curator.log as plain text.
+
+pub async fn get_log(State(state): State<Arc<AppState>>) -> Response {
+    let tail = read_log_tail(&state.log_path, 5000);
+    (
+        StatusCode::OK,
         [(header::CONTENT_TYPE, "text/plain; charset=utf-8")],
-        content,
-    ).into_response())
+        tail,
+    ).into_response()
+}
+
+// ─── GET /api/sources/:id/log ────────────────────────────────────────────────
+
+pub async fn source_log(
+    State(state): State<Arc<AppState>>,
+    Path(id):     Path<i64>,
+) -> Result<Json<Value>, (StatusCode, Json<Value>)> {
+    let conn = state.pool.get().map_err(db_err)?;
+    let row = conn.query_row(
+        "SELECT log, error_message FROM sources WHERE id=?1", [id],
+        |r| Ok((r.get::<_, Option<String>>(0)?, r.get::<_, Option<String>>(1)?))
+    );
+    match row {
+        Ok((log, err_msg)) => Ok(Json(json!({ "log": log, "error_message": err_msg }))),
+        Err(_) => Err((StatusCode::NOT_FOUND, Json(json!({"error": "Source not found"})))),
+    }
+}
+
+// ─── Helper ───────────────────────────────────────────────────────────────────
+
+fn read_log_tail(path: &std::path::Path, max_lines: usize) -> String {
+    let Ok(text) = std::fs::read_to_string(path) else {
+        return String::new();
+    };
+    let lines: Vec<&str> = text.lines().collect();
+    let start = lines.len().saturating_sub(max_lines);
+    lines[start..].join("\n")
 }

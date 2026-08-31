@@ -1,18 +1,13 @@
-use std::{
-    collections::HashSet,
-    io::Write,
-    path::{Path, PathBuf},
-};
-use anyhow::Result;
+use std::io::Write;
+use std::path::Path;
+
+use anyhow::{Context, Result};
+use serde::Serialize;
 use tempfile::NamedTempFile;
-use zip::{write::FileOptions, ZipWriter, CompressionMethod};
+use zip::{write::FileOptions, ZipWriter};
 
-static SPEED_TAGS: &[(&str, &str)] = &[
-    // rating value → speed tag
-];
+// ─── Rating → speed tag ──────────────────────────────────────────────────────
 
-/// Map Curator rating (1-5) to CockHero speed tag.
-/// 0 = unrated → no tag (game distributes randomly).
 pub fn rating_to_speed(rating: i64) -> Option<&'static str> {
     match rating {
         1 => Some("slow"),
@@ -24,105 +19,156 @@ pub fn rating_to_speed(rating: i64) -> Option<&'static str> {
     }
 }
 
-static SPEED_TAG_SET: once_cell::sync::Lazy<HashSet<&'static str>> =
-    once_cell::sync::Lazy::new(|| {
-        ["slow", "medium", "fast", "cum", "succubus"].iter().copied().collect()
-    });
+static SPEED_VALUES: &[&str] = &["slow", "medium", "fast", "cum", "succubus"];
 
-pub struct MediaRow {
+pub fn is_speed_tag(tag: &str) -> bool {
+    SPEED_VALUES.contains(&tag)
+}
+
+// ─── Manifest types ───────────────────────────────────────────────────────────
+
+#[derive(Serialize)]
+struct ManifestEntry {
+    file: String,
+    #[serde(rename = "type")]
+    kind: String,
+}
+
+#[derive(Serialize)]
+struct Manifest {
+    version:            &'static str,
+    name:               String,
+    author:             String,
+    description:        String,
+    preview:            &'static str,
+    unlock_cost:        i64,
+    required_challenge: &'static str,
+    patreon_exclusive:  bool,
+    media:              Vec<ManifestEntry>,
+    social_links:       SocialLinks,
+}
+
+#[derive(Serialize)]
+struct SocialLinks {
+    onlyfans:     String,
+    fansly:       String,
+    twitter:      String,
+    linktree:     String,
+    manyvids:     String,
+    redgifs:      String,
+    discord:      String,
+    patreon:      String,
+    subscribestar: String,
+    kofi:         String,
+}
+
+impl Default for SocialLinks {
+    fn default() -> Self {
+        SocialLinks {
+            onlyfans: String::new(), fansly: String::new(), twitter: String::new(),
+            linktree: String::new(), manyvids: String::new(), redgifs: String::new(),
+            discord: String::new(), patreon: String::new(),
+            subscribestar: String::new(), kofi: String::new(),
+        }
+    }
+}
+
+// ─── Media row for export ─────────────────────────────────────────────────────
+
+pub struct ExportRow {
     pub filepath: String,
-    pub rating: i64,
-    pub tags_csv: Option<String>,
-    pub media_type: String, // "image" | "video"
+    pub kind:     String,   // "image" or "video"
+    pub rating:   i64,
+    pub tags:     Vec<String>,
 }
 
-pub struct ChpackOptions {
-    pub name: String,
-    pub author: String,
-    pub description: String,
-    pub unlock_cost: i64,
-}
+// ─── build_chpack ─────────────────────────────────────────────────────────────
+// Streams files directly into a NamedTempFile — no full-library RAM bomb.
 
-/// Build a .chpack (ZIP) in a NamedTempFile. Returns the tempfile to stream back.
-/// Streams each media file — never buffers the full archive in RAM.
 pub fn build_chpack(
-    entries: &[MediaRow],
+    pack_name:   String,
+    author:      String,
+    description: String,
+    unlock_cost: i64,
+    rows:        Vec<ExportRow>,
     library_dir: &Path,
-    opts: &ChpackOptions,
 ) -> Result<NamedTempFile> {
-    let tmp = NamedTempFile::new()?;
-    let file = tmp.reopen()?;
-    let mut zip = ZipWriter::new(file);
-    let file_opts: FileOptions<()> = FileOptions::default()
-        .compression_method(CompressionMethod::Deflated)
+    let tmp = NamedTempFile::new().context("creating temp file for .chpack")?;
+    let tmp_file = tmp.reopen().context("reopening temp file")?;
+    let mut zip = ZipWriter::new(tmp_file);
+
+    let options: FileOptions<()> = FileOptions::default()
+        .compression_method(zip::CompressionMethod::Deflated)
         .compression_level(Some(6));
 
     let mut media_entries = Vec::new();
+    let mut idx = 0usize;
 
-    for (idx, row) in entries.iter().enumerate() {
-        let src = dunce::simplified(&library_dir.join(&row.filepath)).to_path_buf();
-        if !src.exists() { continue; }
+    for row in &rows {
+        let src_path = dunce::simplified(&library_dir.join(&row.filepath)).to_path_buf();
+        if !src_path.exists() { continue; }
 
-        let ext = PathBuf::from(&row.filepath)
-            .extension()
+        let ext = src_path.extension()
             .and_then(|e| e.to_str())
-            .unwrap_or("")
-            .to_lowercase();
+            .map(|e| format!(".{}", e.to_lowercase()))
+            .unwrap_or_default();
 
-        // Build filename: {idx}_{curator_tags}_{speed}.{ext}
-        // Curator tags that collide with speed tag set are stripped.
-        let own_tags: Vec<String> = row.tags_csv
-            .as_deref()
-            .unwrap_or("")
-            .split(',')
-            .map(|t| t.trim().to_lowercase())
-            .filter(|t| !t.is_empty() && !SPEED_TAG_SET.contains(t.as_str()))
+        let speed_tag = rating_to_speed(row.rating);
+
+        // Strip curator tags that would collide with speed tag names
+        let own_tags: Vec<String> = row.tags.iter()
+            .filter(|t| !is_speed_tag(t.as_str()))
+            .cloned()
             .collect();
 
-        let mut parts: Vec<String> = vec![idx.to_string()];
-        parts.extend(own_tags);
-        if let Some(speed) = rating_to_speed(row.rating) {
-            parts.push(speed.to_string());
-        }
-        let archive_name = format!("{}.{ext}", parts.join("_"));
-        let arc_path = format!("media/{archive_name}");
+        let mut parts = vec![idx.to_string()];
+        parts.extend(own_tags.iter().cloned());
+        if let Some(spd) = speed_tag { parts.push(spd.to_string()); }
 
-        zip.start_file(&arc_path, file_opts)?;
-        let mut f = std::fs::File::open(&src)?;
+        let archive_filename = format!("{}{}", parts.join("_"), ext);
+        let arc_path = format!("media/{}", archive_filename);
+
+        zip.start_file(&arc_path, options)?;
+        let mut f = std::fs::File::open(&src_path)
+            .with_context(|| format!("opening {:?}", src_path))?;
         std::io::copy(&mut f, &mut zip)?;
 
-        let file_type = if row.media_type == "video" { "video" } else { "image" };
-        media_entries.push(serde_json::json!({
-            "file": archive_name,
-            "type": file_type,
-        }));
+        let file_kind = if row.kind == "video" { "video" } else { "image" };
+        media_entries.push(ManifestEntry { file: archive_filename, kind: file_kind.to_string() });
+
+        idx += 1;
     }
 
     if media_entries.is_empty() {
         anyhow::bail!("No accessible files on disk for this selection");
     }
 
-    // Write manifest.json
-    let manifest = serde_json::json!({
-        "version": "0.02a",
-        "name": opts.name,
-        "author": opts.author,
-        "description": opts.description,
-        "preview": "",
-        "unlock_cost": opts.unlock_cost,
-        "required_challenge": "",
-        "patreon_exclusive": false,
-        "media": media_entries,
-        "social_links": {
-            "onlyfans": "", "fansly": "", "twitter": "",
-            "linktree": "", "manyvids": "", "redgifs": "",
-            "discord": "", "patreon": "", "subscribestar": "", "kofi": ""
-        }
-    });
+    let manifest = Manifest {
+        version:            "0.02a",
+        name:               pack_name,
+        author,
+        description,
+        preview:            "",
+        unlock_cost,
+        required_challenge: "",
+        patreon_exclusive:  false,
+        media:              media_entries,
+        social_links:       SocialLinks::default(),
+    };
 
-    zip.start_file("manifest.json", file_opts)?;
+    zip.start_file("manifest.json", options)?;
     zip.write_all(serde_json::to_string_pretty(&manifest)?.as_bytes())?;
-    zip.finish()?;
 
+    zip.finish()?;
     Ok(tmp)
+}
+
+// ─── Safe filename for download header ───────────────────────────────────────
+
+static UNSAFE_RE: once_cell::sync::Lazy<regex::Regex> =
+    once_cell::sync::Lazy::new(|| regex::Regex::new(r"[^\w\-. ]").unwrap());
+
+pub fn safe_pack_filename(name: &str) -> String {
+    let s = UNSAFE_RE.replace_all(name.trim(), "_");
+    format!("{}.chpack", s.replace(' ', "_"))
 }

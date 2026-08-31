@@ -1,75 +1,180 @@
-Curator — Full Reference Documentation
-=======================================
+CURATOR — full reference
+=========================
 
-QUICK START
------------
-1. Install gallery-dl: pip install gallery-dl
-2. Put 'curator.exe' next to the 'static/' folder
-3. Run: curator.exe
-4. Open http://localhost:8642
+Curator is a self-hosted, site-agnostic front-end for gallery-dl: paste in
+creator/gallery URLs, it downloads them locally via the real gallery-dl CLI,
+indexes everything into a local SQLite database, and serves a browser UI for
+managing sources and browsing/slideshowing the results. Everything runs on
+your machine; nothing is uploaded anywhere.
 
-DATA DIRECTORY
---------------
-Resolution order:
-  1. CURATOR_DATA_DIR environment variable
-  2. data_dir field in config.json (same folder as the exe)
-  3. ~/Curator (home directory fallback)
+This is the long version. `curator --help` covers just the command line flags.
+Output below is long — pipe it through a pager if you like:
+    curator --docs | more        (Windows)
+    curator --docs | less        (Linux/macOS)
 
-To move your data: stop Curator, move the folder, update config.json.
 
-config.json example:
-  {"data_dir": "E:/CuratorData"}
-
-REMOTE ACCESS (Tailscale / LAN)
---------------------------------
-Curator binds 0.0.0.0 — reachable from any device on the same network.
-For internet access, install Tailscale on both machines.
-Use the Tailscale IP: http://100.x.x.x:8642
-
-GALLERY-DL
+RUNNING IT
 ----------
-Curator shells out to 'gallery-dl' on PATH, or the path in GALLERY_DL_BIN env var.
-Configure cookies, rate limits, etc. in gallery-dl's own config file (~/.config/gallery-dl/config.json).
+    curator.exe
+Then open http://127.0.0.1:8642 in a browser. Leave the terminal running.
+No Python or pip required — curator.exe is a single self-contained binary.
 
-GROUPS AND TAGS
----------------
-Sources can be placed in groups. Groups can be nested (parent/child).
-Tags on a group are inherited by all sources in it and their descendants.
-A group's own name counts as a tag for filtering purposes.
-This means: tag a group "OnlyFans" and every source in it is filterable by "onlyfans".
 
-Effective tags for a media item = own tags ∪ source's group tags ∪ ancestor group tags ∪ ancestor group names.
+WHERE YOUR DATA LIVES
+----------------------
+The binary and static/ live wherever you put curator.exe. Data (downloads,
+database, settings, log) defaults to ~/Curator.
 
-RATINGS
--------
-1-5 stars, stored per media item. Click the current rating again to clear it (→ 0 = unrated).
+To move it permanently, edit config.json next to curator.exe:
+    { "data_dir": "E:/CuratorData" }
+config.json is created automatically on first run if it doesn't exist yet.
 
-COCKHERO .CHPACK EXPORT
+For a one-off override, the CURATOR_DATA_DIR environment variable takes
+priority over config.json for that session only.
+
+gallery-dl binary: Curator calls `gallery-dl` from your PATH by default.
+Override with `"gallery_dl_bin": "C:/path/to/gallery-dl.exe"` in config.json.
+
+
+REMOTE ACCESS (PHONE, IPAD, ANOTHER COMPUTER)
+-----------------------------------------------
+Curator listens on every network interface, so any device that can reach
+your PC can open the same UI — no separate app needed.
+
+Same Wi-Fi as your PC:
+    Open http://<your-pc's-LAN-IP>:8642 in a browser. Find the IP with
+    `ipconfig` in PowerShell ("IPv4 Address" under your active adapter).
+
+From anywhere (cellular, traveling):
+    Don't port-forward your router — Curator has no login, and that would
+    put an unauthenticated server on the open internet. Use Tailscale
+    (tailscale.com, free for personal use) instead:
+      1. Install Tailscale on the PC and sign in.
+      2. Install the Tailscale app on your phone, same account.
+      3. Run `tailscale ip -4` on the PC for its Tailscale IP (100.x.x.x).
+      4. With Tailscale on, open http://100.x.x.x:8642 on your phone.
+      5. iOS Safari: Share -> Add to Home Screen for an app-like icon.
+
+Windows Firewall: the first connection from another device may trigger a
+firewall popup — click Allow. To add the rule manually:
+    New-NetFirewallRule -DisplayName "Curator" -Direction Inbound -Protocol TCP -LocalPort 8642 -Action Allow
+
+
+SPEEDING UP DOWNLOADS
 -----------------------
-Click "🎮 export .chpack" in the sidebar footer.
-If you're viewing a specific source, only that source's media is exported.
-Otherwise the entire library is exported.
+Downloading is limited by network requests per source, not CPU/GPU — more
+concurrent sources helps more than a faster processor. Settings -> "max
+concurrent downloads" (default 6, up to 20). Push it up if your connection
+can take it; bring it down if sources start landing on "error" (usually a
+site rate-limiting too many parallel connections from your IP).
 
-Rating → CockHero speed tag mapping:
-  1★ = slow     (softcore / clothed / teasing)
-  2★ = medium   (nudity, no penetration)
-  3★ = fast     (explicit / penetration)
-  4★ = cum      (climax / orgasm)
-  5★ = succubus (extreme challenge, no items, rapid speed)
-  0  = no tag   (game distributes randomly across all difficulties)
 
-Drop the resulting .chpack into Win64/packs/ in the game folder.
+WHY BROWSING FEELS FAST (THUMBNAILS & CACHING)
+-------------------------------------------------
+Grid tiles and sidebar previews use small cached JPEG thumbnails (360px long
+edge), not the multi-MB originals — the lightbox and slideshow still load the
+real file. Videos only fetch metadata once they're about to scroll into view.
+Everything is served with long-lived cache headers since files never change
+once downloaded. Deleting the thumbnails/ folder is always safe; it's a cache
+and rebuilds as needed.
+
+
+ADDING SOURCES
+---------------
+"+ add multiple at once" (or the quick-add box), one URL per line or comma
+separated. https:// is optional. Paste the actual profile/gallery URL —
+Curator doesn't guess one from a bare username, since gallery-dl matches on
+per-site URL patterns. Each source downloads in the background; watch its
+status dot go pending -> downloading -> done.
+
+
+GROUPS
+-------
+"+ group" in the sidebar creates one. Move a source into a group via its
+menu's "group" dropdown. Click a group to browse everything inside it,
+shuffled together. Double-click to rename; the x deletes a group without
+deleting its sources (they fall back to "Ungrouped").
+
+Subgroups: every group has its own + button for nesting (e.g. a "Platforms"
+group containing "Patreon" and "Twitter"). Browsing a group includes its
+subgroups' content too. Deleting a group with subgroups promotes them up one
+level rather than deleting or flattening them.
+
+Groups and tags are interchangeable: a group's own name, and any tags
+you've explicitly added to it, apply live to every file nested inside it
+(including through subgroups) — filtering by tag "nsfw" matches a file
+that's explicitly tagged "nsfw" AND a file that just lives in a group named
+(or tagged) "nsfw". Nothing is copied or written per-file; move a source to
+a different group and its effective tags update immediately. These
+inherited tags show up as dashed, read-only chips in the lightbox — remove
+them by editing the group (or moving the file out of it), not the file.
+
+
+RATINGS & TAGS
+---------------
+Click a star in the lightbox to rate a file 1-5; click the current rating
+again to clear it. Add tags via the lightbox's tag box (Enter or "+ tag");
+remove one by clicking its x. Both are filterable/sortable from the
+toolbar, and both apply to groups too (see above) — tag a group from its
+sidebar tag button (🏷).
+
+
+EXPORT / IMPORT
+-----------------
+"export list" in the sidebar footer downloads a JSON backup of every
+source's name, URL, group, and selection state (not the actual files).
+"import list" reads one of those back in (or any JSON shaped like
+{"sources":[{"url": "..."}]}), recreating groups it references; duplicates
+are skipped automatically.
+
+A dismissible reminder banner appears in the sidebar once it's been a
+while (30 days by default, "backup reminder" in Settings) since the last
+export, or if you've never exported at all.
+
+
+LIVE BROWSE (PREVIEW WITHOUT DOWNLOADING)
+--------------------------------------------
+"live browse" in the toolbar opens a mode that streams directly from
+gallery-dl's listing output (`gallery-dl -j`) instead of downloading
+anything — nothing here touches your library or database. Paste a URL to
+browse it immediately; anything you like there can be added to the real
+library with one click. Useful for previewing before committing disk space.
+
+
+COCK HERO SESSION (TIER 3)
+-----------------------------
+Open /ch/ in your browser for the Cock Hero session UI. Configure tag/source
+filters, a pacing profile, and session duration. Cock hero fetches a filtered
+playlist from curator's /api/ch/playlist endpoint and drives the display —
+advancing media, playing video clips, layering a HUD with pace cues and
+elapsed time. Beat sync uses the Web Audio API, entirely client-side.
+
+To enable session logging, set "ch_log_sessions": true in Settings.
+
+
+LOGS & FINDING ERRORS
+------------------------
+Everything goes to curator.log in your data directory (rotates past 5MB).
+Click "view log" in the sidebar footer to open it as plain text.
+
+
+NOTES & KNOWN LIMITATIONS
+-----------------------------
+- Single-user, local tool: no accounts, no API auth.
+- Don't expose port 8642 to the open internet — use Tailscale for remote access.
+- Large libraries paginate the grid in batches of 150 while scrolling.
+- gallery-dl must be on your PATH (or configured in config.json as gallery_dl_bin).
+
 
 TROUBLESHOOTING
----------------
-- "gallery-dl not found": install it (pip install gallery-dl) or set GALLERY_DL_BIN env var
-- Source stuck at 'downloading': use pause/resume, or check /api/log
-- Thumbnails missing: Curator generates them on demand; large libraries may take time
-- Long filenames on Windows: enable long path support in Windows settings (regedit or Group Policy)
-- 429 errors from bunkr.cr: lower max_concurrent in Settings
+------------------
+- Check curator.log first — most issues show up there with enough detail to diagnose.
+- "gallery-dl could not be launched" -> ensure gallery-dl is installed and on your PATH.
+- A source stuck on "error" -> hover its row for the last bit of gallery-dl's output.
+- Port already in use -> another curator.exe is running, or change the port in source.
 
-FLAGS
------
-  --port PORT    Listen port (default: 8642)
-  --docs         Print this documentation and exit
-  --help         Print flag summary and exit
+A NOTE ON USE
+---------------
+Curator downloads whatever you point it at. Only add creators/galleries you
+have the right to access, and be mindful of each site's terms of service
+and rate limits.

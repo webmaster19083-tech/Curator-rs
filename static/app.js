@@ -2582,9 +2582,62 @@ async function pvScanUrl(url, force) {
     const cached = pvCacheGet(url);
     if (cached) return cached;
   }
-  const data = await api('/api/preview/scan?url=' + encodeURIComponent(url));
-  pvCacheSet(url, data.items);
-  return data.items;
+  const items = await pvScanUrlSse(url);
+  pvCacheSet(url, items);
+  return items;
+}
+
+// The backend now serves /api/preview/scan as Server-Sent Events (one `item`
+// event per discovered file, then a closing `done`/`error` event) instead of
+// a single blocking JSON response — this lets the connection stay alive with
+// keep-alive pings for the full duration of a slow gallery-dl scan rather
+// than sitting on a bare fetch with no feedback. Everything downstream of
+// pvScanUrl still just wants a plain items array back, so this stays a thin
+// wrapper: it consumes the stream itself and resolves once it closes, and
+// nothing else in the live-browse code needs to know the wire format changed.
+async function pvScanUrlSse(url) {
+  const res = await fetch('/api/preview/scan?url=' + encodeURIComponent(url));
+  if (!res.ok || !res.body) {
+    let msg = res.statusText;
+    try { const j = await res.json(); msg = j.error || msg; } catch (_) { /* ignore */ }
+    throw new Error(msg);
+  }
+
+  const reader = res.body.getReader();
+  const decoder = new TextDecoder();
+  let buf = '';
+  const items = [];
+  let errorMsg = null;
+
+  while (true) {
+    const { done, value } = await reader.read();
+    if (done) break;
+    buf += decoder.decode(value, { stream: true });
+
+    let idx;
+    while ((idx = buf.indexOf('\n\n')) !== -1) {
+      const rawEvent = buf.slice(0, idx);
+      buf = buf.slice(idx + 2);
+
+      let eventName = 'message';
+      let data = '';
+      for (const line of rawEvent.split('\n')) {
+        if (line.startsWith('event:')) eventName = line.slice(6).trim();
+        else if (line.startsWith('data:')) data += line.slice(5).trim();
+      }
+
+      if (eventName === 'item') {
+        try { items.push(JSON.parse(data)); } catch (_) { /* skip malformed event */ }
+      } else if (eventName === 'error') {
+        errorMsg = data || 'gallery-dl returned an error';
+      }
+      // 'done' event carries no payload we need — its arrival just means
+      // the loop above will end naturally when the stream closes.
+    }
+  }
+
+  if (items.length === 0 && errorMsg) throw new Error(errorMsg);
+  return items;
 }
 
 function pvCreatorName(url, items) {

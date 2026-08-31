@@ -1,58 +1,60 @@
-use std::{sync::Arc, sync::atomic::Ordering};
-use axum::{extract::State, response::IntoResponse, Json};
-use serde_json::json;
+use std::sync::Arc;
+use std::sync::atomic::Ordering;
 
-use crate::state::AppState;
-use super::AppError;
+use axum::{extract::State, Json};
+use serde_json::{json, Value};
 
-pub async fn status(State(state): State<Arc<AppState>>) -> Result<impl IntoResponse, AppError> {
-    let paused = state.downloads_paused.load(Ordering::SeqCst);
-    let active: Vec<i64> = state.active_processes.lock().unwrap().keys().cloned().collect();
-    Ok(Json(json!({"paused": paused, "active_sources": active})))
+use crate::AppState;
+
+// ─── GET /api/downloads/status ───────────────────────────────────────────────
+
+pub async fn status(State(state): State<Arc<AppState>>) -> Json<Value> {
+    let paused  = state.downloads_paused.load(Ordering::SeqCst);
+    let active  = state.active_processes.lock().await.len();
+    let paused_ids: Vec<i64> = state.paused_source_ids.lock().await.iter().cloned().collect();
+
+    Json(json!({
+        "paused":       paused,
+        "active_count": active,
+        "paused_source_ids": paused_ids,
+    }))
 }
 
-pub async fn pause(State(state): State<Arc<AppState>>) -> Result<impl IntoResponse, AppError> {
+// ─── POST /api/downloads/pause ───────────────────────────────────────────────
+
+pub async fn pause(State(state): State<Arc<AppState>>) -> Json<Value> {
     state.downloads_paused.store(true, Ordering::SeqCst);
 
-    // Kill all in-flight gallery-dl processes immediately
-    let pids: Vec<(i64, u32)> = state.active_processes.lock().unwrap()
-        .iter().map(|(&sid, &pid)| (sid, pid)).collect();
+    // Kill all running gallery-dl processes and mark their sources as paused
+    let procs: Vec<(i64, u32)> = {
+        let guard = state.active_processes.lock().await;
+        guard.iter().map(|(&sid, &pid)| (sid, pid)).collect()
+    };
 
-    let mut paused_ids = state.paused_source_ids.lock().unwrap();
-    for (sid, pid) in &pids {
-        paused_ids.insert(*sid);
-        kill_by_pid(*pid);
+    for (source_id, pid) in procs {
+        state.paused_source_ids.lock().await.insert(source_id);
+        crate::downloader::kill_pid(pid).await;
     }
-    drop(paused_ids);
 
-    tracing::info!("Downloads paused — terminated {} in-flight process(es)", pids.len());
-    Ok(Json(json!({"status": "paused"})))
+    Json(json!({ "paused": true }))
 }
 
-pub async fn resume(State(state): State<Arc<AppState>>) -> Result<impl IntoResponse, AppError> {
+// ─── POST /api/downloads/resume ──────────────────────────────────────────────
+
+pub async fn resume(State(state): State<Arc<AppState>>) -> Json<Value> {
     state.downloads_paused.store(false, Ordering::SeqCst);
 
-    // Re-queue everything still at 'paused' status
-    let ids: Vec<i64> = {
-        let conn = state.pool.get().map_err(anyhow::Error::from)?;
-        let mut stmt = conn.prepare("SELECT id FROM sources WHERE status='paused'")?;
-        let ids: Vec<i64> = stmt.query_map([], |r| r.get(0))?
-            .filter_map(|r| r.ok())
-            .collect();
+    // Re-queue sources that were paused mid-download
+    let paused_ids: Vec<i64> = {
+        let mut guard = state.paused_source_ids.lock().await;
+        let ids: Vec<i64> = guard.iter().cloned().collect();
+        guard.clear();
         ids
     };
 
-    let count = ids.len();
-    for id in ids {
-        tokio::spawn(crate::downloader::run_download(Arc::clone(&state), id));
+    for id in &paused_ids {
+        tokio::spawn(crate::downloader::run_download(Arc::clone(&state), *id));
     }
-    tracing::info!("Downloads resumed — re-queued {count} source(s)");
-    Ok(Json(json!({"status": "resumed", "queued": count})))
-}
 
-fn kill_by_pid(pid: u32) {
-    #[cfg(target_os = "windows")]
-    { let _ = std::process::Command::new("taskkill").args(["/F", "/PID", &pid.to_string()]).spawn(); }
-    #[cfg(not(target_os = "windows"))]
-    { let _ = std::process::Command::new("kill").args(["-TERM", &pid.to_string()]).spawn(); }
+    Json(json!({ "paused": false, "requeued": paused_ids.len() }))
 }

@@ -66,11 +66,11 @@ tokio-util     = { version = "0.7", features = ["io"] }
 # during dependency resolution (see curator_rs_fixed / build fix notes).
 hashbrown      = "=0.15.5"
 indexmap       = "=2.11.4"
-getrandom      = "=0.3.4"
 uuid           = "=1.10.0"
 time           = "=0.3.36"
-wit-bindgen    = "=0.45.0"
-wasip2         = "=1.0.0+wasi-0.2.4"
+async-compression = "=0.4.28"
+compression-codecs = "=0.4.28"
+image-webp     = "=0.2.0"
 
 # Platform kill (non-Windows)
 [target.'cfg(not(target_os = "windows"))'.dependencies]

@@ -147,7 +147,7 @@ pub async fn get_playlist(
 
     let rows: Vec<Row> = {
         let mut stmt = conn.prepare(&base_sql).map_err(db_err)?;
-        stmt.query_map([], |r| Ok(Row {
+        let collected: Vec<Row> = stmt.query_map([], |r| Ok(Row {
             id:       r.get(0)?,
             filepath: r.get(1)?,
             filename: r.get(2)?,
@@ -157,7 +157,8 @@ pub async fn get_playlist(
             tags_csv: r.get(6)?,
         })).map_err(db_err)?
         .filter_map(|r| r.ok())
-        .collect()
+        .collect();
+        collected
     };
 
     let require_tags: Vec<String> = q.tags.as_deref()

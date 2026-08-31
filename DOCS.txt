@@ -16,8 +16,15 @@ Output below is long — pipe it through a pager if you like:
 RUNNING IT
 ----------
     curator.exe
-Then open http://127.0.0.1:8642 in a browser. Leave the terminal running.
-No Python or pip required — curator.exe is a single self-contained binary.
+Curator opens its own app window automatically (a borderless Edge/Chrome
+window, no tabs/toolbar — not a full browser). Leave the terminal running
+behind it. No Python or pip required — curator.exe is a single
+self-contained binary.
+
+    curator.exe --no-window
+Skips the auto-opened window and just runs the server — use this for
+headless/server setups, or if you'd rather open http://127.0.0.1:8642
+yourself in a regular browser tab.
 
 
 WHERE YOUR DATA LIVES

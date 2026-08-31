@@ -52,6 +52,7 @@ pub async fn scan(
             let mut seen      = std::collections::HashSet::new();
             let mut found_any = false;
             let mut had_error = false;
+            let mut total     = 0usize;
 
             futures::pin_mut!(inner);
             while let Some(node_result) = inner.next().await {
@@ -61,6 +62,7 @@ pub async fn scan(
                         preview_walk(&node, &url, &mut items, &mut seen);
                         for item in items {
                             found_any = true;
+                            total += 1;
                             let data = serde_json::to_string(&item).unwrap_or_default();
                             yield Ok(Event::default().event("item").data(data));
                         }
@@ -78,7 +80,7 @@ pub async fn scan(
                 ));
             }
 
-            yield Ok(Event::default().event("done").data(json!({ "count": 0 }).to_string()));
+            yield Ok(Event::default().event("done").data(json!({ "count": total }).to_string()));
         })
     };
 

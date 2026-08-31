@@ -60,6 +60,54 @@ struct Cli {
     /// groups & tags, troubleshooting) and exit.
     #[arg(long)]
     docs: bool,
+
+    /// Don't auto-open a window on startup — just run the server. Use this
+    /// for headless/server setups (e.g. accessed remotely, or run as a
+    /// service) where no local browser/window makes sense.
+    #[arg(long)]
+    no_window: bool,
+}
+
+// ─── App window ────────────────────────────────────────────────────────────
+
+/// Opens `url` in a borderless "app mode" browser window (no tabs/toolbar —
+/// looks like a native window) instead of making the person open a browser
+/// tab themselves. Falls back to the default browser if no Chromium-based
+/// browser is found.
+fn open_app_window(url: &str) {
+    #[cfg(target_os = "windows")]
+    {
+        for browser in ["msedge", "chrome"] {
+            let spawned = std::process::Command::new("cmd")
+                .args(["/C", "start", "", browser,
+                       &format!("--app={url}"), "--window-size=1280,860"])
+                .spawn();
+            if spawned.is_ok() { return; }
+        }
+        // Neither Edge nor Chrome found by name — fall back to whatever
+        // the default browser is (a normal tab, not a standalone window).
+        let _ = std::process::Command::new("cmd").args(["/C", "start", "", url]).spawn();
+    }
+    #[cfg(target_os = "macos")]
+    {
+        for app in ["/Applications/Google Chrome.app", "/Applications/Microsoft Edge.app"] {
+            let spawned = std::process::Command::new("open")
+                .args(["-na", app, "--args", &format!("--app={url}")])
+                .spawn();
+            if spawned.is_ok() { return; }
+        }
+        let _ = std::process::Command::new("open").arg(url).spawn();
+    }
+    #[cfg(all(unix, not(target_os = "macos")))]
+    {
+        for browser in ["google-chrome", "chromium", "chromium-browser", "microsoft-edge"] {
+            let spawned = std::process::Command::new(browser)
+                .arg(format!("--app={url}"))
+                .spawn();
+            if spawned.is_ok() { return; }
+        }
+        let _ = std::process::Command::new("xdg-open").arg(url).spawn();
+    }
 }
 
 // ─── Config loading ───────────────────────────────────────────────────────────
@@ -230,12 +278,23 @@ async fn main() -> Result<()> {
     let listener = tokio::net::TcpListener::bind(addr).await?;
 
     let addresses = list_reachable_addresses();
-    info!("Curator is running — open one of these in a browser:");
+    info!("Curator is running:");
     for ip in &addresses {
         info!("  http://{}:8642", ip);
     }
     info!("Data directory: {:?}", data_dir);
     info!("Press Ctrl+C to stop.");
+
+    if cli.no_window {
+        info!("--no-window set: open one of the addresses above in a browser.");
+    } else {
+        info!("Opening Curator's window...");
+        tokio::spawn(async {
+            // Small delay so the window doesn't race the very first accept().
+            tokio::time::sleep(std::time::Duration::from_millis(300)).await;
+            open_app_window("http://127.0.0.1:8642");
+        });
+    }
 
     axum::serve(listener, app).await?;
     Ok(())

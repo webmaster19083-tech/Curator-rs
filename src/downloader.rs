@@ -1,4 +1,3 @@
-use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
@@ -21,14 +20,6 @@ pub fn image_exts() -> &'static [&'static str] {
 
 pub fn video_exts() -> &'static [&'static str] {
     &["mp4", "webm", "mov", "avi", "mkv", "m4v"]
-}
-
-pub fn path_image_exts() -> &'static [&'static str] {
-    &[".jpg", ".jpeg", ".png", ".gif", ".webp", ".bmp", ".jfif", ".avif", ".tiff"]
-}
-
-pub fn path_video_exts() -> &'static [&'static str] {
-    &[".mp4", ".webm", ".mov", ".avi", ".mkv", ".m4v"]
 }
 
 fn is_image_path(path: &Path) -> bool {
@@ -648,8 +639,20 @@ async fn run_download_inner(state: Arc<AppState>, source_id: i64) {
     idx_task.abort();
     let _ = idx_task.await;
 
-    let log_text = lines_buf.into_iter().collect::<Vec<_>>().join("\n");
-    let _stderr_text = stderr_task.await.unwrap_or_default();
+    let log_text    = lines_buf.into_iter().collect::<Vec<_>>().join("\n");
+    let stderr_text = stderr_task.await.unwrap_or_default();
+
+    // gallery-dl prints file/progress lines to stdout, but warnings, tracebacks,
+    // and (on interrupt) the KeyboardInterrupt trace all go to stderr — combine
+    // both so interrupt detection, error summaries, and the stored log tail
+    // actually see that diagnostic text instead of silently discarding it.
+    let combined_text = if stderr_text.trim().is_empty() {
+        log_text.clone()
+    } else if log_text.is_empty() {
+        stderr_text.clone()
+    } else {
+        format!("{}\n{}", log_text, stderr_text)
+    };
 
     {
         let mut procs = state.active_processes.lock().await;
@@ -667,7 +670,7 @@ async fn run_download_inner(state: Arc<AppState>, source_id: i64) {
         ids.remove(&source_id)
     };
 
-    let interrupted   = log_text.contains("KeyboardInterrupt");
+    let interrupted   = combined_text.contains("KeyboardInterrupt");
     let mut status    = if returncode == 0 || total > 0 { "done" } else { "error" };
     let mut error_msg: Option<String> = None;
 
@@ -679,9 +682,9 @@ async fn run_download_inner(state: Arc<AppState>, source_id: i64) {
         error_msg = Some("Interrupted by Curator shutting down mid-download — not a real failure. Resync to pick up where it left off.".to_string());
         info!("Source {} ({}) was interrupted after {} new item(s), {} total", source_id, name, new_count, total);
     } else if status == "error" {
-        let summary = short_error_summary(&log_text);
+        let summary = short_error_summary(&combined_text);
         warn!("Source {} ({}) failed to sync: {}", source_id, name, summary);
-        error_msg = Some(if summary.is_empty() { log_text.chars().rev().take(4000).collect::<String>().chars().rev().collect() } else { summary });
+        error_msg = Some(if summary.is_empty() { combined_text.chars().rev().take(4000).collect::<String>().chars().rev().collect() } else { summary });
     } else if new_count > 0 {
         info!("Finished syncing source {} ({}): {} new item(s), {} total", source_id, name, new_count, total);
     } else {
@@ -689,7 +692,7 @@ async fn run_download_inner(state: Arc<AppState>, source_id: i64) {
     }
 
     let log_tail: String = {
-        let chars: Vec<char> = log_text.chars().collect();
+        let chars: Vec<char> = combined_text.chars().collect();
         chars.iter().rev().take(4000).collect::<String>().chars().rev().collect()
     };
 

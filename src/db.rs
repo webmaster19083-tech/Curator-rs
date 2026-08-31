@@ -280,6 +280,30 @@ fn ensure_migrations_table(conn: &Connection) -> Result<()> {
             applied_at TEXT NOT NULL
         );
     ")?;
+
+    // CREATE TABLE IF NOT EXISTS is a no-op if a _migrations table already
+    // exists from an older, differently-shaped version of this app — seen in
+    // the wild: one missing the `name` column entirely, which then makes
+    // every query below (and every startup) fail with "no column named
+    // name" forever, since nothing here ever repairs an already-existing
+    // table. Detect that and move the old table aside instead of touching it
+    // further, then create a correctly-shaped one in its place. The one
+    // migration this tracks (0001_repair_bunkr_kemono_slugs) only ever
+    // touches rows that still exactly match the bug it's fixing, so
+    // re-running it once more against a legacy database is safe regardless.
+    if !column_names(conn, "_migrations").contains("name") {
+        warn!("_migrations table exists with an incompatible schema — moving it aside and recreating");
+        conn.execute_batch("
+            DROP TABLE IF EXISTS _migrations_legacy;
+            ALTER TABLE _migrations RENAME TO _migrations_legacy;
+            CREATE TABLE _migrations (
+                id         INTEGER PRIMARY KEY AUTOINCREMENT,
+                name       TEXT NOT NULL UNIQUE,
+                applied_at TEXT NOT NULL
+            );
+        ")?;
+    }
+
     Ok(())
 }
 
@@ -469,6 +493,42 @@ pub fn build_group_effective_tags_map(conn: &Connection) -> HashMap<i64, HashSet
         }
         (gid, tags)
     }).collect()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Reproduces the exact failure seen in the wild: a pre-existing
+    /// `_migrations` table from an older, differently-shaped version of the
+    /// app (no `name` column) must not make `run_migrations` — and therefore
+    /// the whole app's startup — fail with "no column named name".
+    #[test]
+    fn run_migrations_repairs_legacy_migrations_table() {
+        let conn = Connection::open_in_memory().unwrap();
+        conn.execute_batch(
+            "CREATE TABLE _migrations (id INTEGER PRIMARY KEY, applied_at TEXT NOT NULL);"
+        ).unwrap();
+
+        run_migrations(&conn).expect("run_migrations should self-heal, not fail");
+
+        assert!(column_names(&conn, "_migrations").contains("name"));
+        // Old data preserved, not silently dropped.
+        assert!(column_names(&conn, "_migrations_legacy").contains("applied_at"));
+        // The migration still gets recorded in the new table.
+        assert!(migration_applied(&conn, "0001_repair_bunkr_kemono_slugs"));
+    }
+
+    /// A normal, already-correct database (the common case) shouldn't be
+    /// touched by the repair path at all.
+    #[test]
+    fn run_migrations_is_a_noop_on_a_healthy_db() {
+        let conn = Connection::open_in_memory().unwrap();
+        run_migrations(&conn).unwrap();
+        run_migrations(&conn).expect("running migrations twice must stay safe");
+        assert!(column_names(&conn, "_migrations").contains("name"));
+        assert!(!column_names(&conn, "_migrations_legacy").contains("applied_at"));
+    }
 }
 
 

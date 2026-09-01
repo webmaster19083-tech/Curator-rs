@@ -121,11 +121,7 @@ pub fn build_chpack(
             .cloned()
             .collect();
 
-        let mut parts = vec![idx.to_string()];
-        parts.extend(own_tags.iter().cloned());
-        if let Some(spd) = speed_tag { parts.push(spd.to_string()); }
-
-        let archive_filename = format!("{}{}", parts.join("_"), ext);
+        let archive_filename = build_archive_filename(idx, &own_tags, speed_tag, &ext);
         let arc_path = format!("media/{}", archive_filename);
 
         zip.start_file(&arc_path, options)?;
@@ -171,4 +167,50 @@ static UNSAFE_RE: once_cell::sync::Lazy<regex::Regex> =
 pub fn safe_pack_filename(name: &str) -> String {
     let s = UNSAFE_RE.replace_all(name.trim(), "_");
     format!("{}.chpack", s.replace(' ', "_"))
+}
+
+/// `{idx}_{tag}_{tag}...{ext}`, tags sorted alphabetically. Matches the
+/// reference "CH MediaTagger" tool's own naming exactly (decompiled and
+/// confirmed: it does `'_'.join(sorted(self.selected_tags))` where the
+/// difficulty tag is just one more entry in that same set — it is never
+/// treated as special or forced to a fixed position). Curator's own speed
+/// tag is folded into the same sort rather than appended last, so a file
+/// tagged e.g. "thighs" + "cum" round-trips to the same filename
+/// (`cum_thighs`, not `thighs_cum`) either tool would produce.
+fn build_archive_filename(idx: usize, own_tags: &[String], speed_tag: Option<&str>, ext: &str) -> String {
+    let mut tag_parts: Vec<String> = own_tags.to_vec();
+    if let Some(spd) = speed_tag { tag_parts.push(spd.to_string()); }
+    tag_parts.sort();
+
+    let mut parts = vec![idx.to_string()];
+    parts.extend(tag_parts);
+    format!("{}{}", parts.join("_"), ext)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn archive_filename_sorts_speed_tag_with_the_rest_alphabetically() {
+        // 'cum' < 'thighs' alphabetically, so it must sort first, matching
+        // the reference tool exactly rather than Curator forcing speed last.
+        assert_eq!(
+            build_archive_filename(3, &["thighs".to_string()], Some("cum"), ".jpg"),
+            "3_cum_thighs.jpg"
+        );
+    }
+
+    #[test]
+    fn archive_filename_with_no_tags_is_just_index_and_extension() {
+        assert_eq!(build_archive_filename(5, &[], None, ".png"), "5.png");
+    }
+
+    #[test]
+    fn archive_filename_with_no_speed_tag_still_sorts_own_tags() {
+        assert_eq!(
+            build_archive_filename(0, &["boobs".to_string(), "ass".to_string()], None, ".jpg"),
+            "0_ass_boobs.jpg"
+        );
+    }
 }

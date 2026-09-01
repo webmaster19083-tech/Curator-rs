@@ -5,7 +5,6 @@ pub mod tags;
 pub mod thumb;
 pub mod export;
 pub mod settings;
-pub mod preview;
 pub mod downloads;
 pub mod misc;
 pub mod ch;
@@ -53,9 +52,6 @@ pub fn build_router(state: AppState) -> Router {
         .route("/api/export",                           get(export::export_sources))
         .route("/api/export/chpack",                    post(export::export_chpack))
         .route("/api/import",                           post(export::import_sources))
-        // ── Preview / Live browse ──────────────────────────────────────────
-        .route("/api/preview/scan",                     get(preview::scan))
-        .route("/api/preview/search",                   post(preview::search))
         // ── Stats / Log ────────────────────────────────────────────────────
         .route("/api/stats",                            get(misc::stats))
         .route("/api/log",                              get(misc::get_log))

@@ -1807,16 +1807,30 @@ function exitPortraitWall() {
 // up, same pacing rules as the slideshow. Landscape files get rotated 90°
 // so they fill the portrait screen instead of sitting as a thin strip —
 // see the .feed-media-wrap.rotated CSS for how.
+//
+// Items are pulled from state.currentItems in catalog order, but an item
+// is only ever appended to the visible scroll list once its media has
+// actually finished loading (a real decoded frame, not just headers) —
+// see feedPumpPrefetch/feedLoadAndAppend. A few candidates load in
+// parallel and whichever finishes first gets shown first, which can
+// reorder things slightly relative to catalog order. That's the point:
+// the user should essentially never scroll onto something still loading,
+// because it was never appended until it was already confirmed good. An
+// item that errors (404, corrupt/undecodable file) or times out after
+// FEED_LOAD_TIMEOUT_MS is just dropped silently and replaced with the
+// next candidate — it never occupies a slot in the visible feed at all.
 // ---------------------------------------------------------------------
 
-const FEED_BATCH_SIZE = 6;
+const FEED_TARGET_BUFFER = 3;       // keep at least this many loaded-and-appended items unseen, ahead of the viewer
+const FEED_PRELOAD_POOL = 4;        // max candidates loading in parallel at once
+const FEED_LOAD_TIMEOUT_MS = 15000; // a hung load counts as failed after this, freeing its pool slot
 
 const feed = {
   active: false,
-  queueIndex: 0,
+  sourceIndex: 0,   // next untried index into state.currentItems
+  inFlight: 0,      // candidates currently loading (<= FEED_PRELOAD_POOL)
   activeSection: null,
   itemObserver: null,
-  sentinelObserver: null,
 };
 
 function feedFlashIcon(iconEl, symbol) {
@@ -1826,6 +1840,38 @@ function feedFlashIcon(iconEl, symbol) {
   iconEl.classList.add('show');
 }
 
+// Resolves true once `mediaEl` has an actual decoded frame ready to
+// paint (not just headers/metadata), false on error OR on timeout. A
+// timeout is treated exactly like an error — the pool slot is freed
+// either way, so a dead link or stalled connection can never
+// permanently starve the prefetch pipeline.
+function feedWaitForMedia(mediaEl, isVideo) {
+  return new Promise((resolve) => {
+    let settled = false;
+    const finish = (ok) => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timer);
+      cleanup();
+      resolve(ok);
+    };
+    const onReady = () => finish(true);
+    const onError = () => finish(false);
+    function cleanup() {
+      mediaEl.removeEventListener(isVideo ? 'loadeddata' : 'load', onReady);
+      mediaEl.removeEventListener('error', onError);
+    }
+    const timer = setTimeout(() => finish(false), FEED_LOAD_TIMEOUT_MS);
+    mediaEl.addEventListener(isVideo ? 'loadeddata' : 'load', onReady);
+    mediaEl.addEventListener('error', onError);
+  });
+}
+
+// Builds a feed item's DOM but does not set the media source until
+// listeners are attached, and does not append it anywhere — caller gets
+// it back along with a `ready` promise (see feedWaitForMedia) that
+// resolves true once a real frame has decoded, false on error or on
+// FEED_LOAD_TIMEOUT_MS.
 function feedBuildItem(item) {
   const section = document.createElement('section');
   section.className = 'feed-item';
@@ -1849,11 +1895,15 @@ function feedBuildItem(item) {
   section.appendChild(pauseIcon);
 
   let mediaEl;
+  let ready;
   if (item.type === 'video') {
     mediaEl = document.createElement('video');
     mediaEl.playsInline = true;
-    mediaEl.preload = 'metadata';
+    // 'auto' (not 'metadata') so the 'loadeddata' wait in feedWaitForMedia
+    // actually has a decoded frame to show, not just fetched dimensions.
+    mediaEl.preload = 'auto';
     mediaEl.src = mediaFullSrc(item);
+    ready = feedWaitForMedia(mediaEl, true);
     mediaEl.onloadedmetadata = () => {
       if (mediaEl.videoWidth > mediaEl.videoHeight) wrap.classList.add('rotated');
     };
@@ -1920,6 +1970,7 @@ function feedBuildItem(item) {
     mediaEl = document.createElement('img');
     mediaEl.alt = item.filename;
     mediaEl.src = mediaFullSrc(item);
+    ready = feedWaitForMedia(mediaEl, false);
     mediaEl.onload = () => {
       if (mediaEl.naturalWidth > mediaEl.naturalHeight) wrap.classList.add('rotated');
     };
@@ -1940,7 +1991,7 @@ function feedBuildItem(item) {
   section._mediaEl = mediaEl;
   section._fill = fill;
   section._timer = null;
-  return section;
+  return { section, ready };
 }
 
 function feedGoNext(section) {
@@ -1948,14 +1999,16 @@ function feedGoNext(section) {
   if (next && next.classList.contains('feed-item')) {
     next.scrollIntoView({ behavior: 'smooth', block: 'start' });
   }
-  // If there's nothing next yet, the sentinel/pagination will add more as
-  // the user scrolls anyway — nothing to do here in that case.
+  // If there's nothing next yet, the buffer refill (feedPumpPrefetch,
+  // triggered from feedActivate) will add more as the user catches up to
+  // it anyway — nothing to do here in that case.
 }
 
 function feedActivate(section) {
   if (feed.activeSection === section) return;
   if (feed.activeSection) feedDeactivate(feed.activeSection);
   feed.activeSection = section;
+  feedPumpPrefetch(); // the viewer just consumed one slot of buffer — top it back up
 
   const fill = section._fill;
   fill.style.transition = 'none';
@@ -1986,31 +2039,63 @@ function feedDeactivate(section) {
   if (feed.activeSection === section) feed.activeSection = null;
 }
 
-function feedAppendBatch(count) {
+// How many already-appended sections the viewer hasn't reached yet.
+// Sections are only ever appended at the tail in load-finish order and
+// never reordered afterward, so this is a plain sibling walk from
+// whichever one is currently active (or from the top, before anything's
+// been activated yet).
+function feedUnseenBufferCount() {
   const scrollEl = el('#feed-scroll');
-  const sentinel = el('#feed-sentinel');
-  let appended = 0;
-  while (appended < count) {
-    if (feed.queueIndex >= state.currentItems.length) break;
-    const item = state.currentItems[feed.queueIndex++];
-    const section = feedBuildItem(item);
-    scrollEl.insertBefore(section, sentinel);
-    feed.itemObserver.observe(section);
-    appended++;
+  let node = feed.activeSection ? feed.activeSection.nextElementSibling : scrollEl.firstElementChild;
+  let count = 0;
+  while (node) { count++; node = node.nextElementSibling; }
+  return count;
+}
+
+// Pulls candidates from state.currentItems and starts loading each one in
+// parallel (up to FEED_PRELOAD_POOL at once), stopping once the unseen
+// buffer plus what's already in flight reaches FEED_TARGET_BUFFER.
+// Self-chains: each candidate's resolution (feedLoadAndAppend) calls this
+// again, so the pool keeps refilling on its own as items finish loading —
+// or fail/time out and get silently replaced — without needing a
+// scroll-position trigger. Also called from feedActivate so the buffer
+// tops back up as the viewer advances, regardless of scroll speed.
+function feedPumpPrefetch() {
+  if (!feed.active) return;
+  while (
+    feed.inFlight < FEED_PRELOAD_POOL &&
+    feedUnseenBufferCount() + feed.inFlight < FEED_TARGET_BUFFER &&
+    feed.sourceIndex < state.currentItems.length
+  ) {
+    const item = state.currentItems[feed.sourceIndex++];
+    feed.inFlight++;
+    feedLoadAndAppend(item);
   }
+}
+
+async function feedLoadAndAppend(item) {
+  const { section, ready } = feedBuildItem(item);
+  const ok = await ready; // true = real decoded frame ready; false = error or timed out
+  feed.inFlight--;
+  if (feed.active && ok) {
+    el('#feed-scroll').appendChild(section);
+    feed.itemObserver.observe(section);
+  }
+  // A failed/timed-out item (404, corrupt/undecodable file, dead link) is
+  // just dropped — it never occupies a slot in the visible feed at all,
+  // so the user never sees a broken-media placeholder for it.
+  feedPumpPrefetch();
 }
 
 function startFeed() {
   if (!state.currentItems.length) { toast('Nothing to show here.', true); return; }
   feed.active = true;
-  feed.queueIndex = 0;
+  feed.sourceIndex = 0;
+  feed.inFlight = 0;
   feed.activeSection = null;
 
   const scrollEl = el('#feed-scroll');
   scrollEl.innerHTML = '';
-  const sentinel = document.createElement('div');
-  sentinel.id = 'feed-sentinel';
-  scrollEl.appendChild(sentinel);
 
   feed.itemObserver = new IntersectionObserver((entries) => {
     entries.forEach((entry) => {
@@ -2018,21 +2103,15 @@ function startFeed() {
     });
   }, { root: scrollEl, threshold: [0, 0.6, 1] });
 
-  feed.sentinelObserver = new IntersectionObserver((entries) => {
-    if (entries[0].isIntersecting) feedAppendBatch(FEED_BATCH_SIZE);
-  }, { root: scrollEl, rootMargin: '200% 0px' }); // start the next batch well before actually hitting bottom
-  feed.sentinelObserver.observe(sentinel);
-
   el('#feed').hidden = false;
   scrollEl.scrollTop = 0;
-  feedAppendBatch(FEED_BATCH_SIZE);
+  feedPumpPrefetch();
 }
 
 function exitFeed() {
-  feed.active = false;
+  feed.active = false; // in-flight feedLoadAndAppend() calls check this and drop their result
   if (feed.activeSection) feedDeactivate(feed.activeSection);
   if (feed.itemObserver) { feed.itemObserver.disconnect(); feed.itemObserver = null; }
-  if (feed.sentinelObserver) { feed.sentinelObserver.disconnect(); feed.sentinelObserver = null; }
   el('#feed-scroll').querySelectorAll('video').forEach((v) => v.pause());
   el('#feed-scroll').innerHTML = '';
   el('#feed').hidden = true;

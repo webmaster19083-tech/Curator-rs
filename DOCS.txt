@@ -212,7 +212,12 @@ TROUBLESHOOTING
 - Port already in use -> another curator.exe is running, or change the port in source.
 - NSFW auto-rating stuck off / nothing getting rated -> check curator.log for
   "nsfw worker" warnings; usually means Python isn't on PATH or
-  opennsfw-standalone (and numpy<2) aren't installed for that Python.
+  opennsfw-standalone (and numpy<2) aren't installed for that Python. Run
+  tools/diagnose_nsfw.py (python tools/diagnose_nsfw.py) for a full
+  diagnosis -- it specifically checks whether pip install put the package
+  into a different Python than the one Curator actually launches, which is
+  the single most common cause of "installed it and it still says missing
+  dependency." Pass --fix to have it install the right packages for you.
 
 A NOTE ON USE
 ---------------

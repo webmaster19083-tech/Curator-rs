@@ -204,6 +204,11 @@ pub fn run_migrations(conn: &Connection) -> Result<()> {
         // DEFAULT 1 so all pre-existing rows are treated as real files
         conn.execute_batch("ALTER TABLE media ADD COLUMN downloaded INTEGER NOT NULL DEFAULT 1;")?;
     }
+    if !media_cols.contains("duration_secs") {
+        // NULL = not a video, or a video whose duration isn't known yet
+        // (ffprobe not installed, or not yet backfilled — see duration.rs).
+        conn.execute_batch("ALTER TABLE media ADD COLUMN duration_secs REAL;")?;
+    }
 
     // ── tags + junction tables ────────────────────────────────────────────────
     conn.execute_batch("
@@ -241,6 +246,7 @@ pub fn run_migrations(conn: &Connection) -> Result<()> {
         CREATE INDEX IF NOT EXISTS idx_media_source    ON media(source_id);
         CREATE INDEX IF NOT EXISTS idx_media_rating    ON media(rating);
         CREATE INDEX IF NOT EXISTS idx_media_added_at  ON media(added_at);
+        CREATE INDEX IF NOT EXISTS idx_media_duration  ON media(duration_secs);
         CREATE UNIQUE INDEX IF NOT EXISTS idx_media_source_origin
             ON media(source_id, origin_url) WHERE origin_url IS NOT NULL;
         CREATE INDEX IF NOT EXISTS idx_groups_parent   ON groups(parent_id);

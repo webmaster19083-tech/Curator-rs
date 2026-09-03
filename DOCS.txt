@@ -157,6 +157,25 @@ but nothing else in Curator depends on this or is affected by it.
 Video files aren't scored (photos only, for now).
 
 
+CLIPS VS VIDEOS
+-----------------
+The toolbar's type filter splits video into two categories by length:
+"clips" (up to 90 seconds) and "videos" (over 90 seconds) — handy for
+keeping short-form content separate from longer downloads. This needs
+ffprobe (part of ffmpeg — see Requirements) to read each video's duration;
+without it, videos still show up fine everywhere, they just won't sort
+into either "clips" or "videos" specifically (only "all" and "photos" are
+unaffected). Existing videos get their duration filled in automatically in
+the background after an update; new downloads get it immediately as
+they're indexed.
+
+The feed and portrait wall always skip anything over 90 seconds
+regardless of the toolbar filter — those views are built for quick,
+short-form browsing, and a long video breaks that up. This check happens
+live as each video loads, so it works even before ffprobe has backfilled
+that file's duration for the toolbar filter above.
+
+
 EXPORT / IMPORT
 -----------------
 "export list" in the sidebar footer downloads a JSON backup of every
@@ -218,6 +237,9 @@ TROUBLESHOOTING
   into a different Python than the one Curator actually launches, which is
   the single most common cause of "installed it and it still says missing
   dependency." Pass --fix to have it install the right packages for you.
+- Videos never sorting into "clips"/"videos" -> ffprobe isn't on PATH (it
+  ships with ffmpeg — see Requirements); curator.log logs this once at
+  startup rather than per-video.
 
 A NOTE ON USE
 ---------------

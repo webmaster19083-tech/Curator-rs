@@ -4,6 +4,7 @@ mod downloader;
 mod thumb_worker;
 mod chpack;
 mod nsfw;
+mod duration;
 mod routes;
 
 use std::collections::{HashMap, HashSet};
@@ -47,6 +48,7 @@ pub struct AppState {
     pub thumbs_dir:           PathBuf,
     pub log_path:             PathBuf,
     pub gallery_dl_bin:       String,
+    pub ffprobe_bin:          String,
     /// None if NSFW auto-rating is off or its worker never started.
     pub nsfw:                 Option<nsfw::NsfwClassifier>,
 }
@@ -121,6 +123,7 @@ struct Config {
     data_dir:       Option<String>,
     gallery_dl_bin: Option<String>,
     python_bin:     Option<String>,
+    ffprobe_bin:    Option<String>,
 }
 
 fn load_config() -> Config {
@@ -249,6 +252,10 @@ async fn main() -> Result<()> {
             if cfg!(windows) { "python".to_string() } else { "python3".to_string() }
         });
 
+    let ffprobe_bin = cfg.ffprobe_bin
+        .filter(|s| !s.is_empty())
+        .unwrap_or_else(|| "ffprobe".to_string());
+
     // Database pool + migrations
     let pool = db::init_pool(&data_dir)
         .map_err(|e| { error!("FATAL: could not set up database at {:?}: {}", data_dir.join("data.db"), e); e })?;
@@ -272,7 +279,16 @@ async fn main() -> Result<()> {
         None
     };
     if let Some(ref classifier) = nsfw_classifier {
-        nsfw::spawn_backfill_loop(pool.clone(), classifier.clone());
+        nsfw::spawn_backfill_loop(pool.clone(), classifier.clone(), library_dir.clone());
+    }
+
+    // Video duration backfill (for the clips/videos split — see
+    // duration.rs). Checked once, here, rather than letting the loop
+    // discover ffprobe is missing on every single video.
+    if duration::ffprobe_available(&ffprobe_bin) {
+        duration::spawn_backfill_loop(pool.clone(), ffprobe_bin.clone(), library_dir.clone());
+    } else {
+        info!("ffprobe not found (\"{}\") — video duration (clips/videos split) won't be backfilled for existing videos; newly-downloaded ones are unaffected once ffprobe is available", ffprobe_bin);
     }
 
     let state = AppState {
@@ -290,6 +306,7 @@ async fn main() -> Result<()> {
         thumbs_dir,
         log_path,
         gallery_dl_bin,
+        ffprobe_bin,
         nsfw:                  nsfw_classifier,
     };
 

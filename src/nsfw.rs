@@ -253,6 +253,7 @@ async fn backoff(consecutive_failures: &mut u32) {
 pub fn spawn_backfill_loop(
     pool: crate::db::DbPool,
     classifier: NsfwClassifier,
+    library_dir: std::path::PathBuf,
 ) {
     tokio::spawn(async move {
         let mut known_bad: std::collections::HashSet<i64> = std::collections::HashSet::new();
@@ -274,7 +275,12 @@ pub fn spawn_backfill_loop(
             }
 
             for (id, filepath) in rows {
-                let result = classifier.classify(PathBuf::from(&filepath)).await;
+                // filepath is stored relative to library_dir (see thumb.rs's
+                // identical join) — passing it straight to the classifier
+                // without this would have it opening a path relative to
+                // whatever the process's CWD happens to be, not the library.
+                let abs_path = library_dir.join(&filepath);
+                let result = classifier.classify(abs_path).await;
                 match result {
                     Ok(score) => {
                         let rating = score_to_rating(score);

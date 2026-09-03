@@ -22,6 +22,34 @@ function shuffleArray(arr) {
 
 function pad4(n) { return String(n).padStart(4, '0'); }
 
+// The clips/videos split, in one place. A video's duration_secs comes from
+// server-side ffprobe (see duration.rs) for the grid's type filter below;
+// the feed and portrait wall instead measure it live via loadedmetadata
+// (see feedBuildItem/pwCheckAndPrepare) since they need an answer before
+// server-side backfill may have gotten to a given file, not after.
+// Videos under 15s and over 90s both exist on a spectrum "clip" doesn't
+// really capture either way, but of the two, folding them into "clip"
+// (rather than a third, easy-to-forget bucket, or excluding them from both
+// filtered views entirely) is the one that doesn't make content quietly
+// vanish from every category — so: clip = anything up to 90s, video =
+// anything over. Tighten CLIP_MIN_SECONDS below if a hard 15s floor turns
+// out to matter more than that in practice.
+const CLIP_MAX_SECONDS = 90;
+
+function mediaMatchesTypeFilter(item, typeFilter) {
+  if (typeFilter === 'all') return true;
+  if (typeFilter === 'image') return item.type === 'image';
+  if (item.type !== 'video') return false;
+  // Duration not known yet (not yet backfilled, or ffprobe unavailable) —
+  // don't guess; just don't show it under either duration-based filter
+  // until it's actually known, same as an unrated item skipping a rating
+  // filter rather than being assigned one.
+  if (item.duration_secs == null) return false;
+  return typeFilter === 'clip'
+    ? item.duration_secs <= CLIP_MAX_SECONDS
+    : item.duration_secs > CLIP_MAX_SECONDS;
+}
+
 // A media item that isn't downloaded yet (downloaded===0 — see the
 // "real sources stream live before they're downloaded" feature in
 // app.py's populate_placeholders/scan_and_index) has no local file at
@@ -83,7 +111,7 @@ const state = {
   collapsedGroups: new Set(),
   view: { type: 'all' },   // {type:'all'} | {type:'creator', id} | {type:'group', id, name}
   currentItems: [],
-  typeFilter: 'all',       // 'all' | 'image' | 'video' — applied client-side in loadView()
+  typeFilter: 'all',       // 'all' | 'image' | 'clip' | 'video' — applied client-side in loadView(), see mediaMatchesTypeFilter
   sortOrder: 'default',    // one of _MEDIA_SORT_ORDERS' keys server-side
   tagFilter: '',           // tag name, or '' for no filter
   maxRatingFilter: '',     // '' for no filter, else '1'..'4' — hide rating > this (0/unrated always shown)
@@ -1283,7 +1311,7 @@ async function loadView() {
 
   if (loadError) toast('Could not load media: ' + loadError.message, true);
   if (state.typeFilter !== 'all') {
-    items = items.filter((item) => item.type === state.typeFilter);
+    items = items.filter((item) => mediaMatchesTypeFilter(item, state.typeFilter));
   }
   state.currentItems = items;
   toggleEmptyState(items.length === 0);
@@ -1679,6 +1707,12 @@ function pwCheckAndPrepare(item) {
       v.preload = 'metadata';
       v.playsInline = true;
       v.onloadedmetadata = () => {
+        // Long-form video doesn't fit this view — treat it the same as a
+        // rejected orientation: measured fresh here (not from the
+        // server-backfilled duration_secs, which may not be known yet for
+        // this file) so the exclusion is correct immediately, not only
+        // once the background backfill has caught up to it.
+        if (v.duration > CLIP_MAX_SECONDS) { resolve(null); return; }
         resolve(v.videoHeight > v.videoWidth ? { item, el: v } : null);
       };
       v.onerror = () => resolve(null);
@@ -1903,7 +1937,15 @@ function feedBuildItem(item) {
     // actually has a decoded frame to show, not just fetched dimensions.
     mediaEl.preload = 'auto';
     mediaEl.src = mediaFullSrc(item);
-    ready = feedWaitForMedia(mediaEl, true);
+    ready = feedWaitForMedia(mediaEl, true).then((ok) => {
+      // Long-form video doesn't fit this view — treat it the same as a
+      // load failure/timeout: never appended, next candidate takes its
+      // slot. Measured fresh here (not from server-backfilled
+      // duration_secs, which may not be known yet for this file) so the
+      // exclusion is correct immediately, not only once the backfill has
+      // caught up to it.
+      return ok && mediaEl.duration > CLIP_MAX_SECONDS ? false : ok;
+    });
     mediaEl.onloadedmetadata = () => {
       if (mediaEl.videoWidth > mediaEl.videoHeight) wrap.classList.add('rotated');
     };

@@ -328,6 +328,26 @@ pub async fn collect_gallery_dl_items(
 // through `dunce::simplified` — this user's filenames embed long base64
 // URLs, and raw `\\?\`-prefixed long paths on Windows confuse non-WinAPI
 // callers (including SQLite's own file layer in some configurations).
+/// Runs ffprobe to get a video's duration in seconds. Returns None — never
+/// an error — if ffprobe isn't installed, the file isn't a valid video, or
+/// anything else goes wrong. Duration is a nice-to-have for the clips/full
+/// videos split, not something indexing should ever fail or slow down over;
+/// ffprobe with -show_entries format=duration only reads the container's
+/// header, not the actual frames, so this is fast even for large files.
+pub(crate) fn probe_video_duration(ffprobe_bin: &str, path: &Path) -> Option<f64> {
+    let output = std::process::Command::new(ffprobe_bin)
+        .args([
+            "-v", "error",
+            "-show_entries", "format=duration",
+            "-of", "default=noprint_wrappers=1:nokey=1",
+        ])
+        .arg(path)
+        .output()
+        .ok()?;
+    if !output.status.success() { return None; }
+    String::from_utf8_lossy(&output.stdout).trim().parse::<f64>().ok()
+}
+
 pub fn scan_and_index(
     state:     &AppState,
     source_id: i64,
@@ -349,10 +369,11 @@ pub fn scan_and_index(
         .collect();
 
     struct Candidate {
-        filepath:   String,
-        filename:   String,
-        kind:       String,
-        origin_url: Option<String>,
+        filepath:      String,
+        filename:      String,
+        kind:          String,
+        origin_url:    Option<String>,
+        duration_secs: Option<f64>,
     }
 
     let mut candidates: Vec<Candidate> = Vec::new();
@@ -396,8 +417,13 @@ pub fn scan_and_index(
 
             let kind = if is_video_path(&path) { "video" } else { "image" };
             let filename = path.file_name().unwrap_or_default().to_string_lossy().to_string();
+            let duration_secs = if kind == "video" {
+                probe_video_duration(&state.ffprobe_bin, &path)
+            } else {
+                None
+            };
 
-            candidates.push(Candidate { filepath: rel, filename, kind: kind.to_string(), origin_url });
+            candidates.push(Candidate { filepath: rel, filename, kind: kind.to_string(), origin_url, duration_secs });
         }
     }
 
@@ -407,15 +433,15 @@ pub fn scan_and_index(
     conn.execute("BEGIN", [])?;
     {
         let mut stmt = conn.prepare_cached(
-            "INSERT INTO media (source_id, filepath, filename, type, added_at, origin_url, downloaded)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, 1)
+            "INSERT INTO media (source_id, filepath, filename, type, added_at, origin_url, downloaded, duration_secs)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, 1, ?7)
              ON CONFLICT(source_id, origin_url) WHERE origin_url IS NOT NULL
-                DO UPDATE SET filepath=excluded.filepath, filename=excluded.filename, downloaded=1
+                DO UPDATE SET filepath=excluded.filepath, filename=excluded.filename, downloaded=1, duration_secs=excluded.duration_secs
              ON CONFLICT(filepath) DO NOTHING"
         )?;
         for c in &candidates {
             let changed = stmt.execute(rusqlite::params![
-                source_id, c.filepath, c.filename, c.kind, now, c.origin_url
+                source_id, c.filepath, c.filename, c.kind, now, c.origin_url, c.duration_secs
             ])?;
             added += changed as i64;
         }
@@ -710,4 +736,50 @@ fn short_error_summary(log_text: &str) -> String {
     let joined = filtered.join("\n");
     let tail: String = joined.chars().rev().take(500).collect::<String>().chars().rev().collect();
     tail.trim().to_string()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn probe_video_duration_fails_soft_on_a_missing_binary() {
+        // Never a panic or Err — just None, same as "duration not known yet".
+        assert_eq!(
+            probe_video_duration("definitely-not-a-real-binary-xyz", Path::new("/nonexistent.mp4")),
+            None
+        );
+    }
+
+    #[test]
+    fn probe_video_duration_fails_soft_on_a_missing_file() {
+        assert_eq!(probe_video_duration("ffprobe", Path::new("/nonexistent.mp4")), None);
+    }
+
+    #[test]
+    fn probe_video_duration_reads_a_real_file_correctly() {
+        // Skips (doesn't fail) on machines without ffmpeg/ffprobe installed —
+        // this checks the parsing logic is correct, not that ffmpeg exists.
+        if std::process::Command::new("ffmpeg").arg("-version").output().map(|o| o.status.success()).unwrap_or(false) == false {
+            eprintln!("skipping: ffmpeg not available on this machine");
+            return;
+        }
+
+        let dir = std::env::temp_dir().join(format!("curator_test_{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("test.mp4");
+
+        let status = std::process::Command::new("ffmpeg")
+            .args(["-y", "-f", "lavfi", "-i", "testsrc=duration=3:size=64x64:rate=5"])
+            .arg(&path)
+            .output()
+            .unwrap();
+        assert!(status.status.success(), "ffmpeg failed to generate the test fixture");
+
+        let duration = probe_video_duration("ffprobe", &path);
+        let _ = std::fs::remove_dir_all(&dir);
+
+        let d = duration.expect("ffprobe should have reported a duration for a file ffmpeg just made");
+        assert!((d - 3.0).abs() < 0.5, "expected ~3s, got {}", d);
+    }
 }

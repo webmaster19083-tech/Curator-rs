@@ -25,11 +25,10 @@ one bad file shouldn't cost you the whole warmed-up process. Only a
 genuinely broken pipe (or this script exiting) makes the Rust side spawn a
 replacement.
 
-Requires: opennsfw-standalone, onnxruntime, numpy<2 (the package needs the
-NumPy 1.x array-copy semantics — see requirements below), Pillow.
-Install with your Python's pip, e.g.:
+Requires: opennsfw-onnx (pulls in onnxruntime and Pillow itself, current
+NumPy — no version pin needed). Install with your Python's pip, e.g.:
 
-    pip install "numpy<2" opennsfw-standalone
+    pip install opennsfw-onnx
 
 This is entirely optional — if this script can't import its dependencies,
 it reports that once on stdout and exits; Curator just leaves media
@@ -41,13 +40,14 @@ import sys
 
 def main() -> int:
     try:
-        from opennsfw_standalone import OpenNSFWInferenceRunner
+        from opennsfw_onnx import NSFWClassifier
     except Exception as e:  # noqa: BLE001 - report anything, don't just crash silently
         print(json.dumps({"ready": False, "error": f"missing dependency: {e}"}), flush=True)
         return 1
 
     try:
-        runner = OpenNSFWInferenceRunner.load()
+        clf = NSFWClassifier()
+        clf.warmup()  # forces the onnxruntime session to load now, not on job 1
     except Exception as e:  # noqa: BLE001
         print(json.dumps({"ready": False, "error": f"model load failed: {e}"}), flush=True)
         return 1
@@ -69,10 +69,8 @@ def main() -> int:
             continue
 
         try:
-            with open(path, "rb") as fp:
-                data = fp.read()
-            score = runner.infer(data)
-            print(json.dumps({"id": req_id, "score": float(score)}), flush=True)
+            pred = clf.classify(path)  # accepts a path directly, no manual read needed
+            print(json.dumps({"id": req_id, "score": pred.nsfw}), flush=True)
         except Exception as e:  # noqa: BLE001 - this image failed, worker stays up
             print(json.dumps({"id": req_id, "error": str(e)}), flush=True)
 

@@ -17,9 +17,9 @@ missed:
     C:\\Users\\...\\AppData\\Local\\Packages\\PythonSoftwareFoundation.Python.3.13_qbz5n2kfra8p0\\...
     which is the Microsoft Store Python package path, not a normal
     python.org install.
-  - From "A": also runs the actual model-load step (OpenNSFWInferenceRunner.load()),
-    not just `import` — a numpy<2 mismatch or a corrupt/missing ONNX model
-    file passes the import check but fails here.
+  - From "A": also runs the actual model-load step (NSFWClassifier() +
+    warmup()), not just `import` — a corrupt/missing ONNX model file
+    passes the import check but fails here.
   - From "A": --fix flag that offers to pip-install the right packages
     into the exact interpreter Curator will launch.
 
@@ -38,8 +38,8 @@ import sys
 import textwrap
 from pathlib import Path
 
-REQUIRED_PACKAGES = ["numpy<2", "opennsfw-standalone", "onnxruntime", "Pillow"]
-REQUIRED_MODULES = ["numpy", "PIL", "onnxruntime", "opennsfw_standalone"]
+REQUIRED_PACKAGES = ["opennsfw-onnx"]
+REQUIRED_MODULES = ["numpy", "PIL", "onnxruntime", "opennsfw_onnx"]
 
 # Run inside the TARGET interpreter (not this script's own) so results
 # reflect exactly what Curator's worker would see.
@@ -53,10 +53,10 @@ for m in mods:
         out["modules"][m] = {"ok": True, "version": getattr(mod, "__version__", None)}
     except Exception as e:
         out["modules"][m] = {"ok": False, "error": f"{type(e).__name__}: {e}"}
-if out["modules"].get("opennsfw_standalone", {}).get("ok"):
+if out["modules"].get("opennsfw_onnx", {}).get("ok"):
     try:
-        from opennsfw_standalone import OpenNSFWInferenceRunner
-        OpenNSFWInferenceRunner.load()
+        from opennsfw_onnx import NSFWClassifier
+        NSFWClassifier().warmup()
         out["model_load"] = {"ok": True}
     except Exception as e:
         out["model_load"] = {"ok": False, "error": f"{type(e).__name__}: {e}"}
@@ -251,10 +251,6 @@ def main():
             ver = f" v{info['version']}" if info.get("version") else ""
             print(f"    {m:<22} {status}{ver}")
             if not info["ok"]:
-                all_ok = False
-            if m == "numpy" and info["ok"] and info.get("version", "0").split(".")[0] not in ("0", "1"):
-                print(f"      NOTE: numpy {info['version']} installed, but opennsfw-standalone")
-                print("      needs numpy<2 — it fails at import time with numpy 2.x in practice.")
                 all_ok = False
         if all_ok and "model_load" in res:
             status = "OK" if res["model_load"]["ok"] else "FAILED"

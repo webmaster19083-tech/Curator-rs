@@ -6,7 +6,7 @@
 //! happens once per app run rather than once per image.
 //!
 //! This whole feature is opt-in and fails soft: if Python or the
-//! `opennsfw-standalone` package aren't available, the worker keeps failing
+//! `opennsfw-onnx` package aren't available, the worker keeps failing
 //! to start, `classify()` keeps returning errors, and the rest of the app
 //! is completely unaffected — media just stays unscored.
 
@@ -126,7 +126,7 @@ async fn supervisor_loop(
                         r.error.unwrap_or_else(|| "unknown error".into())
                     );
                     let _ = child.kill().await;
-                    drain_with_error(&mut rx, "nsfw worker failed to start (is opennsfw-standalone installed?)");
+                    drain_with_error(&mut rx, "nsfw worker failed to start (is opennsfw-onnx installed?)");
                     backoff(&mut consecutive_failures).await;
                     continue 'restart;
                 }
@@ -139,9 +139,9 @@ async fn supervisor_loop(
                 }
             },
             _ => {
-                warn!("nsfw worker exited before it was ready — is Python on PATH, and is opennsfw-standalone installed?");
+                warn!("nsfw worker exited before it was ready — is Python on PATH, and is opennsfw-onnx installed?");
                 let _ = child.kill().await;
-                drain_with_error(&mut rx, "nsfw worker exited on startup (missing Python or opennsfw-standalone?)");
+                drain_with_error(&mut rx, "nsfw worker exited on startup (missing Python or opennsfw-onnx?)");
                 backoff(&mut consecutive_failures).await;
                 continue 'restart;
             }

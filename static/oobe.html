@@ -1,0 +1,226 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Set up Curator</title>
+<link rel="icon" href="data:,">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Space+Grotesk:wght@500;600;700&family=IBM+Plex+Sans:wght@400;500;600&family=IBM+Plex+Mono:wght@400;500&display=swap" rel="stylesheet">
+<link rel="stylesheet" href="/style.css">
+<link rel="stylesheet" href="/oobe.css">
+</head>
+<body>
+
+<div class="oobe-shell">
+<main class="oobe-card" role="main" aria-labelledby="oobe-title">
+
+  <div class="oobe-header">
+    <span class="brand-mark" aria-hidden="true">◧</span>
+    <div>
+      <h1 id="oobe-title">Set up Curator</h1>
+      <p id="oobe-subtitle">Step <span id="oobe-step-num">1</span> of 8</p>
+    </div>
+  </div>
+
+  <ol class="oobe-progress" id="oobe-progress" aria-hidden="true"></ol>
+
+  <div id="oobe-error-banner" class="oobe-inline-status err" role="alert" hidden></div>
+
+  <!-- ── Step 1 — Welcome ─────────────────────────────────────────── -->
+  <section class="oobe-step" data-step="1" aria-labelledby="step1-h">
+    <div class="oobe-welcome-icon">◧</div>
+    <h2 id="step1-h">Welcome to Curator</h2>
+    <p class="oobe-lede">Local gallery browser powered by gallery-dl.</p>
+    <p class="oobe-lede">
+      Everything Curator downloads — your media, its database, and its settings —
+      stays on this machine. Nothing is uploaded anywhere. This short setup checks
+      that Curator has what it needs, then gets out of your way.
+    </p>
+    <div class="oobe-welcome-actions">
+      <button class="btn btn-accent btn-block" data-action="get-started">Get Started</button>
+      <button class="btn btn-ghost btn-block small" data-action="skip-to-finish">Advanced / Skip Setup</button>
+    </div>
+  </section>
+
+  <!-- ── Step 2 — Dependencies ───────────────────────────────────────── -->
+  <section class="oobe-step" data-step="2" aria-labelledby="step2-h" hidden>
+    <h2 id="step2-h">Checking dependencies</h2>
+    <p class="oobe-lede">Curator drives these tools directly rather than replacing them.</p>
+
+    <div class="oobe-dep" id="dep-gallery_dl">
+      <span class="oobe-dep-icon pending" id="dep-gallery_dl-icon">…</span>
+      <div class="oobe-dep-body">
+        <div class="oobe-dep-name">gallery-dl <span class="oobe-dep-tag">required</span></div>
+        <p class="oobe-dep-detail" id="dep-gallery_dl-detail">Checking…</p>
+        <div class="oobe-override-row" id="dep-gallery_dl-override" hidden>
+          <input type="text" class="oobe-input" id="dep-gallery_dl-path" placeholder="/path/to/gallery-dl">
+          <button class="btn small" data-action="test-gallery_dl">Test</button>
+        </div>
+      </div>
+    </div>
+
+    <div class="oobe-dep" id="dep-ffprobe">
+      <span class="oobe-dep-icon pending" id="dep-ffprobe-icon">…</span>
+      <div class="oobe-dep-body">
+        <div class="oobe-dep-name">ffmpeg / ffprobe <span class="oobe-dep-tag">optional</span></div>
+        <p class="oobe-dep-detail" id="dep-ffprobe-detail">Checking…</p>
+        <div class="oobe-override-row" id="dep-ffprobe-override" hidden>
+          <input type="text" class="oobe-input" id="dep-ffprobe-path" placeholder="/path/to/ffprobe">
+          <button class="btn small" data-action="test-ffprobe">Test</button>
+        </div>
+      </div>
+    </div>
+
+    <p class="oobe-help">
+      ffmpeg/ffprobe is only used to split videos into a "clips" vs "videos" view by
+      duration. Everything else works without it.
+    </p>
+  </section>
+
+  <!-- ── Step 3 — Data Directory ─────────────────────────────────────── -->
+  <section class="oobe-step" data-step="3" aria-labelledby="step3-h" hidden>
+    <h2 id="step3-h">Data directory</h2>
+    <p class="oobe-lede">
+      Curator stores downloaded media, its database, settings, and logs here.
+    </p>
+    <div class="oobe-field oobe-field-full">
+      <input type="text" class="oobe-input mono" id="data-dir-input">
+      <div class="oobe-override-row">
+        <button class="btn small" data-action="use-default-dir">Use default</button>
+        <button class="btn small" data-action="verify-dir">Verify writable</button>
+      </div>
+      <p class="oobe-inline-status" id="data-dir-status"></p>
+    </div>
+    <p class="oobe-help">
+      Curator never moves existing files when you change this — pick a directory
+      that either doesn't exist yet (it'll be created) or already holds a Curator
+      library you want to keep using.
+    </p>
+  </section>
+
+  <!-- ── Step 4 — gallery-dl configuration ───────────────────────────── -->
+  <section class="oobe-step" data-step="4" aria-labelledby="step4-h" hidden>
+    <h2 id="step4-h">gallery-dl configuration</h2>
+    <div class="oobe-dep" id="step4-gallery_dl-summary">
+      <span class="oobe-dep-icon pending" id="step4-icon">…</span>
+      <div class="oobe-dep-body">
+        <div class="oobe-dep-name mono" id="step4-name">gallery-dl</div>
+        <p class="oobe-dep-detail" id="step4-detail"></p>
+      </div>
+    </div>
+    <button class="btn small" data-action="retest-gallery_dl">Test again</button>
+    <p class="oobe-help">
+      gallery-dl keeps its own configuration file (for things like site logins and
+      cookies) separately from Curator — this wizard doesn't ask for passwords or
+      cookies. See gallery-dl's own documentation for site-specific login setup;
+      Curator will use whatever gallery-dl is already configured to do.
+    </p>
+  </section>
+
+  <!-- ── Step 5 — Download defaults ──────────────────────────────────── -->
+  <section class="oobe-step" data-step="5" aria-labelledby="step5-h" hidden>
+    <h2 id="step5-h">Download defaults</h2>
+    <label class="settings-field mono small">
+      concurrent downloads
+      <input type="number" class="oobe-input" id="max-concurrent-input" min="1" max="20" step="1">
+    </label>
+    <p class="oobe-help">
+      New sources start downloading as soon as they're added, and gallery-dl's own
+      per-source archive already skips files it's downloaded before — both happen
+      automatically, no extra setup needed here.
+    </p>
+  </section>
+
+  <!-- ── Step 6 — Optional content classification ────────────────────── -->
+  <section class="oobe-step" data-step="6" aria-labelledby="step6-h" hidden>
+    <h2 id="step6-h">Content classification</h2>
+    <p class="oobe-lede">
+      Optional: a local classifier can automatically set a 1–5★ rating on new (and,
+      in the background, existing) images — 1★ clothed/safe up to 5★ extremely
+      explicit — for anything you haven't already rated by hand.
+    </p>
+    <div class="oobe-dep" id="dep-nsfw">
+      <span class="oobe-dep-icon pending" id="dep-nsfw-icon">…</span>
+      <div class="oobe-dep-body">
+        <div class="oobe-dep-name">Python classifier environment <span class="oobe-dep-tag">optional</span></div>
+        <p class="oobe-dep-detail" id="dep-nsfw-detail">Checking…</p>
+      </div>
+    </div>
+    <label class="settings-checkbox mono small">
+      <input type="checkbox" id="nsfw-enabled-input"> Enable automatic rating
+    </label>
+    <p class="oobe-help" id="nsfw-help">
+      Turning this on when the environment isn't ready yet is fine — Curator will
+      just leave items unrated until the classifier's dependencies are installed.
+      See <code>curator --docs</code> for setup instructions.
+    </p>
+  </section>
+
+  <!-- ── Step 7 — Appearance ─────────────────────────────────────────── -->
+  <section class="oobe-step" data-step="7" aria-labelledby="step7-h" hidden>
+    <h2 id="step7-h">Appearance</h2>
+    <label class="settings-field mono small">
+      theme
+      <select class="oobe-input" id="theme-input">
+        <option value="system">System</option>
+        <option value="yotsuba">Yotsuba</option>
+        <option value="yotsuba-b">Yotsuba B</option>
+        <option value="futaba">Futaba</option>
+        <option value="burichan">Burichan</option>
+        <option value="tomorrow">Tomorrow</option>
+        <option value="photon">Photon</option>
+        <option value="light">Light</option>
+        <option value="oled-dark">OLED dark</option>
+      </select>
+    </label>
+    <label class="settings-field mono small">
+      slideshow speed
+      <select class="oobe-input" id="slideshow-speed-input">
+        <option value="2000">2s</option>
+        <option value="3000">3s</option>
+        <option value="5000">5s</option>
+        <option value="8000">8s</option>
+        <option value="15000">15s</option>
+        <option value="30000">30s</option>
+      </select>
+    </label>
+    <label class="settings-checkbox mono small">
+      <input type="checkbox" id="slideshow-loop-input"> loop by default
+    </label>
+    <label class="settings-checkbox mono small">
+      <input type="checkbox" id="slideshow-shuffle-input"> shuffle by default
+    </label>
+  </section>
+
+  <!-- ── Step 8 — Finish ─────────────────────────────────────────────── -->
+  <section class="oobe-step" data-step="8" aria-labelledby="step8-h" hidden>
+    <h2 id="step8-h">Ready to go</h2>
+    <div class="oobe-summary" id="oobe-summary"></div>
+    <p class="oobe-inline-status err" id="finish-blocker" hidden></p>
+    <p class="oobe-help" id="finish-restart-note" hidden>
+      Your data directory / executable path change will take effect the next time
+      Curator starts.
+    </p>
+    <details class="oobe-details" id="finish-details" hidden>
+      <summary>Details</summary>
+      <pre id="finish-details-text"></pre>
+    </details>
+  </section>
+
+  <!-- ── Footer nav ───────────────────────────────────────────────────── -->
+  <div class="oobe-nav" id="oobe-nav" hidden>
+    <button class="btn btn-ghost" id="oobe-back-btn" data-action="back">Back</button>
+    <div class="oobe-nav-right">
+      <button class="btn" id="oobe-next-btn" data-action="next">Next</button>
+      <button class="btn btn-accent" id="oobe-finish-btn" data-action="finish" hidden>Finish Setup</button>
+    </div>
+  </div>
+
+</main>
+</div>
+
+<script src="/oobe.js"></script>
+</body>
+</html>

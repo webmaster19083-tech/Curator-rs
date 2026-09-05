@@ -21,7 +21,7 @@ pub async fn get_thumbnail(
     };
 
     let row = conn.query_row(
-        "SELECT filepath, type, downloaded, origin_url FROM media WHERE id=?1",
+        "SELECT filepath, type, downloaded, origin_url FROM media WHERE id=?1 AND missing=0",
         [id],
         |r| Ok((
             r.get::<_, String>(0)?,
@@ -36,6 +36,7 @@ pub async fn get_thumbnail(
         Err(_) => return (StatusCode::NOT_FOUND, Json(json!({"error": "Media not found"}))).into_response(),
     };
 
+    drop(conn);
     // Placeholder: redirect to origin_url for the frontend to stream directly
     if downloaded == 0 {
         return if let Some(url) = origin_url {
@@ -46,6 +47,11 @@ pub async fn get_thumbnail(
     }
 
     let src_path = dunce::simplified(&state.library_dir.join(&filepath)).to_path_buf();
+
+    if !src_path.is_file() {
+        if let Ok(conn) = state.pool.get() { let _ = crate::media_files::mark_missing(&conn, id); }
+        return (StatusCode::NOT_FOUND, "Media file is unavailable").into_response();
+    }
 
     // Videos — serve the real file (no thumbnail for video)
     if kind == "video" {
@@ -58,7 +64,7 @@ pub async fn get_thumbnail(
             StatusCode::OK,
             [
                 (header::CONTENT_TYPE,  "image/jpeg"),
-                (header::CACHE_CONTROL, "public, max-age=31536000, immutable"),
+                (header::CACHE_CONTROL, "no-cache"),
             ],
             bytes,
         ).into_response(),
@@ -77,7 +83,7 @@ async fn serve_file_with_cache(path: &std::path::Path) -> Response {
                 StatusCode::OK,
                 [
                     (header::CONTENT_TYPE,  mime),
-                    (header::CACHE_CONTROL, "public, max-age=31536000, immutable"),
+                    (header::CACHE_CONTROL, "no-cache"),
                 ],
                 bytes,
             ).into_response()

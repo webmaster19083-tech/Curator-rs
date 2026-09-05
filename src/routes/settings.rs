@@ -12,7 +12,10 @@ use tokio::sync::Semaphore;
 use crate::AppState;
 use crate::db::save_settings;
 
-const VALID_THEMES: &[&str] = &[
+/// Shared with `routes::oobe` (the Appearance step reuses the exact same
+/// allow-list rather than re-declaring it) — see "Do not introduce
+/// conflicting configuration systems" in the OOBE build notes.
+pub(crate) const VALID_THEMES: &[&str] = &[
     "system", "yotsuba", "yotsuba-b", "futaba", "burichan",
     "tomorrow", "photon", "light", "oled-dark",
 ];
@@ -88,6 +91,6 @@ pub async fn patch(
         settings.nsfw_filter_enabled = v;
     }
 
-    save_settings(&state.data_dir, &*settings);
+    save_settings(&state.data_dir, &settings);
     Ok(Json(serde_json::to_value(&*settings).unwrap_or_default()))
 }

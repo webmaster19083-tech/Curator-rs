@@ -60,6 +60,18 @@ browser tab). Leave it running in the background; that's your local server.
 Use `curator --no-window` instead if you'd rather it not open a window (for
 headless/server setups, or to open the address yourself in a normal tab).
 
+**First launch:** Curator opens a short local setup wizard instead of the
+normal browser UI — it checks for `gallery-dl` (and optionally `ffmpeg`),
+lets you confirm or change where your data lives, and sets a few download
+and appearance defaults. Nothing you enter leaves your machine, and you're
+never asked for a password or site cookies there. Once you finish it (or
+choose "Advanced / Skip Setup"), Curator won't show it again — reopen it
+any time from **Settings → Run Setup Again**, which only lets you review or
+change things; it never touches your downloads, database, or other
+settings. Upgrading an existing installation never re-triggers the wizard.
+If `gallery-dl` isn't installed yet, the wizard tells you and lets you
+either install it and retest, or point Curator at wherever it lives.
+
 Your data (downloads, database, settings, log) lives outside the app's own
 folder — in `~/Curator` by default, separate from the code/binary — so
 upgrading Curator later is just "replace the binary (and `static/`) and run

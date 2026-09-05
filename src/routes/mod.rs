@@ -3,11 +3,13 @@ pub mod sources;
 pub mod groups;
 pub mod tags;
 pub mod thumb;
+pub mod library;
 pub mod export;
 pub mod settings;
 pub mod downloads;
 pub mod misc;
 pub mod ch;
+pub mod oobe;
 
 use std::sync::Arc;
 use axum::{
@@ -16,10 +18,21 @@ use axum::{
 };
 use crate::AppState;
 
-pub fn build_router(state: AppState) -> Router {
-    let shared = Arc::new(state);
-
+pub fn build_router(state: Arc<AppState>) -> Router {
     Router::new()
+        // ── First-run OOBE ─────────────────────────────────────────────────
+        // Explicit routes on "/" and "/index.html" take priority over the
+        // static-file fallback_service registered in main.rs, so a
+        // not-yet-configured install is handed oobe.html instead of the
+        // normal app shell without needing any change to app.js's own
+        // startup sequence.
+        .route("/",                                     get(oobe::serve_root))
+        .route("/index.html",                            get(oobe::serve_root))
+        .route("/api/oobe/status",                       get(oobe::status))
+        .route("/api/oobe/validate",                     post(oobe::validate))
+        .route("/api/oobe/settings",                     post(oobe::save_settings))
+        .route("/api/oobe/complete",                     post(oobe::complete))
+        .route("/api/oobe/reset",                        post(oobe::reset))
         // ── Media ──────────────────────────────────────────────────────────
         .route("/api/media",                            get(media::list))
         .route("/api/media/:id/rating",                 put(media::set_rating))
@@ -59,5 +72,5 @@ pub fn build_router(state: AppState) -> Router {
         .route("/api/ch/playlist",                      get(ch::get_playlist))
         .route("/api/ch/session",                       post(ch::log_session))
         .route("/api/ch/sessions",                      get(ch::get_sessions))
-        .with_state(shared)
+        .with_state(state)
 }

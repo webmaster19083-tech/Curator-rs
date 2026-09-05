@@ -48,7 +48,7 @@ struct Manifest {
     social_links:       SocialLinks,
 }
 
-#[derive(Serialize)]
+#[derive(Serialize, Default)]
 struct SocialLinks {
     onlyfans:     String,
     fansly:       String,
@@ -60,17 +60,6 @@ struct SocialLinks {
     patreon:      String,
     subscribestar: String,
     kofi:         String,
-}
-
-impl Default for SocialLinks {
-    fn default() -> Self {
-        SocialLinks {
-            onlyfans: String::new(), fansly: String::new(), twitter: String::new(),
-            linktree: String::new(), manyvids: String::new(), redgifs: String::new(),
-            discord: String::new(), patreon: String::new(),
-            subscribestar: String::new(), kofi: String::new(),
-        }
-    }
 }
 
 // ─── Media row for export ─────────────────────────────────────────────────────

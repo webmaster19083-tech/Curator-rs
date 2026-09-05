@@ -9,17 +9,17 @@ use axum::{
 use serde_json::{json, Value};
 
 use crate::AppState;
-use crate::db::build_group_effective_tags_map;
+use crate::routes::media::effective_tags;
 use crate::routes::media::db_err;
 
 // ─── GET /api/tags ────────────────────────────────────────────────────────────
 
 pub async fn list(State(state): State<Arc<AppState>>) -> Result<Json<Value>, (StatusCode, Json<Value>)> {
-    let conn = state.pool.get().map_err(db_err)?;
 
     // Real tags with their group usage count
     struct RealTag { id: i64, name: String, group_count: i64 }
     let real_tags: Vec<RealTag> = {
+        let conn = state.pool.get().map_err(db_err)?;
         let mut stmt = conn.prepare(
             "SELECT t.id, t.name, \
                 (SELECT COUNT(*) FROM group_tags gt WHERE gt.tag_id = t.id) AS group_count \
@@ -36,18 +36,8 @@ pub async fn list(State(state): State<Arc<AppState>>) -> Result<Json<Value>, (St
     };
 
     // Effective tags map (read from cache or rebuild)
-    let group_effective_tags: HashMap<i64, std::collections::HashSet<String>> = {
-        let cache_read = state.group_tag_cache.read().await;
-        if let Some(ref cached) = *cache_read {
-            cached.clone()
-        } else {
-            drop(cache_read);
-            let rebuilt = build_group_effective_tags_map(&conn);
-            let mut cache_write = state.group_tag_cache.write().await;
-            *cache_write = Some(rebuilt.clone());
-            rebuilt
-        }
-    };
+    let group_effective_tags = effective_tags(&state).await?;
+    let conn = state.pool.get().map_err(db_err)?;
 
     // Media rows for effective count computation
     struct MediaRow { source_group_id: Option<i64>, tags_csv: Option<String> }
@@ -124,6 +114,7 @@ pub async fn delete_tag(
         .unwrap_or(0) > 0;
     if !exists { return Err((StatusCode::NOT_FOUND, Json(json!({"error": "Tag not found"})))); }
     conn.execute("DELETE FROM tags WHERE id=?1", [id]).map_err(db_err)?;
+    drop(conn);
     *state.group_tag_cache.write().await = None;
     Ok(Json(json!({ "status": "deleted" })))
 }

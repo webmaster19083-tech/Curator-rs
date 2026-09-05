@@ -247,6 +247,7 @@ function bindGlobalUI() {
   el('#settings-cancel').addEventListener('click', closeSettingsModal);
   el('#settings-save').addEventListener('click', saveSettings);
   el('#settings-modal').addEventListener('click', (e) => { if (e.target.id === 'settings-modal') closeSettingsModal(); });
+  el('#settings-run-setup-again').addEventListener('click', runSetupAgain);
 
   el('#export-btn').addEventListener('click', exportSources);
   el('#chpack-export-btn').addEventListener('click', exportChpack);
@@ -259,6 +260,7 @@ function bindGlobalUI() {
 
   el('#shuffle-btn').addEventListener('click', shuffleCurrentGrid);
   el('#sort-select').addEventListener('change', (e) => {
+    gridShuffleSeed = null;
     state.sortOrder = e.target.value;
     loadView();
   });
@@ -923,6 +925,18 @@ async function saveSettings() {
   }
 }
 
+async function runSetupAgain() {
+  // Only flips the oobe_completed flag server-side — no downloads, database
+  // rows, or other settings are touched (see routes::oobe::reset). The
+  // wizard itself re-reads current settings/config to prefill every step.
+  try {
+    await api('/api/oobe/reset', { method: 'POST' });
+    window.location.href = '/';
+  } catch (e) {
+    toast('Could not reopen setup: ' + e.message, true);
+  }
+}
+
 // ---------------------------------------------------------------------
 // export / import source list
 // ---------------------------------------------------------------------
@@ -1273,49 +1287,57 @@ function switchView(view) {
 }
 
 let viewRequestSeq = 0;
+let mediaPage = { url: '', cursor: null, more: false, pending: null };
+let gridShuffleSeed = null;
 
 async function loadView() {
-  // Tag this call. If a newer loadView() starts (user navigated again)
-  // before this one's fetch resolves, this stale call must not be allowed
-  // to overwrite whatever the newer call already rendered — without this,
-  // switching sources quickly could show you a source you'd already
-  // navigated away from, landing over whatever you're actually looking at.
   const requestId = ++viewRequestSeq;
-  let items;
-  let loadError = null;
-  const sorting = state.sortOrder && state.sortOrder !== 'default';
-  const extraParams =
-    (sorting ? `&sort=${state.sortOrder}` : '') +
-    (state.tagFilter ? `&tag=${encodeURIComponent(state.tagFilter)}` : '') +
-    (state.maxRatingFilter !== '' ? `&max_rating=${state.maxRatingFilter}` : '');
+  const params = new URLSearchParams({limit: 150, media_type: state.typeFilter});
+  if (state.view.type === 'creator') params.set('source_id', state.view.id);
+  else if (state.view.type === 'group') params.set('group_id', state.view.id);
+  else params.set('only_included', 'true');
+  if (state.sortOrder && state.sortOrder !== 'default') params.set('sort', state.sortOrder);
+  if (gridShuffleSeed != null) { params.set('sort','shuffle'); params.set('shuffle_seed',gridShuffleSeed); }
+  if (state.tagFilter) params.set('tag',state.tagFilter);
+  if (state.maxRatingFilter !== '') params.set('max_rating',state.maxRatingFilter);
+  const page = {url:'/api/media?'+params, cursor:null, more:false, pending:null};
+  mediaPage = page;
   try {
-    if (state.view.type === 'creator') {
-      const data = await api(`/api/media?source_id=${state.view.id}${extraParams}`);
-      items = data.media;
-    } else if (state.view.type === 'group') {
-      const data = await api(`/api/media?group_id=${state.view.id}${extraParams}`);
-      items = data.media;
-    } else {
-      const data = await api(`/api/media?only_included=true${extraParams}`);
-      // Default (no explicit sort) is the server's own order — m.id ASC,
-      // i.e. whichever file was first loaded into the library. Use the
-      // shuffle button if you want it randomized instead.
-      items = data.media;
-    }
-  } catch (e) {
-    loadError = e;
-    items = [];
+    const data = await api(page.url);
+    if (requestId !== viewRequestSeq) return;
+    page.cursor=data.next_cursor; page.more=data.has_more;
+    state.currentItems=data.media;
+  } catch(e) {
+    if (requestId !== viewRequestSeq) return;
+    state.currentItems=[];
+    toast('Could not load media: '+e.message,true);
   }
-
-  if (requestId !== viewRequestSeq) return; // superseded by a later navigation — drop it
-
-  if (loadError) toast('Could not load media: ' + loadError.message, true);
-  if (state.typeFilter !== 'all') {
-    items = items.filter((item) => mediaMatchesTypeFilter(item, state.typeFilter));
-  }
-  state.currentItems = items;
-  toggleEmptyState(items.length === 0);
+  toggleEmptyState(state.currentItems.length===0);
   renderNextPage(true);
+}
+
+async function loadMoreMedia() {
+  const page=mediaPage;
+  if (page.pending) return page.pending;
+  if (!page.more) return [];
+  const seq=viewRequestSeq;
+  page.pending=(async()=>{
+    try {
+      const data=await api(page.url+'&cursor='+encodeURIComponent(page.cursor));
+      if (seq!==viewRequestSeq) return [];
+      page.cursor=data.next_cursor; page.more=data.has_more;
+      const seen=new Set(state.currentItems.map(m=>m.id));
+      const added=data.media.filter(m=>!seen.has(m.id));
+      state.currentItems.push(...added);
+      if (ss.active) {
+        const existing=new Set(ss.items.map(m=>m.id));
+        ss.items.push(...added.filter(m=>!existing.has(m.id)));
+      }
+      return added;
+    } catch(e) { toast('Could not load next page: '+e.message,true); return []; }
+    finally {page.pending=null;}
+  })();
+  return page.pending;
 }
 
 function toggleEmptyState(isEmpty) {
@@ -1323,17 +1345,22 @@ function toggleEmptyState(isEmpty) {
   el('#grid').hidden = isEmpty;
 }
 
-function renderNextPage(reset = false) {
+async function renderNextPage(reset = false) {
   if (reset) {
     state.page = 0;
+    state.renderedCount = 0;
     el('#grid').innerHTML = '';
   }
-  const start = state.page * state.PAGE_SIZE;
+  const seq = viewRequestSeq;
+  const start = state.renderedCount || 0;
+  if (start >= state.currentItems.length && mediaPage.more) await loadMoreMedia();
+  if (seq !== viewRequestSeq || start !== (state.renderedCount || 0)) return;
   const slice = state.currentItems.slice(start, start + state.PAGE_SIZE);
   if (slice.length === 0) return;
   const frag = document.createDocumentFragment();
   slice.forEach((item, i) => frag.appendChild(buildTile(item, start + i)));
   el('#grid').appendChild(frag);
+  state.renderedCount = start + slice.length;
   state.page++;
 }
 
@@ -1401,8 +1428,8 @@ function buildTile(item, index) {
 }
 
 function shuffleCurrentGrid() {
-  state.currentItems = shuffleArray(state.currentItems.slice());
-  renderNextPage(true);
+  gridShuffleSeed = 1 + Math.floor(Math.random() * 2147483645);
+  loadView();
 }
 
 // ---------------------------------------------------------------------
@@ -1457,7 +1484,8 @@ function enableSwipeNav(container, onPrev, onNext) {
   }, { passive: true });
 }
 
-function stepLightbox(delta) {
+async function stepLightbox(delta) {
+  if (delta>0 && state.lightboxIndex+delta>=state.currentItems.length && mediaPage.more) await loadMoreMedia();
   const n = state.currentItems.length;
   if (!n) return;
   state.lightboxIndex = (state.lightboxIndex + delta + n) % n;
@@ -1638,7 +1666,12 @@ async function removeTagFromMedia(item, tagName) {
 // slideshow
 // ---------------------------------------------------------------------
 
-function startSlideshow(startIndex) {
+async function startSlideshow(startIndex) {
+  if (el('#ss-shuffle').checked && gridShuffleSeed == null) {
+    gridShuffleSeed = 1 + Math.floor(Math.random() * 2147483645);
+    await loadView();
+    startIndex = 0;
+  }
   if (!state.currentItems.length) { toast('Nothing to show yet.', true); return; }
   closeLightbox();
   closeSourceMenu();
@@ -1688,7 +1721,8 @@ const pw = {
   filling: [false, false, false],  // guards against two overlapping fill loops on one pane
 };
 
-function pwNextCandidate() {
+async function pwNextCandidate() {
+  if (pw.queueIndex >= state.currentItems.length && mediaPage.more) await loadMoreMedia();
   if (pw.queueIndex >= state.currentItems.length) return null;
   return state.currentItems[pw.queueIndex++];
 }
@@ -1740,7 +1774,7 @@ async function pwFillReady(i) {
   pw.filling[i] = true;
   try {
     while (pw.active && pw.ready[i].length < PW_PREFETCH_DEPTH) {
-      const item = pwNextCandidate();
+      const item = await pwNextCandidate();
       if (!item) break; // no more candidates left anywhere, for any pane
       const result = await pwCheckAndPrepare(item);
       if (!pw.active) return;
@@ -2104,6 +2138,9 @@ function feedUnseenBufferCount() {
 // tops back up as the viewer advances, regardless of scroll speed.
 function feedPumpPrefetch() {
   if (!feed.active) return;
+  if (feed.sourceIndex >= state.currentItems.length && mediaPage.more && !mediaPage.pending) {
+    loadMoreMedia().then(items=>{ if(items.length) feedPumpPrefetch(); });
+  }
   while (
     feed.inFlight < FEED_PRELOAD_POOL &&
     feedUnseenBufferCount() + feed.inFlight < FEED_TARGET_BUFFER &&
@@ -2487,9 +2524,10 @@ function restartImageTimerIfNeeded() {
   }
 }
 
-function advanceSlide() {
+async function advanceSlide() {
   clearAdvanceTimer();
   let next = ss.index + 1;
+  if (next >= ss.items.length && mediaPage.more) { await loadMoreMedia(); if (!ss.active) return; }
   if (next >= ss.items.length) {
     if (ss.loop) { next = 0; }
     else { ss.playing = false; updateSlideshowUI(); return; }
@@ -2498,7 +2536,8 @@ function advanceSlide() {
   renderSlide();
 }
 
-function ssStep(delta) {
+async function ssStep(delta) {
+  if (delta > 0 && ss.index + delta >= ss.items.length && mediaPage.more) await loadMoreMedia();
   const n = ss.items.length;
   if (!n) return;
   ss.index = (ss.index + delta + n) % n;

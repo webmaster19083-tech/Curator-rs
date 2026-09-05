@@ -18,11 +18,12 @@ use crate::downloader::probe_video_duration;
 /// backfill loop either runs for real or doesn't start at all, rather than
 /// silently failing on every single video.
 pub fn ffprobe_available(ffprobe_bin: &str) -> bool {
-    std::process::Command::new(ffprobe_bin)
-        .arg("-version")
-        .output()
-        .map(|o| o.status.success())
-        .unwrap_or(false)
+    crate::process::output_timeout(
+        std::process::Command::new(ffprobe_bin).arg("-version"),
+        std::time::Duration::from_secs(5),
+    )
+    .map(|o| o.status.success())
+    .unwrap_or(false)
 }
 
 pub fn spawn_backfill_loop(pool: DbPool, ffprobe_bin: String, library_dir: PathBuf) {
@@ -31,7 +32,8 @@ pub fn spawn_backfill_loop(pool: DbPool, ffprobe_bin: String, library_dir: PathB
             let batch = tokio::task::spawn_blocking({
                 let pool = pool.clone();
                 move || fetch_undurationed_batch(&pool, 25)
-            }).await;
+            })
+            .await;
 
             let rows = match batch {
                 Ok(Ok(rows)) => rows,
@@ -55,23 +57,22 @@ pub fn spawn_backfill_loop(pool: DbPool, ffprobe_bin: String, library_dir: PathB
             for (id, filepath) in rows {
                 let ffprobe_bin = ffprobe_bin.clone();
                 let pool = pool.clone();
-                // filepath is stored relative to library_dir (see thumb.rs's
+                // filepath is stored relative to library_dir (see routes/thumb.rs's
                 // identical join) — ffprobe needs a real, absolute path.
                 let abs_path = library_dir.join(&filepath);
                 let _ = tokio::task::spawn_blocking(move || {
+                    if !abs_path.is_file() {
+                        if let Ok(conn) = pool.get() { let _ = crate::media_files::mark_missing(&conn, id); }
+                        return;
+                    }
                     let duration = probe_video_duration(&ffprobe_bin, &abs_path);
-                    if let (Some(d), Ok(conn)) = (duration, pool.get()) {
+                    if let Ok(conn) = pool.get() {
                         let _ = conn.execute(
-                            "UPDATE media SET duration_secs=?1 WHERE id=?2",
-                            rusqlite::params![d, id],
+                            "UPDATE media SET duration_secs=?1, duration_attempted=1 WHERE id=?2 AND duration_secs IS NULL",
+                            rusqlite::params![duration, id],
                         );
                     }
-                    // A probe failure (corrupt file, ffprobe choked, etc.) just
-                    // leaves duration_secs NULL — same as "not backfilled yet"
-                    // rather than a distinct failure state. Unlike the NSFW
-                    // classifier's model load, a one-shot ffprobe call is cheap
-                    // enough that retrying it occasionally isn't worth guarding
-                    // against with an in-memory failure cache.
+                    // Both success and failure persist until file metadata changes.
                 }).await;
             }
         }
@@ -82,11 +83,13 @@ fn fetch_undurationed_batch(pool: &DbPool, limit: i64) -> anyhow::Result<Vec<(i6
     let conn = pool.get()?;
     let mut stmt = conn.prepare(
         "SELECT id, filepath FROM media
-         WHERE type='video' AND duration_secs IS NULL AND downloaded=1
+         WHERE type='video' AND duration_secs IS NULL AND downloaded=1 AND duration_attempted=0
          LIMIT ?1",
     )?;
     let rows = stmt
-        .query_map(rusqlite::params![limit], |r| Ok((r.get::<_, i64>(0)?, r.get::<_, String>(1)?)))?
+        .query_map(rusqlite::params![limit], |r| {
+            Ok((r.get::<_, i64>(0)?, r.get::<_, String>(1)?))
+        })?
         .filter_map(|r| r.ok())
         .collect();
     Ok(rows)

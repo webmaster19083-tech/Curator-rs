@@ -43,6 +43,42 @@ gallery-dl binary: Curator calls `gallery-dl` from your PATH by default.
 Override with `"gallery_dl_bin": "C:/path/to/gallery-dl.exe"` in config.json.
 
 
+FIRST-RUN SETUP (OOBE)
+------------------------
+The very first time Curator runs — no settings.json and an empty database —
+it opens a short local setup wizard at http://127.0.0.1:8642 instead of the
+normal UI:
+  1. Welcome
+  2. Dependency check (gallery-dl required; ffmpeg/ffprobe optional)
+  3. Data directory (confirm the default, or pick another; existing files
+     are never moved)
+  4. gallery-dl configuration (a "test" button, nothing else — gallery-dl
+     keeps its own config/cookies separately and Curator never asks for a
+     password or cookies here)
+  5. Download defaults (concurrent download count)
+  6. Optional NSFW auto-rating
+  7. Appearance (theme, slideshow defaults)
+  8. Summary, then Finish
+
+"Advanced / Skip Setup" on the welcome screen jumps straight to the
+summary/Finish step without changing anything.
+
+Once you finish (or skip), Curator marks setup complete in settings.json
+and always opens the normal UI after that — the wizard does not reappear on
+its own. Re-open it any time from Settings -> "Run Setup Again"; that only
+lets you review/change things and never touches your downloads, database,
+or other settings.
+
+Upgrading an existing installation never triggers this: Curator recognizes
+an existing settings.json or a database that already has sources/media in
+it and skips straight to the normal UI, even if that installation predates
+this wizard entirely.
+
+Changing the data directory or a gallery-dl/ffprobe executable path through
+the wizard writes to config.json, same as editing it by hand would — it
+takes effect the next time Curator starts, same as it always has.
+
+
 REMOTE ACCESS (PHONE, IPAD, ANOTHER COMPUTER)
 -----------------------------------------------
 Curator listens on every network interface, so any device that can reach
@@ -240,6 +276,12 @@ TROUBLESHOOTING
 - Videos never sorting into "clips"/"videos" -> ffprobe isn't on PATH (it
   ships with ffmpeg — see Requirements); curator.log logs this once at
   startup rather than per-video.
+- First-run setup wizard keeps reappearing -> it only reappears if
+  settings.json's "oobe_completed" is false; check you're not running with
+  CURATOR_DATA_DIR pointed somewhere new each time (each data directory
+  gets its own settings.json and its own first-run state).
+- Want to redo first-run setup on purpose -> Settings -> "Run Setup Again"
+  (doesn't touch downloads/database/other settings).
 
 A NOTE ON USE
 ---------------

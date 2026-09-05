@@ -1,5 +1,5 @@
-use std::sync::Arc;
 use std::sync::atomic::Ordering;
+use std::sync::Arc;
 
 use axum::{extract::State, Json};
 use serde_json::{json, Value};
@@ -9,9 +9,15 @@ use crate::AppState;
 // ─── GET /api/downloads/status ───────────────────────────────────────────────
 
 pub async fn status(State(state): State<Arc<AppState>>) -> Json<Value> {
-    let paused  = state.downloads_paused.load(Ordering::SeqCst);
-    let active  = state.active_processes.lock().await.len();
-    let paused_ids: Vec<i64> = state.paused_source_ids.lock().await.iter().cloned().collect();
+    let paused = state.downloads_paused.load(Ordering::SeqCst);
+    let active = state.active_processes.lock().await.len();
+    let paused_ids: Vec<i64> = state
+        .paused_source_ids
+        .lock()
+        .await
+        .iter()
+        .cloned()
+        .collect();
 
     Json(json!({
         "paused":       paused,
@@ -42,15 +48,30 @@ pub async fn pause(State(state): State<Arc<AppState>>) -> Json<Value> {
 // ─── POST /api/downloads/resume ──────────────────────────────────────────────
 
 pub async fn resume(State(state): State<Arc<AppState>>) -> Json<Value> {
-    state.downloads_paused.store(false, Ordering::SeqCst);
-
-    // Re-queue sources that were paused mid-download
+    // Wait for killed children and their final index pass before requeueing.
+    while state.downloads_paused.load(Ordering::SeqCst) {
+        if state.running_sources.lock().await.is_empty() {
+            break;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+    }
     let paused_ids: Vec<i64> = {
-        let mut guard = state.paused_source_ids.lock().await;
-        let ids: Vec<i64> = guard.iter().cloned().collect();
-        guard.clear();
+        let conn = match state.pool.get() {
+            Ok(c) => c,
+            Err(_) => return Json(json!({"error":"Database unavailable"})),
+        };
+        let mut stmt = match conn.prepare("SELECT id FROM sources WHERE status='paused'") {
+            Ok(s) => s,
+            Err(_) => return Json(json!({"error":"Database unavailable"})),
+        };
+        let ids = stmt
+            .query_map([], |r| r.get(0))
+            .map(|rows| rows.filter_map(Result::ok).collect())
+            .unwrap_or_default();
         ids
     };
+    state.paused_source_ids.lock().await.clear();
+    state.downloads_paused.store(false, Ordering::SeqCst);
 
     for id in &paused_ids {
         tokio::spawn(crate::downloader::run_download(Arc::clone(&state), *id));

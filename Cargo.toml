@@ -11,7 +11,7 @@ path = "src/main.rs"
 [dependencies]
 # Web framework
 axum           = { version = "0.7", features = ["macros"] }
-tower          = "0.4"
+tower          = { version = "0.4", features = ["util"] }
 tower-http     = { version = "0.5", features = ["compression-gzip", "fs"] }
 tokio          = { version = "1",   features = ["full"] }
 
@@ -59,7 +59,8 @@ futures        = "0.3"
 async-stream   = "0.3"
 urlencoding    = "2"
 walkdir        = "2"
-tokio-util     = { version = "0.7", features = ["io"] }
+notify         = "8"
+tokio-util     = { version = "0.7", features = ["io", "rt"] }
 
 # Transitive-dependency pins — without these, newer releases of these crates
 # require a Rust edition/MSRV ahead of the CI toolchain and the build fails

@@ -210,19 +210,20 @@ pub async fn delete(
     Path(id): Path<i64>,
     Query(q): Query<DeleteQuery>,
 ) -> Result<Json<Value>, (StatusCode, Json<Value>)> {
-    let conn = state.pool.get().map_err(db_err)?;
-
-    let (slug,): (String,) = conn.query_row(
-        "SELECT slug FROM sources WHERE id=?1", [id], |r| Ok((r.get(0)?,))
-    ).map_err(|_| (StatusCode::NOT_FOUND, Json(json!({"error": "Source not found"}))))?;
-
-    conn.execute("DELETE FROM sources WHERE id=?1", [id]).map_err(db_err)?;
-
-    // Kill any in-flight process BEFORE touching files (Windows PermissionError guard)
-    if let Some(pid) = state.active_processes.lock().await.remove(&id) {
-        crate::downloader::kill_pid(pid).await;
-        // Give the OS a moment to release file handles
-        tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+    let slug:String = {
+        let conn = state.pool.get().map_err(db_err)?;
+        conn.query_row("SELECT slug FROM sources WHERE id=?1",[id],|r|r.get(0))
+            .map_err(|_| (StatusCode::NOT_FOUND,Json(json!({"error":"Source not found"}))))?
+    };
+    if let Some(cancel)=state.source_cancellations.lock().await.get(&id).cloned() { cancel.cancel(); }
+    // Wait for the owning task to reap the child and finish its serialized index work.
+    while state.running_sources.lock().await.contains(&id) {
+        if let Some(cancel)=state.source_cancellations.lock().await.get(&id).cloned() { cancel.cancel(); }
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+    }
+    {
+        let conn=state.pool.get().map_err(db_err)?;
+        conn.execute("DELETE FROM sources WHERE id=?1",[id]).map_err(db_err)?;
     }
 
     if q.delete_files {

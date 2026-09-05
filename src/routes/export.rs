@@ -50,7 +50,7 @@ pub async fn export_sources(State(state): State<Arc<AppState>>) -> Result<Json<V
         let mut settings = state.settings.write().await;
         settings.last_export_at               = Some(exported_at.clone());
         settings.export_reminder_snoozed_until = None;
-        save_settings(&state.data_dir, &*settings);
+        save_settings(&state.data_dir, &settings);
     }
 
     Ok(Json(json!({ "exported_at": exported_at, "sources": sources })))
@@ -125,7 +125,8 @@ pub async fn import_sources(
             }
 
             // Invalidate group tag cache
-            *state.group_tag_cache.write().await = None;
+            drop(conn);
+    *state.group_tag_cache.write().await = None;
         }
     }
 

@@ -1,2 +1,4 @@
 curator.exe
 config.json
+/target/
+/dist/

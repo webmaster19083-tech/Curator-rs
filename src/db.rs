@@ -86,10 +86,8 @@ pub struct Settings {
     // NSFW auto-rating (opt-in, requires the Python worker's dependencies
     // to be installed — see nsfw_worker.py). Enabling/disabling takes effect
     // on next restart, since it decides whether the worker process gets
-    // started at all. Classified items get their existing star `rating`
-    // set automatically (1=clothed .. 5=extremely explicit) — see nsfw.rs —
-    // so filtering/sorting by rating "just works" with no separate score
-    // column or threshold setting needed.
+    // started at all. Recommendations and raw scores are retained separately;
+    // automation changes the effective rating only until a human reviews it.
     #[serde(default)]
     pub nsfw_filter_enabled: bool,
 
@@ -271,6 +269,11 @@ pub fn run_migrations(conn: &Connection) -> Result<()> {
         ("nsfw_attempts", "INTEGER NOT NULL DEFAULT 0"),
         ("nsfw_retry_at", "INTEGER NOT NULL DEFAULT 0"),
         ("duration_attempted", "INTEGER NOT NULL DEFAULT 0"),
+        ("auto_rating", "INTEGER NOT NULL DEFAULT 0"),
+        ("auto_rating_score", "REAL"),
+        ("rating_source", "TEXT NOT NULL DEFAULT 'none'"),
+        ("rating_reviewed", "INTEGER NOT NULL DEFAULT 0"),
+        ("rating_reviewed_at", "TEXT"),
     ] {
         if !media_cols.contains(name) {
             conn.execute_batch(&format!(
@@ -278,6 +281,9 @@ pub fn run_migrations(conn: &Connection) -> Result<()> {
             ))?;
         }
     }
+    conn.execute_batch(
+        "CREATE INDEX IF NOT EXISTS idx_media_review ON media(rating_reviewed, auto_rating, id);",
+    )?;
     conn.execute_batch("CREATE TABLE IF NOT EXISTS placeholder_scans (
         source_id INTEGER PRIMARY KEY REFERENCES sources(id) ON DELETE CASCADE,
         url TEXT NOT NULL, retry_at INTEGER NOT NULL);
@@ -363,6 +369,19 @@ pub fn run_migrations(conn: &Connection) -> Result<()> {
     ensure_migrations_table(conn)?;
     run_migration_once(conn, "0001_repair_bunkr_kemono_slugs", |c| {
         repair_slug_names(c)
+    })?;
+
+    // One-time policy change: all pre-review-era effective ratings are
+    // automated recommendations. Later explicit reviews remain protected.
+    run_migration_once(conn, "0002_existing_ratings_are_automated", |c| {
+        c.execute_batch(
+            "UPDATE media SET
+            auto_rating_score=CASE WHEN rating=0 OR rating=auto_rating THEN auto_rating_score ELSE NULL END,
+            auto_rating=CASE WHEN rating>0 THEN rating ELSE auto_rating END,
+            rating_source=CASE WHEN rating>0 OR auto_rating>0 THEN 'auto' ELSE 'none' END,
+            rating_reviewed=0, rating_reviewed_at=NULL;",
+        )?;
+        Ok(())
     })?;
 
     tx.commit()?;
@@ -659,7 +678,7 @@ mod tests {
                 conn.query_row("SELECT COUNT(*) FROM _migrations", [], |r| r
                     .get::<_, i64>(0))
                     .unwrap(),
-                1
+                2
             );
         }
     }
@@ -753,5 +772,49 @@ mod tests {
         .unwrap();
         let loaded = load_settings(dir.path());
         assert!(!loaded.oobe_completed);
+    }
+}
+
+#[cfg(test)]
+mod rating_migration_tests {
+    #[test]
+    fn existing_provenance_is_reset_once_and_future_reviews_survive() {
+        let conn = rusqlite::Connection::open_in_memory().unwrap();
+        super::run_migrations(&conn).unwrap();
+        conn.execute_batch("DELETE FROM _migrations WHERE name='0002_existing_ratings_are_automated';
+            INSERT INTO sources(id,name,url,slug,added_at) VALUES(1,'test','test','test','2026');
+            INSERT INTO media(id,source_id,filepath,filename,type,added_at,rating,auto_rating,auto_rating_score,rating_source,rating_reviewed,rating_reviewed_at)
+            VALUES(1,1,'a','a','image','2026',3,4,0.72,'human',1,'2026');").unwrap();
+        super::run_migrations(&conn).unwrap();
+        let row: (i64,i64,Option<f64>,String,bool,Option<String>) = conn.query_row("SELECT rating,auto_rating,auto_rating_score,rating_source,rating_reviewed,rating_reviewed_at FROM media", [], |r| Ok((r.get(0)?,r.get(1)?,r.get(2)?,r.get(3)?,r.get(4)?,r.get(5)?))).unwrap();
+        assert_eq!(row, (3, 3, None, "auto".into(), false, None));
+        conn.execute_batch("UPDATE media SET rating=2,rating_source='human',rating_reviewed=1,rating_reviewed_at='2027';").unwrap();
+        super::run_migrations(&conn).unwrap();
+        assert!(conn
+            .query_row("SELECT rating_reviewed FROM media", [], |r| r
+                .get::<_, bool>(0))
+            .unwrap());
+    }
+
+    #[test]
+    fn legacy_ratings_are_preserved_and_migration_is_idempotent() {
+        let conn = rusqlite::Connection::open_in_memory().unwrap();
+        conn.execute_batch("CREATE TABLE media(id INTEGER PRIMARY KEY, source_id INTEGER NOT NULL, filepath TEXT UNIQUE NOT NULL, filename TEXT NOT NULL, type TEXT NOT NULL, added_at TEXT NOT NULL, rating INTEGER NOT NULL DEFAULT 0);
+            INSERT INTO media VALUES(1,1,'a','a','image','2026',3),(2,1,'b','b','image','2026',0);").unwrap();
+        super::run_migrations(&conn).unwrap();
+        let row: (i64,String,bool,Option<String>) = conn.query_row("SELECT rating,rating_source,rating_reviewed,rating_reviewed_at FROM media WHERE id=1", [], |r| Ok((r.get(0)?,r.get(1)?,r.get(2)?,r.get(3)?))).unwrap();
+        assert_eq!(row, (3, "auto".into(), false, None));
+        conn.execute(
+            "UPDATE media SET rating=4,auto_rating=3,rating_source='human',rating_reviewed=1,rating_reviewed_at='2026' WHERE id=2",
+            [],
+        )
+        .unwrap();
+        super::run_migrations(&conn).unwrap();
+        assert!(conn
+            .query_row("SELECT rating_reviewed FROM media WHERE id=2", [], |r| r
+                .get::<_, bool>(
+                0
+            ))
+            .unwrap());
     }
 }

@@ -47,8 +47,9 @@ test('a response from an old view cannot overwrite a newer view',async()=>{
 test('type, rating and tags are sent to the server before pagination',async()=>{
   let received;
   const app=browser(async url=>{received=new URL(url,'http://localhost');return {media:[],has_more:false};});
-  app.state.typeFilter='clip';app.state.tagFilter='two words';app.state.maxRatingFilter='3';
+  app.state.ratingStatus='needs_review';app.state.typeFilter='clip';app.state.tagFilter='two words';app.state.maxRatingFilter='3';
   await app.run('loadView()');
+  assert.equal(received.searchParams.get('rating_status'),'needs_review');
   assert.equal(received.searchParams.get('media_type'),'clip');
   assert.equal(received.searchParams.get('tag'),'two words');
   assert.equal(received.searchParams.get('max_rating'),'3');

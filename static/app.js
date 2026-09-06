@@ -288,7 +288,10 @@ function bindGlobalUI() {
   el('#portrait-wall').addEventListener('click', (e) => {
     if (e.target.id === 'portrait-wall') exitPortraitWall();
   });
-  el('#feed-btn').addEventListener('click', startFeed);
+  el('#feed-btn').addEventListener('click', () => startFeed());
+  el('#review-ratings-btn').addEventListener('click', () => startFeed(true));
+  el('#rating-status-select').addEventListener('change', e => { state.ratingStatus = e.target.value; loadView(); });
+  document.addEventListener('visibilitychange', () => { if (document.visibilityState === 'visible') feedAcquireWakeLock(); else feedReleaseWakeLock(); });
   el('#vr-btn').addEventListener('click', startVRMode);
   el('#vr-exit').addEventListener('click', exitVRMode);
   el('#feed-close').addEventListener('click', exitFeed);
@@ -1300,6 +1303,7 @@ async function loadView() {
   if (gridShuffleSeed != null) { params.set('sort','shuffle'); params.set('shuffle_seed',gridShuffleSeed); }
   if (state.tagFilter) params.set('tag',state.tagFilter);
   if (state.maxRatingFilter !== '') params.set('max_rating',state.maxRatingFilter);
+  if (state.ratingStatus) params.set('rating_status', state.ratingStatus);
   const page = {url:'/api/media?'+params, cursor:null, more:false, pending:null};
   mediaPage = page;
   try {
@@ -1412,7 +1416,8 @@ function buildTile(item, index) {
   if (item.rating > 0) {
     const badge = document.createElement('span');
     badge.className = 'tile-rating mono';
-    badge.textContent = `★${item.rating}`;
+    badge.title = item.rating_reviewed ? 'Human reviewed' : item.rating_source === 'auto' ? 'AUTO - Needs review' : 'Rating';
+    badge.textContent = (item.rating_source === 'auto' ? 'AUTO ' : item.rating_reviewed ? 'HUMAN ' : '') + `★${item.rating}`;
     tile.appendChild(badge);
   }
 
@@ -1538,8 +1543,7 @@ function renderStarRating(container, rating, onRate) {
 
 async function rateMedia(item, rating) {
   try {
-    await api(`/api/media/${item.id}/rating`, { method: 'PUT', body: JSON.stringify({ rating }) });
-    item.rating = rating;
+    Object.assign(item, await api(`/api/media/${item.id}/rating`, { method: 'PUT', body: JSON.stringify({ rating }) }));
     renderStarRating(el('#lightbox-rating'), rating, (r) => rateMedia(item, r));
   } catch (e) {
     toast('Could not save rating: ' + e.message, true);
@@ -1899,6 +1903,11 @@ const feed = {
   inFlight: 0,      // candidates currently loading (<= FEED_PRELOAD_POOL)
   activeSection: null,
   itemObserver: null,
+  session: 0, review: false, items: [], page: null,
+  seenIds: new Set(), recentIds: [], queuedIds: new Set(),
+  recyclePool: new Map(), recycleMode: false, failedIds: new Set(),
+  loading: new Set(), wakeLock: null, wakePending: null, wakeEpoch: 0,
+  waitingNext: null, retryTimer: null,
 };
 
 function feedFlashIcon(iconEl, symbol) {
@@ -1921,9 +1930,14 @@ function feedWaitForMedia(mediaEl, isVideo) {
       settled = true;
       clearTimeout(timer);
       cleanup();
+      mediaEl._cancelLoad = null;
       resolve(ok);
     };
-    const onReady = () => finish(true);
+    mediaEl._cancelLoad = () => finish(false);
+    const onReady = () => {
+      if (!isVideo && mediaEl.decode) mediaEl.decode().then(() => finish(true), () => finish(false));
+      else finish(true);
+    };
     const onError = () => finish(false);
     function cleanup() {
       mediaEl.removeEventListener(isVideo ? 'loadeddata' : 'load', onReady);
@@ -1970,7 +1984,6 @@ function feedBuildItem(item) {
     // 'auto' (not 'metadata') so the 'loadeddata' wait in feedWaitForMedia
     // actually has a decoded frame to show, not just fetched dimensions.
     mediaEl.preload = 'auto';
-    mediaEl.src = mediaFullSrc(item);
     ready = feedWaitForMedia(mediaEl, true).then((ok) => {
       // Long-form video doesn't fit this view — treat it the same as a
       // load failure/timeout: never appended, next candidate takes its
@@ -1978,7 +1991,7 @@ function feedBuildItem(item) {
       // duration_secs, which may not be known yet for this file) so the
       // exclusion is correct immediately, not only once the backfill has
       // caught up to it.
-      return ok && mediaEl.duration > CLIP_MAX_SECONDS ? false : ok;
+      return ok && !feed.review && mediaEl.duration > CLIP_MAX_SECONDS ? false : ok;
     });
     mediaEl.onloadedmetadata = () => {
       if (mediaEl.videoWidth > mediaEl.videoHeight) wrap.classList.add('rotated');
@@ -1990,7 +2003,7 @@ function feedBuildItem(item) {
       fill.style.transition = 'none';
       fill.style.width = ((mediaEl.currentTime / mediaEl.duration) * 100) + '%';
     });
-    mediaEl.addEventListener('ended', () => { if (feed.active) feedGoNext(section); });
+    mediaEl.addEventListener('ended', () => { if (feed.active && !feed.review && feed.activeSection === section) feedGoNext(section); });
 
     // Tap the video to pause/resume. userPaused only controls whether a
     // scrub-release (below) resumes playback — scrolling away and back
@@ -2045,12 +2058,12 @@ function feedBuildItem(item) {
   } else {
     mediaEl = document.createElement('img');
     mediaEl.alt = item.filename;
-    mediaEl.src = mediaFullSrc(item);
     ready = feedWaitForMedia(mediaEl, false);
     mediaEl.onload = () => {
       if (mediaEl.naturalWidth > mediaEl.naturalHeight) wrap.classList.add('rotated');
     };
   }
+  mediaEl.src = mediaFullSrc(item);
   wrap.appendChild(mediaEl);
 
   const rating = document.createElement('div');
@@ -2063,6 +2076,7 @@ function feedBuildItem(item) {
   refreshRating();
   section.appendChild(rating);
 
+  if (feed.review) { rating.remove(); feedBuildReviewControls(section, item); }
   section._item = item;
   section._mediaEl = mediaEl;
   section._fill = fill;
@@ -2072,18 +2086,32 @@ function feedBuildItem(item) {
 
 function feedGoNext(section) {
   const next = section.nextElementSibling;
-  if (next && next.classList.contains('feed-item')) {
-    next.scrollIntoView({ behavior: 'smooth', block: 'start' });
+  if (next) { feed.waitingNext = null; next.scrollIntoView({behavior:'smooth', block:'start'}); }
+  else {
+    feed.waitingNext = section;
+    feedPumpPrefetch();
+    // With only one playable item, replay in place without allocating media.
+    if (!feed.review && !feed.page.more && !feed.page.pending && !feed.inFlight &&
+        [...feed.recyclePool.keys()].filter(id => !feed.failedIds.has(id)).length === 1) {
+      feedDeactivate(section);
+      if (section._mediaEl.tagName === 'VIDEO') section._mediaEl.currentTime = 0;
+      feedActivate(section);
+    }
   }
-  // If there's nothing next yet, the buffer refill (feedPumpPrefetch,
-  // triggered from feedActivate) will add more as the user catches up to
-  // it anyway — nothing to do here in that case.
 }
 
 function feedActivate(section) {
   if (feed.activeSection === section) return;
   if (feed.activeSection) feedDeactivate(feed.activeSection);
   feed.activeSection = section;
+  feed.waitingNext = null;
+  section._queued = false;
+  feed.queuedIds.delete(section._item.id);
+  feed.seenIds.add(section._item.id);
+  feed.recyclePool.set(section._item.id, section._item);
+  feed.recentIds.push(section._item.id);
+  feed.recentIds = feed.recentIds.slice(-10);
+  feedEvict();
   feedPumpPrefetch(); // the viewer just consumed one slot of buffer — top it back up
 
   const fill = section._fill;
@@ -2094,7 +2122,7 @@ function feedActivate(section) {
   const mediaEl = section._mediaEl;
   if (item.type === 'video') {
     attemptVideoPlay(mediaEl, section);
-  } else {
+  } else if (!feed.review) {
     const startTimer = () => {
       if (feed.activeSection !== section) return;
       requestAnimationFrame(() => {
@@ -2136,64 +2164,283 @@ function feedUnseenBufferCount() {
 // or fail/time out and get silently replaced — without needing a
 // scroll-position trigger. Also called from feedActivate so the buffer
 // tops back up as the viewer advances, regardless of scroll speed.
+function feedCandidate() {
+  while (feed.sourceIndex < feed.items.length) {
+    const item = feed.items[feed.sourceIndex++];
+    if (!feed.seenIds.has(item.id) && !feed.queuedIds.has(item.id) && !feed.failedIds.has(item.id)) return item;
+  }
+  if (feed.page.more || feed.page.pending || feed.inFlight || feed.review) return null;
+  feed.recycleMode = true;
+  const eligible = [...feed.recyclePool.values()].filter(item =>
+    item.id !== feed.activeSection?._item.id && !feed.queuedIds.has(item.id) && !feed.failedIds.has(item.id));
+  const fresh = eligible.filter(item => !feed.recentIds.includes(item.id));
+  const pool = fresh.length ? fresh : eligible;
+  return pool.length ? pool[Math.floor(Math.random() * pool.length)] : null;
+}
+
+async function feedFetchPage() {
+  const page = feed.page, session = feed.session;
+  if (page.pending || !page.more) return;
+  page.pending = true;
+  try {
+    const data = await api(page.url + (page.cursor ? '&cursor=' + encodeURIComponent(page.cursor) : ''));
+    if (!feed.active || session !== feed.session) return;
+    feed.items = feed.items.slice(feed.sourceIndex).concat(data.media);
+    feed.sourceIndex = 0;
+    page.cursor = data.next_cursor; page.more = data.has_more;
+  } catch (e) {
+    if (session !== feed.session || !feed.active) return;
+    toast('Could not load feed page. Retrying...', true);
+    feed.retryTimer = setTimeout(() => { feed.retryTimer = null; feedPumpPrefetch(); }, 3000);
+  } finally {
+    page.pending = false;
+    if (session === feed.session && !feed.retryTimer) feedPumpPrefetch();
+  }
+}
+
 function feedPumpPrefetch() {
   if (!feed.active) return;
-  if (feed.sourceIndex >= state.currentItems.length && mediaPage.more && !mediaPage.pending) {
-    loadMoreMedia().then(items=>{ if(items.length) feedPumpPrefetch(); });
-  }
-  while (
-    feed.inFlight < FEED_PRELOAD_POOL &&
-    feedUnseenBufferCount() + feed.inFlight < FEED_TARGET_BUFFER &&
-    feed.sourceIndex < state.currentItems.length
-  ) {
-    const item = state.currentItems[feed.sourceIndex++];
+  while (feed.inFlight < FEED_PRELOAD_POOL && feedUnseenBufferCount() + feed.inFlight < FEED_TARGET_BUFFER) {
+    const item = feedCandidate();
+    if (!item) break;
+    // A recycled ID may still have a retained previous section. Release it
+    // before reserving a new preload, so backward swipes cannot race that ID.
+    const scroll = el('#feed-scroll');
+    for (const old of [...scroll.children]) {
+      if (old._item.id === item.id && old !== feed.activeSection) {
+        const above = [...scroll.children].indexOf(old) < [...scroll.children].indexOf(feed.activeSection);
+        const height = old.offsetHeight;
+        feedDispose(old);
+        if (above) scroll.scrollTop -= height;
+      }
+    }
+    feed.queuedIds.add(item.id);
     feed.inFlight++;
-    feedLoadAndAppend(item);
+    feedLoadAndAppend(item, feed.session);
+  }
+  if (feed.sourceIndex >= feed.items.length && feed.page.more && !feed.page.pending && !feed.retryTimer) feedFetchPage();
+  if (!feed.page.more && !feed.page.pending && !feed.inFlight && !feedUnseenBufferCount()) {
+    el('#feed-status').textContent = feed.review ? 'End of review queue. Skipped items remain for later.' :
+      (!feed.activeSection ? 'No playable media in this view.' : '');
   }
 }
 
-async function feedLoadAndAppend(item) {
+async function feedLoadAndAppend(item, session) {
   const { section, ready } = feedBuildItem(item);
-  const ok = await ready; // true = real decoded frame ready; false = error or timed out
+  section._queued = true;
+  feed.loading.add(section);
+  const ok = await ready;
+  if (session !== feed.session || !feed.active) return;
+  feed.loading.delete(section);
   feed.inFlight--;
-  if (feed.active && ok) {
+  if (ok) {
     el('#feed-scroll').appendChild(section);
     feed.itemObserver.observe(section);
-  }
-  // A failed/timed-out item (404, corrupt/undecodable file, dead link) is
-  // just dropped — it never occupies a slot in the visible feed at all,
-  // so the user never sees a broken-media placeholder for it.
+    if (feed.waitingNext === feed.activeSection && feed.waitingNext) feedGoNext(feed.waitingNext);
+  } else { feed.failedIds.add(item.id); feedDispose(section); }
   feedPumpPrefetch();
 }
 
-function startFeed() {
-  if (!state.currentItems.length) { toast('Nothing to show here.', true); return; }
-  feed.active = true;
-  feed.sourceIndex = 0;
-  feed.inFlight = 0;
-  feed.activeSection = null;
+function feedDispose(section) {
+  feedDeactivate(section);
+  feed.itemObserver?.unobserve(section);
+  const media = section._mediaEl;
+  if (media) {
+    media._cancelLoad?.();
+    if (media.tagName === 'VIDEO') media.pause();
+    media.removeAttribute('src');
+    if (media.tagName === 'VIDEO') media.load();
+  }
+  if (section._queued) feed.queuedIds.delete(section._item.id);
+  section.remove();
+}
 
+function feedEvict() {
+  const scroll = el('#feed-scroll');
+  const sections = [...scroll.children];
+  const index = sections.indexOf(feed.activeSection);
+  let removedHeight = 0;
+  sections.forEach((section, i) => {
+    if (i < index - 2 || i > index + FEED_TARGET_BUFFER) {
+      if (i < index) removedHeight += section.offsetHeight;
+      // A backward swipe can trim an unshown tail. Return it to the
+      // lightweight source queue so it is still preferred over recycling.
+      if (section._queued && !feed.seenIds.has(section._item.id)) feed.items.splice(feed.sourceIndex, 0, section._item);
+      feedDispose(section);
+    }
+  });
+  scroll.scrollTop -= removedHeight;
+}
+
+async function feedAcquireWakeLock() {
+  if (!feed.active || document.visibilityState !== 'visible' || !navigator.wakeLock || feed.wakeLock || feed.wakePending) return;
+  const epoch = feed.wakeEpoch;
+  try {
+    const request = navigator.wakeLock.request('screen');
+    feed.wakePending = request;
+    const lock = await request;
+    if (!feed.active || epoch !== feed.wakeEpoch || document.visibilityState !== 'visible') { await lock.release(); return; }
+    feed.wakeLock = lock;
+    lock.addEventListener('release', () => { if (feed.wakeLock === lock) feed.wakeLock = null; });
+  } catch (_) {} finally { if (epoch === feed.wakeEpoch) feed.wakePending = null; }
+}
+
+function feedReleaseWakeLock() {
+  feed.wakeEpoch++;
+  const lock = feed.wakeLock;
+  feed.wakeLock = null; feed.wakePending = null;
+  if (lock) lock.release().catch(() => {});
+}
+
+function startFeed(review = false) {
+  if (feed.active) exitFeed();
+  feed.session++;
+  feed.active = true; feed.review = review;
+  feed.sourceIndex = 0; feed.inFlight = 0; feed.activeSection = null;
+  feed.seenIds.clear(); feed.recentIds = []; feed.queuedIds.clear();
+  feed.recyclePool.clear(); feed.failedIds.clear(); feed.recycleMode = false;
+  const params = new URLSearchParams(mediaPage.url.split('?')[1] || '');
+  if (review) { params.set('rating_status', 'needs_review'); params.set('sort', 'default'); params.delete('shuffle_seed'); }
+  feed.items = review ? [] : state.currentItems.slice();
+  feed.page = {url:'/api/media?' + params, cursor:review ? null : mediaPage.cursor, more:review || mediaPage.more, pending:false};
   const scrollEl = el('#feed-scroll');
   scrollEl.innerHTML = '';
-
-  feed.itemObserver = new IntersectionObserver((entries) => {
-    entries.forEach((entry) => {
-      if (entry.isIntersecting && entry.intersectionRatio > 0.6) feedActivate(entry.target);
+  feed.itemObserver = new IntersectionObserver(entries => {
+    entries.forEach(entry => {
+      if (feed.active && entry.target.isConnected && entry.isIntersecting && entry.intersectionRatio > 0.6) feedActivate(entry.target);
     });
-  }, { root: scrollEl, threshold: [0, 0.6, 1] });
-
+  }, {root:scrollEl, threshold:[0, 0.6, 1]});
   el('#feed').hidden = false;
+  el('#feed').classList.toggle('review-mode', review);
+  el('#feed-status').textContent = '';
   scrollEl.scrollTop = 0;
-  feedPumpPrefetch();
+  feedAcquireWakeLock(); feedPumpPrefetch();
 }
 
 function exitFeed() {
-  feed.active = false; // in-flight feedLoadAndAppend() calls check this and drop their result
-  if (feed.activeSection) feedDeactivate(feed.activeSection);
-  if (feed.itemObserver) { feed.itemObserver.disconnect(); feed.itemObserver = null; }
-  el('#feed-scroll').querySelectorAll('video').forEach((v) => v.pause());
-  el('#feed-scroll').innerHTML = '';
-  el('#feed').hidden = true;
+  feed.active = false; feed.session++;
+  clearTimeout(feed.retryTimer); feed.retryTimer = null; feed.waitingNext = null;
+  feed.itemObserver?.disconnect();
+  [...el('#feed-scroll').children, ...feed.loading].forEach(feedDispose);
+  feed.itemObserver = null; feed.loading.clear(); feed.inFlight = 0;
+  feed.items = []; feed.recyclePool.clear(); feed.seenIds.clear();
+  feed.queuedIds.clear(); feed.failedIds.clear(); feed.recentIds = [];
+  feed.recycleMode = false; feed.page = null;
+  feedReleaseWakeLock(); el('#feed').hidden = true;
+}
+
+function feedBuildReviewControls(section, item) {
+  const card = document.createElement('div'); card.className = 'feed-review-card';
+  while (section.firstChild) card.appendChild(section.firstChild);
+  section.appendChild(card);
+  const stamp = document.createElement('div'); stamp.className = 'feed-swipe-stamp';
+  stamp.setAttribute('aria-hidden', 'true'); card.appendChild(stamp);
+  const panel = document.createElement('div'); panel.className = 'feed-review-controls';
+  const label = document.createElement('div'); label.textContent = `AUTO ${item.auto_rating} - Needs review`;
+  panel.appendChild(label);
+  let saving = false, start = null, suppressClick = false;
+  const resetDrag = () => {
+    card.style.transform = ''; card.classList.remove('dragging');
+    stamp.style.opacity = '0';
+  };
+  const animate = async (direction) => {
+    resetDrag();
+    if (!card.animate || window.matchMedia('(prefers-reduced-motion: reduce)').matches) return;
+    const target = direction === 'approve' ? 'translateX(110%) rotate(14deg)' :
+      direction === 'next' ? 'translateY(-35%) scale(.94)' : 'translateX(-24px) rotate(-2deg)';
+    const animation = card.animate([
+      {transform:'none', opacity:1},
+      {transform:target, opacity:direction === 'choose' ? 1 : 0}
+    ], {duration:direction === 'choose' ? 180 : 260, easing:'ease-out', direction:direction === 'choose' ? 'alternate' : 'normal', iterations:direction === 'choose' ? 2 : 1});
+    try { await animation.finished; } catch (_) {}
+  };
+  const save = async rating => {
+    if (saving || item.rating_reviewed) { resetDrag(); return; }
+    saving = true;
+    const session = feed.session;
+    panel.querySelectorAll('button').forEach(b => b.disabled = true);
+    resetDrag();
+    try {
+      const result = await api(`/api/media/${item.id}/rating${rating == null ? '/approve' : ''}`, {
+        method:rating == null ? 'POST' : 'PUT', ...(rating == null ? {} : {body:JSON.stringify({rating})})
+      });
+      Object.assign(item, result);
+      const original = state.currentItems.find(m => m.id === item.id);
+      if (original) Object.assign(original, result);
+      if (!feed.active || session !== feed.session) return;
+      label.textContent = `AUTO ${item.auto_rating} -> HUMAN ${item.rating}`;
+      refreshStars(item.rating);
+      toast(label.textContent);
+      await animate(rating == null ? 'approve' : 'next');
+      if (feed.active && session === feed.session && feed.activeSection === section) feedGoNext(section);
+    } catch (e) {
+      toast('Could not save rating: ' + e.message, true);
+      panel.querySelectorAll('button').forEach(b => b.disabled = false);
+    } finally { saving = false; }
+  };
+  const stars = document.createElement('div'); stars.className = 'feed-review-stars';
+  stars.setAttribute('role', 'group'); stars.setAttribute('aria-label', 'Choose human rating');
+  const choices = [];
+  const refreshStars = rating => choices.forEach((b, i) => {
+    b.classList.toggle('filled', i < rating);
+    b.setAttribute('aria-pressed', String(i + 1 === rating));
+  });
+  for (let r = 1; r <= 5; r++) {
+    const b = document.createElement('button'); b.className = 'star'; b.textContent = '\u2605';
+    b.setAttribute('aria-label', `Rate ${r} ${r === 1 ? 'star' : 'stars'}`);
+    b.title = `${r} / 5`; b.addEventListener('click', () => save(r));
+    choices.push(b); stars.appendChild(b);
+  }
+  refreshStars(item.auto_rating); panel.appendChild(stars);
+  const button = (text, action) => {
+    const b = document.createElement('button'); b.className = 'btn'; b.textContent = text;
+    b.addEventListener('click', action); panel.appendChild(b); return b;
+  };
+  button('Approve', () => save(null));
+  button('Skip', async () => {
+    if (saving) return;
+    saving = true;
+    const session = feed.session;
+    await animate('next');
+    if (feed.active && session === feed.session && feed.activeSection === section) feedGoNext(section);
+    saving = false;
+  });
+  const hint = document.createElement('small'); hint.textContent = 'Swipe right: approve / left: choose stars / up: skip';
+  panel.appendChild(hint); card.appendChild(panel);
+  section.addEventListener('click', e => {
+    if (suppressClick) { e.preventDefault(); e.stopPropagation(); suppressClick = false; }
+  }, true);
+  section.addEventListener('pointerdown', e => {
+    suppressClick = false;
+    if (saving || !e.isPrimary || e.target.closest('button, .feed-progress')) return;
+    start = {x:e.clientX, y:e.clientY};
+  });
+  section.addEventListener('pointermove', e => {
+    if (!start || saving) return;
+    const dx = e.clientX - start.x, dy = e.clientY - start.y;
+    if (Math.abs(dx) < 8 || Math.abs(dx) < Math.abs(dy) * 1.5) return;
+    section.setPointerCapture(e.pointerId);
+    suppressClick = true; card.classList.add('dragging');
+    const shift = Math.max(-180, Math.min(180, dx));
+    card.style.transform = `translateX(${shift}px) rotate(${shift / 22}deg)`;
+    stamp.textContent = dx > 0 ? 'APPROVE' : 'CHOOSE STARS';
+    stamp.classList.toggle('choose', dx < 0);
+    stamp.style.opacity = String(Math.min(1, Math.abs(dx) / 90));
+  });
+  section.addEventListener('pointercancel', () => { start = null; resetDrag(); });
+  section.addEventListener('pointerup', e => {
+    if (!start) return;
+    const dx = e.clientX - start.x, dy = e.clientY - start.y; start = null;
+    if (section.hasPointerCapture(e.pointerId)) section.releasePointerCapture(e.pointerId);
+    resetDrag();
+    if (saving || Math.abs(dx) < 60 || Math.abs(dx) < Math.abs(dy) * 1.5) return;
+    suppressClick = true;
+    if (dx > 0) save(null);
+    else {
+      choices[0].focus(); label.textContent = `AUTO ${item.auto_rating} - Choose a human star rating`;
+      animate('choose');
+    }
+  });
 }
 
 // ---------------------------------------------------------------------

@@ -119,6 +119,12 @@
         </select>
         <button id="shuffle-btn" class="btn btn-ghost" title="Reshuffle current view">⤮ shuffle</button>
         <button id="portrait-wall-btn" class="btn btn-ghost" title="3 portrait files at once, each swapping out independently">▦ portrait wall</button>
+        <select id="rating-status-select" class="btn btn-ghost" aria-label="Rating review status">
+          <option value="">All review states</option><option value="unrated">Unrated</option>
+          <option value="auto">Auto rated</option><option value="needs_review">Needs review</option>
+          <option value="reviewed">Human reviewed</option>
+        </select>
+        <button id="review-ratings-btn" class="btn btn-ghost">Review Ratings</button>
         <button id="feed-btn" class="btn btn-ghost" title="Full-screen scrolling feed">▤ feed</button>
         <button id="vr-btn" class="btn btn-ghost" title="View in VR" hidden>🥽 VR</button>
         <button id="slideshow-btn" class="btn btn-accent">▶ slideshow</button>
@@ -310,6 +316,7 @@
 
 <div id="feed" class="feed" hidden>
   <button class="feed-close" id="feed-close" title="Exit (Esc)">✕</button>
+  <div id="feed-status" role="status"></div>
   <div class="feed-scroll" id="feed-scroll"></div>
 </div>
 

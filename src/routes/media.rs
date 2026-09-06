@@ -47,6 +47,7 @@ pub struct MediaQuery {
     /// regardless, since it hasn't been rated — manually or by the NSFW
     /// auto-rater — yet).
     max_rating: Option<i64>,
+    rating_status: Option<String>,
 }
 
 pub async fn list(
@@ -99,6 +100,19 @@ pub async fn list(
     };
 
     let mut extra = String::from(" AND m.missing=0");
+    extra.push_str(match q.rating_status.as_deref().unwrap_or("") {
+        "" | "all" => "",
+        "unrated" => " AND m.rating=0 AND m.auto_rating=0",
+        "auto" => " AND m.rating_source='auto'",
+        "needs_review" => " AND m.auto_rating>0 AND m.rating_reviewed=0",
+        "reviewed" => " AND m.rating_reviewed=1",
+        _ => {
+            return Err((
+                StatusCode::BAD_REQUEST,
+                Json(json!({"error":"Invalid rating_status"})),
+            ))
+        }
+    });
     if let Some(kind) = q.media_type.as_deref() {
         extra.push_str(match kind {
             "image" => " AND m.type='image'",
@@ -188,7 +202,7 @@ pub async fn list(
     params.push(((limit + 1) as i64).into());
     let limit_param = params.len();
     let query = format!(
-        "SELECT m.id,m.source_id,m.filepath,m.filename,m.type,m.added_at,m.rating,m.origin_url,m.downloaded,m.duration_secs, {key} AS _cursor_key, s.group_id AS _source_group_id, \
+        "SELECT m.id,m.source_id,m.filepath,m.filename,m.type,m.added_at,m.rating,m.auto_rating,m.auto_rating_score,m.rating_source,m.rating_reviewed,m.rating_reviewed_at,m.origin_url,m.downloaded,m.duration_secs, {key} AS _cursor_key, s.group_id AS _source_group_id, \
             (SELECT GROUP_CONCAT(t.name, ',') FROM media_tags mt \
              JOIN tags t ON t.id = mt.tag_id WHERE mt.media_id = m.id) AS tags_csv \
          FROM media m \
@@ -272,6 +286,7 @@ pub async fn list(
     let mut media = Vec::new();
     for mut r in rows {
         r.remove("_cursor_key");
+        r.insert("rating_reviewed".into(), json!(r["rating_reviewed"] == 1));
         let source_group_id: Option<i64> = r.remove("_source_group_id").and_then(|v| v.as_i64());
         let tags_csv = r
             .remove("tags_csv")
@@ -322,28 +337,55 @@ pub async fn set_rating(
             Json(json!({"error": "Rating must be between 0 and 5"})),
         ));
     }
-    let conn = state.pool.get().map_err(db_err)?;
-    let exists: bool = conn
-        .query_row("SELECT COUNT(*) FROM media WHERE id=?1", [id], |r| {
-            r.get::<_, i64>(0)
-        })
-        .unwrap_or(0)
-        > 0;
-    if !exists {
-        return Err((
-            StatusCode::NOT_FOUND,
-            Json(json!({"error": "Media not found"})),
-        ));
-    }
-    conn.execute(
-        "UPDATE media SET rating=?1 WHERE id=?2",
-        rusqlite::params![body.rating, id],
-    )
-    .map_err(db_err)?;
-    Ok(Json(json!({ "id": id, "rating": body.rating })))
+    save_review(&state, id, Some(body.rating))
 }
 
-// ─── POST /api/media/:id/tags ────────────────────────────────────────────────
+pub async fn approve_rating(
+    State(state): State<Arc<AppState>>,
+    Path(id): Path<i64>,
+) -> Result<Json<Value>, (StatusCode, Json<Value>)> {
+    save_review(&state, id, None)
+}
+
+fn save_review(
+    state: &AppState,
+    id: i64,
+    rating: Option<i64>,
+) -> Result<Json<Value>, (StatusCode, Json<Value>)> {
+    let conn = state.pool.get().map_err(db_err)?;
+    let result = conn.query_row(
+        "UPDATE media SET rating=COALESCE(?1,auto_rating), rating_source='human',
+         rating_reviewed=1, rating_reviewed_at=?2 WHERE id=?3 AND (?1 IS NOT NULL OR auto_rating BETWEEN 1 AND 5)
+         RETURNING rating,auto_rating,auto_rating_score,rating_source,rating_reviewed,rating_reviewed_at",
+        rusqlite::params![rating, now_iso(), id], |r| Ok(json!({
+            "id":id, "rating":r.get::<_,i64>(0)?, "auto_rating":r.get::<_,i64>(1)?,
+            "auto_rating_score":r.get::<_,Option<f64>>(2)?, "rating_source":r.get::<_,String>(3)?,
+            "rating_reviewed":r.get::<_,bool>(4)?, "rating_reviewed_at":r.get::<_,Option<String>>(5)?
+        })));
+    match result {
+        Ok(value) => Ok(Json(value)),
+        Err(rusqlite::Error::QueryReturnedNoRows) => {
+            let exists = conn
+                .query_row(
+                    "SELECT EXISTS(SELECT 1 FROM media WHERE id=?1)",
+                    [id],
+                    |r| r.get::<_, bool>(0),
+                )
+                .map_err(db_err)?;
+            Err((
+                if exists {
+                    StatusCode::CONFLICT
+                } else {
+                    StatusCode::NOT_FOUND
+                },
+                Json(
+                    json!({"error":if exists {"No automated rating to approve"} else {"Media not found"}}),
+                ),
+            ))
+        }
+        Err(e) => Err(db_err(e)),
+    }
+}
 
 #[derive(Deserialize)]
 pub struct TagBody {
@@ -481,6 +523,111 @@ fn sql_value(value: rusqlite::types::ValueRef<'_>) -> Value {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn automated_and_human_rating_lifecycle() {
+        let root = tempfile::tempdir().unwrap();
+        let state = crate::test_support::state(root.path());
+        crate::test_support::source(&state);
+        let conn = state.pool.get().unwrap();
+        conn.execute_batch("INSERT INTO media(id,source_id,filepath,filename,type,added_at) VALUES
+            (1,1,'a','a','image','2026'),(2,1,'b','b','image','2026'),(3,1,'c','c','image','2026'),(4,1,'d','d','image','2026');").unwrap();
+        crate::nsfw::persist_score(&conn, 1, 0.72).unwrap();
+        crate::nsfw::persist_score(&conn, 2, 0.4).unwrap();
+        crate::nsfw::persist_score(&conn, 4, 0.9).unwrap();
+        conn.execute("UPDATE media SET missing=1 WHERE id=4", [])
+            .unwrap();
+        let queue = list(
+            State(state.clone()),
+            Query(MediaQuery {
+                rating_status: Some("needs_review".into()),
+                limit: Some(1),
+                ..Default::default()
+            }),
+        )
+        .await
+        .unwrap()
+        .0;
+        assert_eq!(queue["media"][0]["auto_rating"], 4);
+        assert_eq!(queue["media"][0]["rating"], 4);
+        assert_eq!(queue["media"][0]["rating_source"], "auto");
+        assert_eq!(queue["media"][0]["rating_reviewed"], false);
+        assert!((queue["media"][0]["auto_rating_score"].as_f64().unwrap() - 0.72).abs() < 0.00001);
+        assert_eq!(queue["has_more"], true);
+        let manual = set_rating(
+            State(state.clone()),
+            Path(1),
+            Json(RatingBody { rating: 0 }),
+        )
+        .await
+        .unwrap()
+        .0;
+        assert_eq!(manual["rating_source"], "human");
+        assert_eq!(manual["rating_reviewed"], true);
+        assert!(manual["rating_reviewed_at"].is_string());
+        crate::nsfw::persist_score(&conn, 1, 0.99).unwrap();
+        let row: (i64, i64, String) = conn
+            .query_row(
+                "SELECT rating,auto_rating,rating_source FROM media WHERE id=1",
+                [],
+                |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
+            )
+            .unwrap();
+        assert_eq!(row, (0, 5, "human".into()));
+        let next = list(
+            State(state.clone()),
+            Query(MediaQuery {
+                rating_status: Some("needs_review".into()),
+                cursor: queue["next_cursor"].as_str().map(str::to_owned),
+                ..Default::default()
+            }),
+        )
+        .await
+        .unwrap()
+        .0;
+        assert_eq!(next["media"][0]["id"], 2);
+        assert_eq!(next["has_more"], false);
+        let approved = approve_rating(State(state.clone()), Path(2))
+            .await
+            .unwrap()
+            .0;
+        assert_eq!(approved["rating"], approved["auto_rating"]);
+        assert_eq!(approved["auto_rating"], 3);
+        assert_eq!(approved["rating_source"], "human");
+        assert_eq!(approved["rating_reviewed"], true);
+        let queue = list(
+            State(state.clone()),
+            Query(MediaQuery {
+                rating_status: Some("needs_review".into()),
+                ..Default::default()
+            }),
+        )
+        .await
+        .unwrap()
+        .0;
+        assert!(queue["media"].as_array().unwrap().is_empty());
+        assert_eq!(
+            approve_rating(State(state.clone()), Path(3))
+                .await
+                .unwrap_err()
+                .0,
+            StatusCode::CONFLICT
+        );
+        assert_eq!(
+            approve_rating(State(state.clone()), Path(999))
+                .await
+                .unwrap_err()
+                .0,
+            StatusCode::NOT_FOUND
+        );
+        assert_eq!(
+            set_rating(State(state), Path(1), Json(RatingBody { rating: 6 }))
+                .await
+                .unwrap_err()
+                .0,
+            StatusCode::BAD_REQUEST
+        );
+    }
 
     #[tokio::test]
     async fn page_limit_is_capped_and_missing_media_excluded() {

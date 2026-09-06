@@ -317,7 +317,7 @@ pub fn spawn_backfill_loop(
                 }
                 let claimed = pool.get().ok().and_then(|conn| conn.execute(
                     "UPDATE media SET nsfw_state='working', nsfw_retry_at=unixepoch()+300, nsfw_attempts=nsfw_attempts+1
-                     WHERE id=?1 AND downloaded=1 AND rating=0 AND nsfw_state IN ('pending','working')
+                     WHERE id=?1 AND downloaded=1 AND missing=0 AND nsfw_state IN ('pending','working')
                      AND nsfw_retry_at<=unixepoch()", [id]).ok()) == Some(1);
                 if !claimed {
                     continue;
@@ -326,7 +326,7 @@ pub fn spawn_backfill_loop(
                 if let Ok(conn) = pool.get() {
                     match result {
                         Ok(score) => {
-                            let _ = conn.execute("UPDATE media SET rating=?1, nsfw_state='done' WHERE id=?2 AND rating=0 AND downloaded=1", rusqlite::params![score_to_rating(score), id]);
+                            let _ = persist_score(&conn, id, score);
                         }
                         Err(e) => {
                             if !path.is_file() {
@@ -347,6 +347,24 @@ pub fn spawn_backfill_loop(
     });
 }
 
+// Atomic with respect to concurrent human reviews.
+pub(crate) fn persist_score(
+    conn: &rusqlite::Connection,
+    id: i64,
+    score: f32,
+) -> rusqlite::Result<usize> {
+    if !score.is_finite() {
+        return Err(rusqlite::Error::InvalidQuery);
+    }
+    conn.execute(
+        "UPDATE media SET auto_rating=?1, auto_rating_score=?2,
+        rating=CASE WHEN rating_reviewed=0 THEN ?1 ELSE rating END,
+        rating_source=CASE WHEN rating_reviewed=0 THEN 'auto' ELSE rating_source END,
+        nsfw_state='done' WHERE id=?3 AND downloaded=1 AND missing=0",
+        rusqlite::params![score_to_rating(score), score, id],
+    )
+}
+
 /// Buckets a 0..1 NSFW probability into a 1-5 star rating: 1 = clothed/safe,
 /// 3 = explicit, 5 = extremely lewd/vulgar — five equal-width bands across
 /// the full [0,1] range.
@@ -357,7 +375,7 @@ fn score_to_rating(score: f32) -> i64 {
 
 fn fetch_unrated_batch(pool: &crate::db::DbPool, limit: i64) -> anyhow::Result<Vec<(i64, String)>> {
     let conn = pool.get()?;
-    let mut stmt = conn.prepare("SELECT id, filepath FROM media WHERE rating=0 AND downloaded=1 AND type='image'
+    let mut stmt = conn.prepare("SELECT id, filepath FROM media WHERE missing=0 AND downloaded=1 AND type='image'
         AND nsfw_state IN ('pending','working') AND nsfw_retry_at<=unixepoch() AND nsfw_attempts<3 ORDER BY id LIMIT ?1")?;
     let rows = stmt
         .query_map([limit], |r| Ok((r.get(0)?, r.get(1)?)))?

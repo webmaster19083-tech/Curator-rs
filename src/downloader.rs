@@ -433,7 +433,15 @@ pub fn index_file(state: &AppState, source_id: i64, path: &Path) -> Result<bool>
             .optional()?;
         if let Some(id) = placeholder {
             tx.execute("INSERT OR IGNORE INTO media_tags SELECT ?1, tag_id FROM media_tags WHERE media_id=?2", rusqlite::params![id,real_id])?;
-            tx.execute("UPDATE media SET rating=CASE WHEN rating=0 THEN (SELECT rating FROM media WHERE id=?2) ELSE rating END WHERE id=?1",rusqlite::params![id,real_id])?;
+            tx.execute("UPDATE media SET (rating,rating_source,rating_reviewed,rating_reviewed_at)=
+                (SELECT rating,rating_source,rating_reviewed,rating_reviewed_at FROM media WHERE id=?2)
+                WHERE id=?1 AND rating_reviewed=0 AND (rating=0 OR (SELECT rating_reviewed FROM media WHERE id=?2)=1)", rusqlite::params![id,real_id])?;
+            tx.execute(
+                "UPDATE media SET (auto_rating,auto_rating_score)=
+                (SELECT auto_rating,auto_rating_score FROM media WHERE id=?2)
+                WHERE id=?1 AND auto_rating=0",
+                rusqlite::params![id, real_id],
+            )?;
             tx.execute("DELETE FROM media WHERE id=?1", [real_id])?;
         }
     }
@@ -1240,12 +1248,14 @@ mod tests {
         let conn = state.pool.get().unwrap();
         conn.execute_batch("INSERT INTO media(id,source_id,filepath,filename,type,added_at,downloaded,origin_url,rating) VALUES(10,1,'pending','pending','image','2026',0,'https://example.test/item.jpg',4);
             INSERT INTO tags(id,name,added_at) VALUES(1,'keep','2026'),(2,'also keep','2026'); INSERT INTO media_tags VALUES(10,1);").unwrap();
+        conn.execute("UPDATE media SET rating=0,rating_source='human',rating_reviewed=1,rating_reviewed_at='2026' WHERE id=10", []).unwrap();
         let path = state.library_dir.join("test/item.jpg");
         std::fs::write(&path, b"downloaded").unwrap();
         assert!(index_file(&state, 1, &path).unwrap());
         let real_id: i64 = conn
             .query_row("SELECT id FROM media WHERE downloaded=1", [], |r| r.get(0))
             .unwrap();
+        crate::nsfw::persist_score(&conn, real_id, 0.72).unwrap();
         conn.execute("INSERT INTO media_tags VALUES(?1,2)", [real_id])
             .unwrap();
         std::fs::write(
@@ -1262,8 +1272,16 @@ mod tests {
                 r.get::<_, i64>(2)?
             )))
             .unwrap(),
-            (10, 4, 1)
+            (10, 0, 1)
         );
+        let provenance: (String, bool, i64) = conn
+            .query_row(
+                "SELECT rating_source,rating_reviewed,auto_rating FROM media",
+                [],
+                |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
+            )
+            .unwrap();
+        assert_eq!(provenance, ("human".into(), true, 4));
         assert_eq!(
             conn.query_row(
                 "SELECT COUNT(*) FROM media_tags WHERE media_id=10",

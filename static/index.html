@@ -96,7 +96,7 @@
           <button class="type-filter-btn active" data-type-filter="all">all</button>
           <button class="type-filter-btn" data-type-filter="image">photos</button>
           <button class="type-filter-btn" data-type-filter="clip" title="Videos up to 90 seconds">clips</button>
-          <button class="type-filter-btn" data-type-filter="video" title="Videos over 90 seconds">videos</button>
+          <button class="type-filter-btn" data-type-filter="video" title="Videos over 90 seconds, plus files whose duration is not known yet">videos</button>
         </div>
         <select id="sort-select" class="btn btn-ghost" title="Sort order">
           <option value="default">sort: default</option>
@@ -176,14 +176,13 @@
       theme
       <select id="settings-theme">
         <option value="system">System</option>
-        <option value="yotsuba">Yotsuba</option>
-        <option value="yotsuba-b">Yotsuba B</option>
-        <option value="futaba">Futaba</option>
-        <option value="burichan">Burichan</option>
-        <option value="tomorrow">Tomorrow</option>
-        <option value="photon">Photon</option>
-        <option value="light">Light</option>
-        <option value="oled-dark">OLED dark</option>
+        <option value="atelier-dark">Atelier Dark</option>
+        <option value="midnight">Midnight</option>
+        <option value="ember">Ember</option>
+        <option value="linen">Linen</option>
+        <option value="sage">Sage</option>
+        <option value="aurora">Aurora</option>
+        <option value="oled">OLED</option>
       </select>
     </label>
 
@@ -256,6 +255,11 @@
   <div class="lightbox-footer">
     <div class="lightbox-footer-row">
       <div class="lightbox-meta mono small" id="lightbox-meta"></div>
+      <div id="lightbox-clip-tools" hidden>
+        <label>Clip length <select id="clip-seconds"><option value="15">15s</option><option value="30">30s</option><option value="60" selected>60s</option></select></label>
+        <button id="create-clips-btn" class="btn btn-ghost" title="Create separate MP4 files. Original stays untouched; this uses additional disk space.">Create clips (keep original)</button>
+      </div>
+      <span id="clip-job-status" role="status" class="mono small"></span>
       <button class="btn btn-accent" id="lightbox-start-slideshow">▶ slideshow from here</button>
     </div>
     <div class="lightbox-footer-row">

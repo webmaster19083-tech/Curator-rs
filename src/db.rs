@@ -269,6 +269,10 @@ pub fn run_migrations(conn: &Connection) -> Result<()> {
         ("nsfw_attempts", "INTEGER NOT NULL DEFAULT 0"),
         ("nsfw_retry_at", "INTEGER NOT NULL DEFAULT 0"),
         ("duration_attempted", "INTEGER NOT NULL DEFAULT 0"),
+        (
+            "clip_parent_id",
+            "INTEGER REFERENCES media(id) ON DELETE SET NULL",
+        ),
         ("auto_rating", "INTEGER NOT NULL DEFAULT 0"),
         ("auto_rating_score", "REAL"),
         ("rating_source", "TEXT NOT NULL DEFAULT 'none'"),
@@ -281,6 +285,11 @@ pub fn run_migrations(conn: &Connection) -> Result<()> {
             ))?;
         }
     }
+    conn.execute_batch("CREATE TABLE IF NOT EXISTS clip_jobs (
+        id INTEGER PRIMARY KEY AUTOINCREMENT, media_id INTEGER NOT NULL REFERENCES media(id) ON DELETE CASCADE,
+        seconds INTEGER NOT NULL, status TEXT NOT NULL, clip_count INTEGER NOT NULL DEFAULT 0,
+        error TEXT, added_at TEXT NOT NULL);
+        UPDATE clip_jobs SET status='failed',error='Interrupted by restart; original preserved' WHERE status='running';")?;
     conn.execute_batch(
         "CREATE INDEX IF NOT EXISTS idx_media_review ON media(rating_reviewed, auto_rating, id);",
     )?;

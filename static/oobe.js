@@ -19,16 +19,26 @@ let restartNeeded = false;
 //    purpose: oobe.html is a standalone page and pulling in the rest of
 //    app.js would drag in the whole app's DOM assumptions with it) ────────
 let systemThemeMedia = null;
+const LEGACY_THEME_MAP = {
+  yotsuba: 'linen', 'yotsuba-b': 'midnight', futaba: 'ember', burichan: 'midnight',
+  tomorrow: 'linen', photon: 'linen', light: 'linen', 'oled-dark': 'oled', dark: 'atelier-dark',
+};
+function normalizeTheme(theme) {
+  return LEGACY_THEME_MAP[theme] || theme;
+}
 function applyTheme(theme) {
+  theme = normalizeTheme(theme);
   if (systemThemeMedia) { systemThemeMedia.onchange = null; systemThemeMedia = null; }
   if (theme === 'system') {
     systemThemeMedia = window.matchMedia('(prefers-color-scheme: light)');
     const resolve = () => {
-      if (systemThemeMedia.matches) document.documentElement.dataset.theme = 'light';
+      if (systemThemeMedia.matches) document.documentElement.dataset.theme = 'linen';
       else delete document.documentElement.dataset.theme;
     };
     resolve();
     systemThemeMedia.onchange = resolve;
+  } else if (theme === 'atelier-dark') {
+    delete document.documentElement.dataset.theme;
   } else {
     document.documentElement.dataset.theme = theme;
   }
@@ -104,6 +114,7 @@ async function testDependency(check, key, pathInputSel) {
 
 async function loadStatus() {
   status = await api('/api/oobe/status');
+  status.settings.theme = normalizeTheme(status.settings.theme);
   applyTheme(status.settings.theme);
 
   const gd = status.dependencies.gallery_dl; gd.required = true;

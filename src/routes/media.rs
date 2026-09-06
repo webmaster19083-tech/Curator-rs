@@ -117,7 +117,7 @@ pub async fn list(
         extra.push_str(match kind {
             "image" => " AND m.type='image'",
             "clip" => " AND m.type='video' AND m.duration_secs IS NOT NULL AND m.duration_secs<=90",
-            "video" => " AND m.type='video' AND m.duration_secs>90",
+            "video" => " AND m.type='video' AND (m.duration_secs IS NULL OR m.duration_secs>90)",
             _ => "",
         });
     }
@@ -202,7 +202,7 @@ pub async fn list(
     params.push(((limit + 1) as i64).into());
     let limit_param = params.len();
     let query = format!(
-        "SELECT m.id,m.source_id,m.filepath,m.filename,m.type,m.added_at,m.rating,m.auto_rating,m.auto_rating_score,m.rating_source,m.rating_reviewed,m.rating_reviewed_at,m.origin_url,m.downloaded,m.duration_secs, {key} AS _cursor_key, s.group_id AS _source_group_id, \
+        "SELECT m.id,m.source_id,m.filepath,m.filename,m.type,m.added_at,m.rating,m.auto_rating,m.auto_rating_score,m.rating_source,m.rating_reviewed,m.rating_reviewed_at,m.origin_url,m.downloaded,m.duration_secs,m.clip_parent_id, {key} AS _cursor_key, s.group_id AS _source_group_id, \
             (SELECT GROUP_CONCAT(t.name, ',') FROM media_tags mt \
              JOIN tags t ON t.id = mt.tag_id WHERE mt.media_id = m.id) AS tags_csv \
          FROM media m \
@@ -388,6 +388,55 @@ fn save_review(
 }
 
 #[derive(Deserialize)]
+pub struct DurationBody {
+    pub duration_secs: f64,
+}
+
+pub async fn set_duration(
+    State(state): State<Arc<AppState>>,
+    Path(id): Path<i64>,
+    Json(body): Json<DurationBody>,
+) -> Result<Json<Value>, (StatusCode, Json<Value>)> {
+    if !body.duration_secs.is_finite() || body.duration_secs <= 0.0 || body.duration_secs > 604800.0
+    {
+        return Err((
+            StatusCode::BAD_REQUEST,
+            Json(json!({"error":"Invalid video duration"})),
+        ));
+    }
+    let conn = state.pool.get().map_err(db_err)?;
+    conn.execute("UPDATE media SET duration_secs=?1,duration_attempted=1 WHERE id=?2 AND type='video' AND duration_secs IS NULL", rusqlite::params![body.duration_secs,id]).map_err(db_err)?;
+    Ok(Json(json!({"id":id})))
+}
+
+#[derive(Deserialize)]
+pub struct UndoRatingBody {
+    pub rating_reviewed_at: String,
+}
+
+pub async fn undo_rating(
+    State(state): State<Arc<AppState>>,
+    Path(id): Path<i64>,
+    Json(body): Json<UndoRatingBody>,
+) -> Result<Json<Value>, (StatusCode, Json<Value>)> {
+    let conn = state.pool.get().map_err(db_err)?;
+    let result = conn.query_row("UPDATE media SET rating=auto_rating,rating_source='auto',rating_reviewed=0,rating_reviewed_at=NULL
+        WHERE id=?1 AND auto_rating>0 AND rating_reviewed=1 AND rating_reviewed_at=?2
+        RETURNING rating,auto_rating,auto_rating_score", rusqlite::params![id,body.rating_reviewed_at], |r| Ok(json!({
+            "id":id,"rating":r.get::<_,i64>(0)?,"auto_rating":r.get::<_,i64>(1)?,"auto_rating_score":r.get::<_,Option<f64>>(2)?,
+            "rating_source":"auto","rating_reviewed":false,"rating_reviewed_at":null
+        })));
+    match result {
+        Ok(value) => Ok(Json(value)),
+        Err(rusqlite::Error::QueryReturnedNoRows) => Err((
+            StatusCode::CONFLICT,
+            Json(json!({"error":"Rating changed since this review; cannot undo it"})),
+        )),
+        Err(e) => Err(db_err(e)),
+    }
+}
+
+#[derive(Deserialize)]
 pub struct TagBody {
     pub name: String,
 }
@@ -523,6 +572,133 @@ fn sql_value(value: rusqlite::types::ValueRef<'_>) -> Value {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn unknown_videos_stay_visible_and_browser_duration_moves_clips() {
+        let root = tempfile::tempdir().unwrap();
+        let state = crate::test_support::state(root.path());
+        crate::test_support::source(&state);
+        state.pool.get().unwrap().execute_batch("INSERT INTO media(id,source_id,filepath,filename,type,added_at) VALUES(1,1,'v','v','video','2026');").unwrap();
+        let videos = list(
+            State(state.clone()),
+            Query(MediaQuery {
+                media_type: Some("video".into()),
+                ..Default::default()
+            }),
+        )
+        .await
+        .unwrap()
+        .0;
+        assert_eq!(videos["media"].as_array().unwrap().len(), 1);
+        let _ = set_duration(
+            State(state.clone()),
+            Path(1),
+            Json(DurationBody {
+                duration_secs: 45.0,
+            }),
+        )
+        .await
+        .unwrap();
+        let clips = list(
+            State(state.clone()),
+            Query(MediaQuery {
+                media_type: Some("clip".into()),
+                ..Default::default()
+            }),
+        )
+        .await
+        .unwrap()
+        .0;
+        assert_eq!(clips["media"].as_array().unwrap().len(), 1);
+        let videos = list(
+            State(state.clone()),
+            Query(MediaQuery {
+                media_type: Some("video".into()),
+                ..Default::default()
+            }),
+        )
+        .await
+        .unwrap()
+        .0;
+        assert!(videos["media"].as_array().unwrap().is_empty());
+        assert_eq!(
+            set_duration(
+                State(state),
+                Path(1),
+                Json(DurationBody {
+                    duration_secs: -1.0
+                })
+            )
+            .await
+            .unwrap_err()
+            .0,
+            StatusCode::BAD_REQUEST
+        );
+    }
+
+    #[tokio::test]
+    async fn undo_review_restores_auto_queue_and_rejects_stale_undo() {
+        let root = tempfile::tempdir().unwrap();
+        let state = crate::test_support::state(root.path());
+        crate::test_support::source(&state);
+        state.pool.get().unwrap().execute_batch("INSERT INTO media(id,source_id,filepath,filename,type,added_at,auto_rating,rating,rating_source) VALUES(1,1,'a','a','image','2026',4,4,'auto');").unwrap();
+        let saved = set_rating(
+            State(state.clone()),
+            Path(1),
+            Json(RatingBody { rating: 3 }),
+        )
+        .await
+        .unwrap()
+        .0;
+        let token = saved["rating_reviewed_at"].as_str().unwrap().to_string();
+        let undone = undo_rating(
+            State(state.clone()),
+            Path(1),
+            Json(UndoRatingBody {
+                rating_reviewed_at: token.clone(),
+            }),
+        )
+        .await
+        .unwrap()
+        .0;
+        assert_eq!(undone["rating"], 4);
+        assert_eq!(undone["rating_reviewed"], false);
+        let queue = list(
+            State(state.clone()),
+            Query(MediaQuery {
+                rating_status: Some("needs_review".into()),
+                ..Default::default()
+            }),
+        )
+        .await
+        .unwrap()
+        .0;
+        assert_eq!(queue["media"].as_array().unwrap().len(), 1);
+        state.pool.get().unwrap().execute_batch("UPDATE media SET rating=2,rating_reviewed=1,rating_source='human',rating_reviewed_at='future';").unwrap();
+        assert_eq!(
+            undo_rating(
+                State(state.clone()),
+                Path(1),
+                Json(UndoRatingBody {
+                    rating_reviewed_at: token
+                })
+            )
+            .await
+            .unwrap_err()
+            .0,
+            StatusCode::CONFLICT
+        );
+        assert_eq!(
+            state
+                .pool
+                .get()
+                .unwrap()
+                .query_row("SELECT rating FROM media WHERE id=1", [], |r| r
+                    .get::<_, i64>(0))
+                .unwrap(),
+            2
+        );
+    }
 
     #[tokio::test]
     async fn automated_and_human_rating_lifecycle() {

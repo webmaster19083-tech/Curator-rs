@@ -40,14 +40,24 @@ function mediaMatchesTypeFilter(item, typeFilter) {
   if (typeFilter === 'all') return true;
   if (typeFilter === 'image') return item.type === 'image';
   if (item.type !== 'video') return false;
-  // Duration not known yet (not yet backfilled, or ffprobe unavailable) —
-  // don't guess; just don't show it under either duration-based filter
-  // until it's actually known, same as an unrated item skipping a rating
-  // filter rather than being assigned one.
-  if (item.duration_secs == null) return false;
+  // Unknown durations stay visible under Videos until metadata is available.
+  if (item.duration_secs == null) return typeFilter === 'video';
   return typeFilter === 'clip'
     ? item.duration_secs <= CLIP_MAX_SECONDS
     : item.duration_secs > CLIP_MAX_SECONDS;
+}
+
+function reportVideoDuration(video, item) {
+  if (item.duration_secs != null || item._durationPending) return;
+  video.addEventListener('loadedmetadata', async () => {
+    const duration = video.duration;
+    if (!Number.isFinite(duration) || duration <= 0 || item._durationPending) return;
+    item._durationPending = true;
+    try {
+      await api(`/api/media/${item.id}/duration`, {method:'PUT', body:JSON.stringify({duration_secs:duration})});
+      item.duration_secs = duration;
+    } catch (_) {} finally { delete item._durationPending; }
+  }, {once:true});
 }
 
 // A media item that isn't downloaded yet (downloaded===0 — see the
@@ -93,8 +103,8 @@ async function api(path, opts = {}) {
   });
   if (!res.ok) {
     let msg = res.statusText;
-    try { const j = await res.json(); msg = j.detail || msg; } catch (_) { /* ignore */ }
-    throw new Error(msg);
+    try { const j = await res.json(); msg = j.detail || j.error || msg; } catch (_) { /* ignore */ }
+    const error = new Error(msg); error.status = res.status; throw error;
   }
   return res.json();
 }
@@ -174,6 +184,7 @@ async function loadAppSettings() {
   } catch (e) {
     // Not fatal — falls back to the in-memory defaults above.
   }
+  appSettings.theme = normalizeTheme(appSettings.theme);
   applyTheme(appSettings.theme);
 
   // Seed both the live slideshow state (used directly by the portrait
@@ -194,8 +205,16 @@ async function loadAppSettings() {
 // preference, live-updating if that preference changes while the app is
 // open (e.g. the OS auto-switches at sunset).
 let systemThemeMedia = null;
+const LEGACY_THEME_MAP = {
+  yotsuba: 'linen', 'yotsuba-b': 'midnight', futaba: 'ember', burichan: 'midnight',
+  tomorrow: 'linen', photon: 'linen', light: 'linen', 'oled-dark': 'oled', dark: 'atelier-dark',
+};
+function normalizeTheme(theme) {
+  return LEGACY_THEME_MAP[theme] || theme;
+}
 
 function applyTheme(theme) {
+  theme = normalizeTheme(theme);
   if (systemThemeMedia) {
     systemThemeMedia.onchange = null;
     systemThemeMedia = null;
@@ -203,11 +222,13 @@ function applyTheme(theme) {
   if (theme === 'system') {
     systemThemeMedia = window.matchMedia('(prefers-color-scheme: light)');
     const resolve = () => {
-      if (systemThemeMedia.matches) document.documentElement.dataset.theme = 'light';
+      if (systemThemeMedia.matches) document.documentElement.dataset.theme = 'linen';
       else delete document.documentElement.dataset.theme; // dark = the base palette, no override needed
     };
     resolve();
     systemThemeMedia.onchange = resolve;
+  } else if (theme === 'atelier-dark') {
+    delete document.documentElement.dataset.theme;
   } else {
     document.documentElement.dataset.theme = theme;
   }
@@ -314,6 +335,9 @@ function bindGlobalUI() {
   el('#lightbox-close').addEventListener('click', closeLightbox);
   el('#lightbox-prev').addEventListener('click', () => stepLightbox(-1));
   el('#lightbox-next').addEventListener('click', () => stepLightbox(1));
+  el('#create-clips-btn').addEventListener('click', createVideoClips);
+  const activeClipJob = localStorage.getItem('curatorClipJob');
+  if (activeClipJob) watchClipJob(Number(activeClipJob));
   el('#lightbox-start-slideshow').addEventListener('click', () => startSlideshow(state.lightboxIndex));
   el('#lightbox').addEventListener('click', (e) => { if (e.target.id === 'lightbox') closeLightbox(); });
 
@@ -1393,6 +1417,7 @@ function buildTile(item, index) {
   let mediaEl;
   if (item.type === 'video') {
     mediaEl = document.createElement('video');
+    reportVideoDuration(mediaEl, item);
     mediaEl.dataset.src = mediaFullSrc(item);
     mediaEl.preload = 'metadata';
     mediaEl.muted = true;
@@ -1500,6 +1525,7 @@ async function stepLightbox(delta) {
 function renderLightboxItem() {
   const item = state.currentItems[state.lightboxIndex];
   if (!item) return;
+  el('#lightbox-clip-tools').hidden = item.type !== 'video' || item.downloaded === 0 || item.clip_parent_id != null || (item.duration_secs != null && item.duration_secs <= CLIP_MAX_SECONDS);
   const stage = el('#lightbox-stage');
   stage.innerHTML = '';
   const src = mediaFullSrc(item);
@@ -1507,6 +1533,7 @@ function renderLightboxItem() {
   let mediaEl;
   if (item.type === 'video') {
     mediaEl = document.createElement('video');
+    reportVideoDuration(mediaEl, item);
     mediaEl.src = src;
     mediaEl.controls = true;
     mediaEl.autoplay = true;
@@ -1524,6 +1551,45 @@ function renderLightboxItem() {
 
   renderStarRating(el('#lightbox-rating'), item.rating || 0, (rating) => rateMedia(item, rating));
   renderTagRow(item);
+}
+
+let clipJobPending = false;
+async function createVideoClips() {
+  if (clipJobPending) return;
+  const item = state.currentItems[state.lightboxIndex];
+  if (!item || item.type !== 'video') return;
+  clipJobPending = true;
+  el('#create-clips-btn').disabled = true;
+  try {
+    const job = await api(`/api/media/${item.id}/clips`, {method:'POST',body:JSON.stringify({seconds:Number(el('#clip-seconds').value)})});
+    localStorage.setItem('curatorClipJob', String(job.job_id));
+    watchClipJob(job.job_id);
+  } catch (e) {
+    clipJobPending = false; el('#create-clips-btn').disabled = false;
+    toast('Could not create clips: ' + e.message, true);
+  }
+}
+async function watchClipJob(id) {
+  clipJobPending = true; el('#create-clips-btn').disabled = true;
+  try {
+    const job = await api(`/api/clip-jobs/${id}`);
+    if (job.status === 'running') {
+      el('#clip-job-status').textContent = 'Creating clips in background. Original preserved.';
+      setTimeout(() => watchClipJob(id), 3000); return;
+    }
+    localStorage.removeItem('curatorClipJob');
+    clipJobPending = false; el('#create-clips-btn').disabled = false;
+    el('#clip-job-status').textContent = job.status === 'done' ? `${job.clip_count} clips ready - refresh the grid to view` : job.error;
+    if (job.status === 'done') el('#refresh-banner').hidden = false;
+  } catch (e) {
+    if (e.status === 404) {
+      localStorage.removeItem('curatorClipJob'); clipJobPending = false;
+      el('#create-clips-btn').disabled = false;
+      el('#clip-job-status').textContent = 'Clip job is no longer available.'; return;
+    }
+    el('#clip-job-status').textContent = 'Waiting to reconnect to clip job...';
+    setTimeout(() => watchClipJob(id), 5000);
+  }
 }
 
 function renderStarRating(container, rating, onRate) {
@@ -1980,6 +2046,7 @@ function feedBuildItem(item) {
   let ready;
   if (item.type === 'video') {
     mediaEl = document.createElement('video');
+    reportVideoDuration(mediaEl, item);
     mediaEl.playsInline = true;
     // 'auto' (not 'metadata') so the 'loadeddata' wait in feedWaitForMedia
     // actually has a decoded frame to show, not just fetched dimensions.
@@ -2102,6 +2169,8 @@ function feedGoNext(section) {
 
 function feedActivate(section) {
   if (feed.activeSection === section) return;
+  const sections = [...el('#feed-scroll').children];
+  const backwards = feed.activeSection && sections.indexOf(section) < sections.indexOf(feed.activeSection);
   if (feed.activeSection) feedDeactivate(feed.activeSection);
   feed.activeSection = section;
   feed.waitingNext = null;
@@ -2134,9 +2203,11 @@ function feedActivate(section) {
     if (mediaEl.complete && mediaEl.naturalWidth > 0) startTimer();
     else mediaEl.addEventListener('load', startTimer, { once: true });
   }
+  if (feed.review) section._onReviewActivate?.(backwards);
 }
 
 function feedDeactivate(section) {
+  clearInterval(section._countdownTimer); section._countdownTimer = null;
   if (section._timer) { clearTimeout(section._timer); section._timer = null; }
   const mediaEl = section._mediaEl;
   if (mediaEl && mediaEl.tagName === 'VIDEO') mediaEl.pause();
@@ -2338,6 +2409,41 @@ function feedBuildReviewControls(section, item) {
   const panel = document.createElement('div'); panel.className = 'feed-review-controls';
   const label = document.createElement('div'); label.textContent = `AUTO ${item.auto_rating} - Needs review`;
   panel.appendChild(label);
+  const countdown = document.createElement('small'); countdown.className = 'feed-review-countdown';
+  panel.appendChild(countdown);
+  const stopTimer = () => {
+    clearTimeout(section._timer); section._timer = null;
+    clearInterval(section._countdownTimer); section._countdownTimer = null;
+    countdown.textContent = '';
+  };
+  const startTimer = () => {
+    stopTimer();
+    if (!feed.active || feed.activeSection !== section || saving) return;
+    let remaining = 10;
+    countdown.textContent = 'Skip in 10s';
+    section._countdownTimer = setInterval(() => { countdown.textContent = `Skip in ${Math.max(0, --remaining)}s`; }, 1000);
+    section._timer = setTimeout(() => {
+      stopTimer();
+      if (feed.active && feed.activeSection === section && !saving) feedGoNext(section);
+    }, 10000);
+  };
+  section._onReviewActivate = async backwards => {
+    if (backwards && item.rating_reviewed && section._reviewToken && !saving) {
+      saving = true; stopTimer();
+      try {
+        const result = await api(`/api/media/${item.id}/rating/undo`, {method:'POST', body:JSON.stringify({rating_reviewed_at:section._reviewToken})});
+        Object.assign(item, result);
+        const original = state.currentItems.find(m => m.id === item.id);
+        if (original) Object.assign(original, result);
+        section._reviewToken = null;
+        label.textContent = `AUTO ${item.auto_rating} - Review undone`;
+        refreshStars(item.auto_rating);
+        panel.querySelectorAll('button').forEach(b => b.disabled = false);
+      } catch (e) { toast('Could not undo: ' + e.message, true); }
+      finally { saving = false; }
+    }
+    startTimer();
+  };
   let saving = false, start = null, suppressClick = false;
   const resetDrag = () => {
     card.style.transform = ''; card.classList.remove('dragging');
@@ -2356,7 +2462,7 @@ function feedBuildReviewControls(section, item) {
   };
   const save = async rating => {
     if (saving || item.rating_reviewed) { resetDrag(); return; }
-    saving = true;
+    saving = true; stopTimer();
     const session = feed.session;
     panel.querySelectorAll('button').forEach(b => b.disabled = true);
     resetDrag();
@@ -2365,6 +2471,7 @@ function feedBuildReviewControls(section, item) {
         method:rating == null ? 'POST' : 'PUT', ...(rating == null ? {} : {body:JSON.stringify({rating})})
       });
       Object.assign(item, result);
+      section._reviewToken = result.rating_reviewed_at;
       const original = state.currentItems.find(m => m.id === item.id);
       if (original) Object.assign(original, result);
       if (!feed.active || session !== feed.session) return;
@@ -2376,7 +2483,7 @@ function feedBuildReviewControls(section, item) {
     } catch (e) {
       toast('Could not save rating: ' + e.message, true);
       panel.querySelectorAll('button').forEach(b => b.disabled = false);
-    } finally { saving = false; }
+    } finally { saving = false; if (!item.rating_reviewed) startTimer(); }
   };
   const stars = document.createElement('div'); stars.className = 'feed-review-stars';
   stars.setAttribute('role', 'group'); stars.setAttribute('aria-label', 'Choose human rating');
@@ -2397,15 +2504,20 @@ function feedBuildReviewControls(section, item) {
     b.addEventListener('click', action); panel.appendChild(b); return b;
   };
   button('Approve', () => save(null));
+  button('Previous / undo', () => {
+    if (saving) return;
+    const previous = section.previousElementSibling;
+    if (previous) previous.scrollIntoView({behavior:'smooth',block:'start'});
+  });
   button('Skip', async () => {
     if (saving) return;
-    saving = true;
+    saving = true; stopTimer();
     const session = feed.session;
     await animate('next');
     if (feed.active && session === feed.session && feed.activeSection === section) feedGoNext(section);
     saving = false;
   });
-  const hint = document.createElement('small'); hint.textContent = 'Swipe right: approve / left: choose stars / up: skip';
+  const hint = document.createElement('small'); hint.textContent = 'Swipe right: approve / left: choose stars / up: skip / down: previous & undo';
   panel.appendChild(hint); card.appendChild(panel);
   section.addEventListener('click', e => {
     if (suppressClick) { e.preventDefault(); e.stopPropagation(); suppressClick = false; }

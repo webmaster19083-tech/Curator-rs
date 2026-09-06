@@ -1,4 +1,5 @@
 pub mod ch;
+pub mod clips;
 pub mod downloads;
 pub mod export;
 pub mod groups;
@@ -35,8 +36,12 @@ pub fn build_router(state: Arc<AppState>) -> Router {
         .route("/api/oobe/reset", post(oobe::reset))
         // ── Media ──────────────────────────────────────────────────────────
         .route("/api/media", get(media::list))
+        .route("/api/media/:id/clips", post(clips::create))
+        .route("/api/clip-jobs/:id", get(clips::status))
         .route("/api/media/:id/rating", put(media::set_rating))
         .route("/api/media/:id/rating/approve", post(media::approve_rating))
+        .route("/api/media/:id/rating/undo", post(media::undo_rating))
+        .route("/api/media/:id/duration", put(media::set_duration))
         .route("/api/media/:id/tags", post(media::add_tag))
         .route("/api/media/:id/tags/:tag_id", delete(media::remove_tag))
         // ── Thumbnails ─────────────────────────────────────────────────────

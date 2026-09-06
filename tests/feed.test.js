@@ -5,7 +5,7 @@ const vm = require('node:vm');
 function fixture(wakeLock) {
   const scroll = {children:[],scrollTop:0};
   const nodes = {'#feed-scroll':scroll,'#feed':{hidden:false},'#feed-status':{}};
-  const ctx = vm.createContext({console,Set,Map,Math,Promise,setTimeout,clearTimeout,
+  const ctx = vm.createContext({console,Set,Map,Math,Promise,setTimeout,clearTimeout,setInterval,clearInterval,
     document:{visibilityState:'visible'},navigator:{wakeLock},el:id=>nodes[id]});
   const source = fs.readFileSync('static/app.js','utf8');
   vm.runInContext(source.slice(source.indexOf('const FEED_TARGET_BUFFER'), source.indexOf('// VR ')),ctx);
@@ -118,4 +118,21 @@ test('review uses five stars; left swipe animates without rating, right swipe ap
   assert.match(f.run('calls[0].url'),/rating\/approve$/);
   assert.equal(f.run('advanced'),1);
   assert.equal(f.run('animations.length'),2);
+  f.run(`
+    var pendingTimer, timerDelay, cleared=false;
+    setTimeout=(callback,delay)=>{pendingTimer=callback;timerDelay=delay;return 1;};
+    clearTimeout=()=>{cleared=true;}; setInterval=()=>2; clearInterval=()=>{};
+    section._reviewToken='review-token';
+    api=async(url,body)=>{calls.push({url,body});return {rating:4,auto_rating:4,rating_reviewed:false,rating_reviewed_at:null};};
+  `);
+  await f.run('section._onReviewActivate(true)');
+  assert.match(f.run('calls[1].url'),/rating\/undo$/);
+  assert.equal(f.run('timerDelay'),10000);
+  assert.equal(f.run('section._reviewToken'),null);
+  f.run('pendingTimer()');
+  assert.equal(f.run('advanced'),2);
+  assert.equal(f.run('calls.length'),2, 'timer skips without rating');
+  f.run('feedDeactivate(section)');
+  assert.equal(f.run('cleared'),true);
+
 });

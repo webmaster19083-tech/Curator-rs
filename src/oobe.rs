@@ -89,7 +89,10 @@ pub fn check_writable_dir(path: &Path) -> Result<(), String> {
 /// injection surface here regardless of what `bin` contains.
 pub fn check_executable(bin: &str, version_arg: &str) -> DependencyStatus {
     let checked = bin.to_string();
-    match Command::new(bin).arg(version_arg).output() {
+    match crate::process::output_timeout(
+        Command::new(bin).arg(version_arg),
+        Duration::from_secs(10),
+    ) {
         Ok(out) if out.status.success() => {
             let text = String::from_utf8_lossy(&out.stdout);
             let version = text
@@ -108,11 +111,16 @@ pub fn check_executable(bin: &str, version_arg: &str) -> DependencyStatus {
             found: false,
             version: None,
             detail: Some(format!(
-                "'{bin}' ran but reported an error (exit code {}).",
+                "'{bin}' ran but reported an error (exit code {}). {}",
                 out.status
                     .code()
                     .map(|c| c.to_string())
-                    .unwrap_or_else(|| "unknown".into())
+                    .unwrap_or_else(|| "unknown".into()),
+                String::from_utf8_lossy(&out.stderr)
+                    .trim()
+                    .chars()
+                    .take(2000)
+                    .collect::<String>()
             )),
             checked,
         },

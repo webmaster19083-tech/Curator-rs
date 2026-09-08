@@ -76,7 +76,9 @@ async fn build_status(state: &Arc<AppState>) -> Value {
     let existing_installation = {
         let pool = state.pool.clone();
         tokio::task::spawn_blocking(move || {
-            pool.get().map(|conn| logic::existing_installation_has_data(&conn)).unwrap_or(false)
+            pool.get()
+                .map(|conn| logic::existing_installation_has_data(&conn))
+                .unwrap_or(false)
         })
         .await
         .unwrap_or(false)
@@ -144,7 +146,7 @@ pub async fn status(State(state): State<Arc<AppState>>) -> Json<Value> {
 #[derive(Deserialize)]
 pub struct ValidateBody {
     pub check: String,
-    pub path:  Option<String>,
+    pub path: Option<String>,
 }
 
 pub async fn validate(
@@ -171,21 +173,37 @@ pub async fn validate(
                 _ => logic::detect_nsfw_env_with_timeout(&bin, std::time::Duration::from_secs(10)),
             })
             .await
-            .map_err(|_| err(StatusCode::INTERNAL_SERVER_ERROR, "The check crashed unexpectedly."))?;
+            .map_err(|_| {
+                err(
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    "The check crashed unexpectedly.",
+                )
+            })?;
             Ok(Json(serde_json::to_value(status).unwrap_or_default()))
         }
         "data_dir" => {
-            let raw = body.path.ok_or_else(|| err(StatusCode::BAD_REQUEST, "No directory was given."))?;
-            let path = logic::sanitize_path_input(&raw).map_err(|e| err(StatusCode::BAD_REQUEST, e))?;
+            let raw = body
+                .path
+                .ok_or_else(|| err(StatusCode::BAD_REQUEST, "No directory was given."))?;
+            let path =
+                logic::sanitize_path_input(&raw).map_err(|e| err(StatusCode::BAD_REQUEST, e))?;
             let result = tokio::task::spawn_blocking(move || logic::check_writable_dir(&path))
                 .await
-                .map_err(|_| err(StatusCode::INTERNAL_SERVER_ERROR, "The check crashed unexpectedly."))?;
+                .map_err(|_| {
+                    err(
+                        StatusCode::INTERNAL_SERVER_ERROR,
+                        "The check crashed unexpectedly.",
+                    )
+                })?;
             match result {
                 Ok(()) => Ok(Json(json!({ "writable": true, "path": raw }))),
                 Err(e) => Ok(Json(json!({ "writable": false, "path": raw, "error": e }))),
             }
         }
-        other => Err(err(StatusCode::BAD_REQUEST, format!("Unknown check: {other}"))),
+        other => Err(err(
+            StatusCode::BAD_REQUEST,
+            format!("Unknown check: {other}"),
+        )),
     }
 }
 
@@ -194,17 +212,17 @@ pub async fn validate(
 #[derive(Deserialize)]
 pub struct OobeSettingsBody {
     // config.json-backed — take effect on next restart.
-    pub data_dir:       Option<String>,
+    pub data_dir: Option<String>,
     pub gallery_dl_bin: Option<String>,
-    pub ffprobe_bin:    Option<String>,
+    pub ffprobe_bin: Option<String>,
     // settings.json-backed — take effect immediately, same fields the
     // normal Settings modal exposes (see routes/settings.rs).
-    pub max_concurrent:            Option<u32>,
-    pub theme:                     Option<String>,
-    pub default_slideshow_speed:   Option<f64>,
-    pub default_slideshow_loop:    Option<bool>,
+    pub max_concurrent: Option<u32>,
+    pub theme: Option<String>,
+    pub default_slideshow_speed: Option<f64>,
+    pub default_slideshow_loop: Option<bool>,
     pub default_slideshow_shuffle: Option<bool>,
-    pub nsfw_filter_enabled:       Option<bool>,
+    pub nsfw_filter_enabled: Option<bool>,
 }
 
 /// A configured executable is either a bare command name (resolved via
@@ -232,24 +250,35 @@ pub async fn save_settings(
     if let Some(raw) = &body.data_dir {
         let path = logic::sanitize_path_input(raw).map_err(|e| err(StatusCode::BAD_REQUEST, e))?;
         let path_for_check = path.clone();
-        let result = tokio::task::spawn_blocking(move || logic::check_writable_dir(&path_for_check))
-            .await
-            .map_err(|_| err(StatusCode::INTERNAL_SERVER_ERROR, "The check crashed unexpectedly."))?;
+        let result =
+            tokio::task::spawn_blocking(move || logic::check_writable_dir(&path_for_check))
+                .await
+                .map_err(|_| {
+                    err(
+                        StatusCode::INTERNAL_SERVER_ERROR,
+                        "The check crashed unexpectedly.",
+                    )
+                })?;
         result.map_err(|e| err(StatusCode::BAD_REQUEST, e))?;
         cfg.data_dir = Some(path.to_string_lossy().to_string());
         cfg_dirty = true;
     }
     if let Some(raw) = &body.gallery_dl_bin {
-        cfg.gallery_dl_bin = Some(validate_executable_field(raw).map_err(|e| err(StatusCode::BAD_REQUEST, e))?);
+        cfg.gallery_dl_bin =
+            Some(validate_executable_field(raw).map_err(|e| err(StatusCode::BAD_REQUEST, e))?);
         cfg_dirty = true;
     }
     if let Some(raw) = &body.ffprobe_bin {
-        cfg.ffprobe_bin = Some(validate_executable_field(raw).map_err(|e| err(StatusCode::BAD_REQUEST, e))?);
+        cfg.ffprobe_bin =
+            Some(validate_executable_field(raw).map_err(|e| err(StatusCode::BAD_REQUEST, e))?);
         cfg_dirty = true;
     }
     if cfg_dirty {
         config::save_config(&cfg).map_err(|e| {
-            err(StatusCode::INTERNAL_SERVER_ERROR, format!("Could not save config.json: {e}"))
+            err(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                format!("Could not save config.json: {e}"),
+            )
         })?;
     }
 
@@ -265,16 +294,25 @@ pub async fn save_settings(
         }
         if let Some(ref theme) = body.theme {
             if !crate::routes::settings::VALID_THEMES.contains(&theme.as_str()) {
-                return Err(err(StatusCode::BAD_REQUEST, format!("Unknown theme: {theme}")));
+                return Err(err(
+                    StatusCode::BAD_REQUEST,
+                    format!("Unknown theme: {theme}"),
+                ));
             }
             settings.theme = theme.clone();
         }
         if let Some(v) = body.default_slideshow_speed {
             settings.default_slideshow_speed = v.clamp(500.0, 60000.0);
         }
-        if let Some(v) = body.default_slideshow_loop { settings.default_slideshow_loop = v; }
-        if let Some(v) = body.default_slideshow_shuffle { settings.default_slideshow_shuffle = v; }
-        if let Some(v) = body.nsfw_filter_enabled { settings.nsfw_filter_enabled = v; }
+        if let Some(v) = body.default_slideshow_loop {
+            settings.default_slideshow_loop = v;
+        }
+        if let Some(v) = body.default_slideshow_shuffle {
+            settings.default_slideshow_shuffle = v;
+        }
+        if let Some(v) = body.nsfw_filter_enabled {
+            settings.nsfw_filter_enabled = v;
+        }
         db::save_settings(&state.data_dir, &settings);
     }
 
@@ -289,14 +327,21 @@ pub async fn complete(
     let bin = state.gallery_dl_bin.clone();
     let gallery_dl = tokio::task::spawn_blocking(move || logic::detect_gallery_dl(&bin))
         .await
-        .map_err(|_| err(StatusCode::INTERNAL_SERVER_ERROR, "The check crashed unexpectedly."))?;
+        .map_err(|_| {
+            err(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "The check crashed unexpectedly.",
+            )
+        })?;
 
     if !gallery_dl.found {
         // Never silently mark setup complete without a working gallery-dl —
         // it's the one dependency Curator can't function without.
         return Err(err(
             StatusCode::BAD_REQUEST,
-            gallery_dl.detail.unwrap_or_else(|| "gallery-dl was not found.".to_string()),
+            gallery_dl
+                .detail
+                .unwrap_or_else(|| "gallery-dl was not found.".to_string()),
         ));
     }
 

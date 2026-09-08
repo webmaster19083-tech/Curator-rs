@@ -16,6 +16,8 @@ use crate::AppState;
 
 fn sort_order(sort: &str) -> &'static str {
     match sort {
+        "size_desc" => "COALESCE(m.file_size_bytes,-1) DESC, m.id ASC",
+        "size_asc" => "COALESCE(m.file_size_bytes,9223372036854775807) ASC, m.id ASC",
         "rating_desc" => "m.rating DESC, m.id ASC",
         "rating_asc" => "m.rating ASC, m.id ASC",
         "date_desc" => "m.added_at DESC, m.id DESC",
@@ -30,6 +32,9 @@ fn sort_order(sort: &str) -> &'static str {
 
 #[derive(Deserialize, Default)]
 pub struct MediaQuery {
+    min_size: Option<i64>,
+    max_size: Option<i64>,
+    unknown_size: Option<bool>,
     limit: Option<usize>,
     after_id: Option<i64>,
     cursor: Option<String>,
@@ -58,6 +63,12 @@ pub async fn list(
     let seed = q.shuffle_seed.unwrap_or(1).clamp(1, 2147483646);
     let sort = q.sort.as_deref().unwrap_or("default");
     let (key, descending, id_desc) = match sort {
+        "size_desc" => ("COALESCE(m.file_size_bytes,-1)".to_string(), true, false),
+        "size_asc" => (
+            "COALESCE(m.file_size_bytes,9223372036854775807)".to_string(),
+            false,
+            false,
+        ),
         "rating_desc" => ("m.rating".to_string(), true, false),
         "rating_asc" => ("m.rating".to_string(), false, false),
         "date_desc" => ("m.added_at".to_string(), true, true),
@@ -100,6 +111,21 @@ pub async fn list(
     };
 
     let mut extra = String::from(" AND m.missing=0");
+    for (bound, op) in [(q.min_size, ">="), (q.max_size, "<=")] {
+        if let Some(bytes) = bound {
+            if bytes < 0 {
+                return Err((
+                    StatusCode::BAD_REQUEST,
+                    Json(json!({"error":"Size must be nonnegative"})),
+                ));
+            }
+            params.push(bytes.into());
+            extra.push_str(&format!(" AND m.file_size_bytes {op} ?{}", params.len()));
+        }
+    }
+    if q.unknown_size == Some(true) {
+        extra.push_str(" AND m.file_size_bytes IS NULL");
+    }
     extra.push_str(match q.rating_status.as_deref().unwrap_or("") {
         "" | "all" => "",
         "unrated" => " AND m.rating=0 AND m.auto_rating=0",
@@ -202,7 +228,7 @@ pub async fn list(
     params.push(((limit + 1) as i64).into());
     let limit_param = params.len();
     let query = format!(
-        "SELECT m.id,m.source_id,m.filepath,m.filename,m.type,m.added_at,m.rating,m.auto_rating,m.auto_rating_score,m.rating_source,m.rating_reviewed,m.rating_reviewed_at,m.origin_url,m.downloaded,m.duration_secs,m.clip_parent_id, {key} AS _cursor_key, s.group_id AS _source_group_id, \
+        "SELECT m.id,m.source_id,m.filepath,m.filename,m.type,m.added_at,m.rating,m.auto_rating,m.auto_rating_score,m.rating_source,m.rating_reviewed,m.rating_reviewed_at,m.origin_url,m.downloaded,m.duration_secs,m.clip_parent_id,m.file_size_bytes, {key} AS _cursor_key, s.group_id AS _source_group_id, \
             (SELECT GROUP_CONCAT(t.name, ',') FROM media_tags mt \
              JOIN tags t ON t.id = mt.tag_id WHERE mt.media_id = m.id) AS tags_csv \
          FROM media m \

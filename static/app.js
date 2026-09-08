@@ -432,7 +432,7 @@ function renderSidebar() {
   const list = el('#source-list');
   list.innerHTML = '';
 
-  if (state.sources.length === 0) {
+  if (state.sources.length === 0 && state.groups.length === 0) {
     list.innerHTML = '<li class="source-empty muted small">No sources yet. Add a creator URL to begin.</li>';
     updateStatsLine();
     return;
@@ -1320,6 +1320,9 @@ let gridShuffleSeed = null;
 async function loadView() {
   const requestId = ++viewRequestSeq;
   const params = new URLSearchParams({limit: 150, media_type: state.typeFilter});
+  const sizeFilter = document.querySelector('#size-filter')?.value;
+  if (sizeFilter === 'unknown') params.set('unknown_size','true');
+  else if (sizeFilter) params.set('min_size',sizeFilter);
   if (state.view.type === 'creator') params.set('source_id', state.view.id);
   else if (state.view.type === 'group') params.set('group_id', state.view.id);
   else params.set('only_included', 'true');

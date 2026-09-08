@@ -8,46 +8,64 @@ use axum::{
 };
 use serde_json::{json, Value};
 
-use crate::AppState;
 use crate::routes::media::db_err;
+use crate::AppState;
 
 // ─── GET /api/stats ──────────────────────────────────────────────────────────
 
-pub async fn stats(State(state): State<Arc<AppState>>) -> Result<Json<Value>, (StatusCode, Json<Value>)> {
+pub async fn stats(
+    State(state): State<Arc<AppState>>,
+) -> Result<Json<Value>, (StatusCode, Json<Value>)> {
     let conn = state.pool.get().map_err(db_err)?;
 
-    let total_media: i64 = conn.query_row(
-        "SELECT COUNT(*) FROM media WHERE downloaded=1", [], |r| r.get(0)
-    ).unwrap_or(0);
+    let total_media: i64 = conn
+        .query_row("SELECT COUNT(*) FROM media WHERE downloaded=1", [], |r| {
+            r.get(0)
+        })
+        .unwrap_or(0);
 
-    let total_sources: i64 = conn.query_row(
-        "SELECT COUNT(*) FROM sources", [], |r| r.get(0)
-    ).unwrap_or(0);
+    let total_sources: i64 = conn
+        .query_row("SELECT COUNT(*) FROM sources", [], |r| r.get(0))
+        .unwrap_or(0);
 
-    let sources_done: i64 = conn.query_row(
-        "SELECT COUNT(*) FROM sources WHERE status='done'", [], |r| r.get(0)
-    ).unwrap_or(0);
+    let sources_done: i64 = conn
+        .query_row(
+            "SELECT COUNT(*) FROM sources WHERE status='done'",
+            [],
+            |r| r.get(0),
+        )
+        .unwrap_or(0);
 
-    let sources_error: i64 = conn.query_row(
-        "SELECT COUNT(*) FROM sources WHERE status='error'", [], |r| r.get(0)
-    ).unwrap_or(0);
+    let sources_error: i64 = conn
+        .query_row(
+            "SELECT COUNT(*) FROM sources WHERE status='error'",
+            [],
+            |r| r.get(0),
+        )
+        .unwrap_or(0);
 
-    let sources_downloading: i64 = conn.query_row(
-        "SELECT COUNT(*) FROM sources WHERE status='downloading'", [], |r| r.get(0)
-    ).unwrap_or(0);
+    let sources_downloading: i64 = conn
+        .query_row(
+            "SELECT COUNT(*) FROM sources WHERE status='downloading'",
+            [],
+            |r| r.get(0),
+        )
+        .unwrap_or(0);
 
-    let total_groups: i64 = conn.query_row(
-        "SELECT COUNT(*) FROM groups", [], |r| r.get(0)
-    ).unwrap_or(0);
+    let total_groups: i64 = conn
+        .query_row("SELECT COUNT(*) FROM groups", [], |r| r.get(0))
+        .unwrap_or(0);
 
-    let total_tags: i64 = conn.query_row(
-        "SELECT COUNT(*) FROM tags", [], |r| r.get(0)
-    ).unwrap_or(0);
+    let total_tags: i64 = conn
+        .query_row("SELECT COUNT(*) FROM tags", [], |r| r.get(0))
+        .unwrap_or(0);
 
     // Placeholder count (pre-scanned but not yet on disk)
-    let placeholder_count: i64 = conn.query_row(
-        "SELECT COUNT(*) FROM media WHERE downloaded=0", [], |r| r.get(0)
-    ).unwrap_or(0);
+    let placeholder_count: i64 = conn
+        .query_row("SELECT COUNT(*) FROM media WHERE downloaded=0", [], |r| {
+            r.get(0)
+        })
+        .unwrap_or(0);
 
     let settings = state.settings.read().await;
 
@@ -75,23 +93,33 @@ pub async fn get_log(State(state): State<Arc<AppState>>) -> Response {
         StatusCode::OK,
         [(header::CONTENT_TYPE, "text/plain; charset=utf-8")],
         tail,
-    ).into_response()
+    )
+        .into_response()
 }
 
 // ─── GET /api/sources/:id/log ────────────────────────────────────────────────
 
 pub async fn source_log(
     State(state): State<Arc<AppState>>,
-    Path(id):     Path<i64>,
+    Path(id): Path<i64>,
 ) -> Result<Json<Value>, (StatusCode, Json<Value>)> {
     let conn = state.pool.get().map_err(db_err)?;
     let row = conn.query_row(
-        "SELECT log, error_message FROM sources WHERE id=?1", [id],
-        |r| Ok((r.get::<_, Option<String>>(0)?, r.get::<_, Option<String>>(1)?))
+        "SELECT log, error_message FROM sources WHERE id=?1",
+        [id],
+        |r| {
+            Ok((
+                r.get::<_, Option<String>>(0)?,
+                r.get::<_, Option<String>>(1)?,
+            ))
+        },
     );
     match row {
         Ok((log, err_msg)) => Ok(Json(json!({ "log": log, "error_message": err_msg }))),
-        Err(_) => Err((StatusCode::NOT_FOUND, Json(json!({"error": "Source not found"})))),
+        Err(_) => Err((
+            StatusCode::NOT_FOUND,
+            Json(json!({"error": "Source not found"})),
+        )),
     }
 }
 

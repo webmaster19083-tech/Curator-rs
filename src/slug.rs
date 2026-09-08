@@ -9,13 +9,34 @@ use std::collections::HashSet;
 
 static URL_SKIP_SEGMENTS: Lazy<HashSet<&'static str>> = Lazy::new(|| {
     [
-        "users", "user", "channel", "c", "artist", "profile", "gallery", "art",
-        "en", "en-us", "ja", "de", "fr", "es", "member",
+        "users",
+        "user",
+        "channel",
+        "c",
+        "artist",
+        "profile",
+        "gallery",
+        "art",
+        "en",
+        "en-us",
+        "ja",
+        "de",
+        "fr",
+        "es",
+        "member",
         // bunkr.cr: /a/<code> — "a" is site structure, not a handle
         "a",
         // kemono.su / coomer.su: /<service>/user/<id>
-        "patreon", "fanbox", "fantia", "subscribestar", "gumroad", "boosty",
-        "dlsite", "discord", "onlyfans", "fansly",
+        "patreon",
+        "fanbox",
+        "fantia",
+        "subscribestar",
+        "gumroad",
+        "boosty",
+        "dlsite",
+        "discord",
+        "onlyfans",
+        "fansly",
     ]
     .iter()
     .copied()
@@ -45,9 +66,7 @@ pub fn derive_name_from_url(url: &str) -> String {
     let host = host.trim_start_matches("www.");
     let site = host.split('.').next().unwrap_or("site");
 
-    let segments: Vec<&str> = path_part.split('/')
-        .filter(|s| !s.is_empty())
-        .collect();
+    let segments: Vec<&str> = path_part.split('/').filter(|s| !s.is_empty()).collect();
 
     // Walk segments, skipping known structural path components
     let mut handle: Option<&str> = None;
@@ -60,9 +79,7 @@ pub fn derive_name_from_url(url: &str) -> String {
     }
 
     // Fallback: first segment, or the host itself
-    let handle = handle.unwrap_or_else(|| {
-        segments.first().copied().unwrap_or(host_part)
-    });
+    let handle = handle.unwrap_or_else(|| segments.first().copied().unwrap_or(host_part));
 
     let handle = handle.trim_start_matches('@');
 
@@ -75,7 +92,7 @@ pub fn derive_name_from_url(url: &str) -> String {
 
 // ─── slugify ──────────────────────────────────────────────────────────────────
 
-static NON_SLUG_RE:  Lazy<Regex> = Lazy::new(|| Regex::new(r"[^\w\-]+").unwrap());
+static NON_SLUG_RE: Lazy<Regex> = Lazy::new(|| Regex::new(r"[^\w\-]+").unwrap());
 static MULTI_DASH_RE: Lazy<Regex> = Lazy::new(|| Regex::new(r"-+").unwrap());
 
 pub fn slugify(text: &str) -> String {
@@ -83,14 +100,20 @@ pub fn slugify(text: &str) -> String {
     let s = NON_SLUG_RE.replace_all(&lowered, "-");
     let s = MULTI_DASH_RE.replace_all(&s, "-");
     let s = s.trim_matches('-').to_string();
-    if s.is_empty() { "source".into() } else { s }
+    if s.is_empty() {
+        "source".into()
+    } else {
+        s
+    }
 }
 
 // ─── URL normalization ────────────────────────────────────────────────────────
 
 pub fn normalize_url(raw: &str) -> String {
     let raw = raw.trim();
-    if raw.is_empty() { return String::new(); }
+    if raw.is_empty() {
+        return String::new();
+    }
     let with_scheme = if raw.contains("://") {
         raw.to_string()
     } else {

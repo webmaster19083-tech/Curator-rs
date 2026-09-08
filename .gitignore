@@ -2,3 +2,5 @@ curator.exe
 config.json
 /target/
 /dist/
+/desktop/target/
+/desktop/gen/

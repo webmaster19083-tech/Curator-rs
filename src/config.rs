@@ -21,19 +21,29 @@ use serde::{Deserialize, Serialize};
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct Config {
-    pub data_dir:       Option<String>,
+    pub data_dir: Option<String>,
     pub gallery_dl_bin: Option<String>,
-    pub python_bin:     Option<String>,
-    pub ffprobe_bin:    Option<String>,
+    pub python_bin: Option<String>,
+    pub ffprobe_bin: Option<String>,
 }
 
 /// `config.json` always lives next to the running executable (not in
 /// `data_dir` — it has to be readable before `data_dir` is even resolved).
 pub fn config_path() -> PathBuf {
-    std::env::current_exe()
+    if let Some(path) = std::env::var_os("CURATOR_CONFIG") {
+        return PathBuf::from(path);
+    }
+    let legacy = std::env::current_exe()
         .ok()
         .and_then(|p| p.parent().map(|d| d.join("config.json")))
-        .unwrap_or_else(|| PathBuf::from("config.json"))
+        .unwrap_or_else(|| PathBuf::from("config.json"));
+    if legacy.is_file() {
+        return legacy;
+    }
+    dirs::config_dir()
+        .unwrap_or_else(|| PathBuf::from("."))
+        .join("Curator")
+        .join("config.json")
 }
 
 pub fn load_config() -> Config {
@@ -53,8 +63,10 @@ pub fn load_config() -> Config {
 /// + this).
 pub fn save_config(cfg: &Config) -> std::io::Result<()> {
     let path = config_path();
-    let text = serde_json::to_string_pretty(cfg)
-        .map_err(std::io::Error::other)?;
+    let text = serde_json::to_string_pretty(cfg).map_err(std::io::Error::other)?;
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent)?;
+    }
     std::fs::write(path, text)
 }
 
@@ -86,6 +98,9 @@ pub fn resolve_data_dir(cfg: &Config) -> PathBuf {
 pub fn ensure_config_json(data_dir: &std::path::Path) {
     let path = config_path();
     if !path.exists() {
+        if let Some(parent) = path.parent() {
+            let _ = std::fs::create_dir_all(parent);
+        }
         let content = serde_json::json!({ "data_dir": data_dir.to_string_lossy() });
         let _ = std::fs::write(&path, serde_json::to_string_pretty(&content).unwrap());
     }
@@ -100,7 +115,10 @@ mod tests {
         // Isolate from whatever the real environment/config might have —
         // this only asserts precedence, not the literal default path.
         std::env::set_var("CURATOR_DATA_DIR", "/tmp/curator-env-test-dir");
-        let cfg = Config { data_dir: Some("/tmp/curator-config-test-dir".into()), ..Default::default() };
+        let cfg = Config {
+            data_dir: Some("/tmp/curator-config-test-dir".into()),
+            ..Default::default()
+        };
         let resolved = resolve_data_dir(&cfg);
         std::env::remove_var("CURATOR_DATA_DIR");
         assert_eq!(resolved, PathBuf::from("/tmp/curator-env-test-dir"));

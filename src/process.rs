@@ -5,7 +5,21 @@ use std::{
     time::{Duration, Instant},
 };
 
+pub fn command(program: impl AsRef<std::ffi::OsStr>) -> tokio::process::Command {
+    let mut cmd = tokio::process::Command::new(program);
+    #[cfg(windows)]
+    cmd.creation_flags(0x08000000);
+    #[cfg(unix)]
+    cmd.process_group(0);
+    cmd
+}
+
 pub fn output_timeout(cmd: &mut Command, timeout: Duration) -> io::Result<Output> {
+    #[cfg(windows)]
+    {
+        use std::os::windows::process::CommandExt;
+        cmd.creation_flags(0x08000000);
+    }
     // Files avoid pipe deadlock and unbounded reader threads on broken subprocesses.
     let mut stdout = tempfile::tempfile()?;
     let mut stderr = tempfile::tempfile()?;

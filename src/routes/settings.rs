@@ -1,42 +1,45 @@
 use std::sync::Arc;
 
-use axum::{
-    extract::State,
-    http::StatusCode,
-    Json,
-};
+use axum::{extract::State, http::StatusCode, Json};
 use serde::Deserialize;
 use serde_json::{json, Value};
 use tokio::sync::Semaphore;
 
-use crate::AppState;
 use crate::db::save_settings;
+use crate::AppState;
 
 /// Shared with `routes::oobe` (the Appearance step reuses the exact same
 /// allow-list rather than re-declaring it) — see "Do not introduce
 /// conflicting configuration systems" in the OOBE build notes.
 pub(crate) const VALID_THEMES: &[&str] = &[
-    "system", "yotsuba", "yotsuba-b", "futaba", "burichan",
-    "tomorrow", "photon", "light", "oled-dark",
+    "system",
+    "yotsuba",
+    "yotsuba-b",
+    "futaba",
+    "burichan",
+    "tomorrow",
+    "photon",
+    "light",
+    "oled-dark",
 ];
 
 #[derive(Deserialize)]
 pub struct PatchSettingsBody {
-    pub max_concurrent:               Option<u32>,
-    pub default_slideshow_speed:      Option<f64>,
-    pub default_slideshow_loop:       Option<bool>,
-    pub default_slideshow_shuffle:    Option<bool>,
-    pub theme:                        Option<String>,
-    pub export_reminder_days:         Option<u32>,
+    pub max_concurrent: Option<u32>,
+    pub default_slideshow_speed: Option<f64>,
+    pub default_slideshow_loop: Option<bool>,
+    pub default_slideshow_shuffle: Option<bool>,
+    pub theme: Option<String>,
+    pub export_reminder_days: Option<u32>,
     pub export_reminder_snoozed_until: Option<String>,
     // Cock Hero settings
-    pub ch_log_sessions:              Option<bool>,
-    pub ch_default_interval:          Option<f64>,
-    pub ch_default_limit:             Option<u32>,
-    pub ch_default_shuffle:           Option<bool>,
-    pub ch_default_media_type:        Option<String>,
+    pub ch_log_sessions: Option<bool>,
+    pub ch_default_interval: Option<f64>,
+    pub ch_default_limit: Option<u32>,
+    pub ch_default_shuffle: Option<bool>,
+    pub ch_default_media_type: Option<String>,
     // NSFW auto-rating
-    pub nsfw_filter_enabled:          Option<bool>,
+    pub nsfw_filter_enabled: Option<bool>,
 }
 
 // ─── GET /api/settings ───────────────────────────────────────────────────────
@@ -50,7 +53,7 @@ pub async fn get(State(state): State<Arc<AppState>>) -> Json<Value> {
 
 pub async fn patch(
     State(state): State<Arc<AppState>>,
-    Json(body):   Json<PatchSettingsBody>,
+    Json(body): Json<PatchSettingsBody>,
 ) -> Result<Json<Value>, (StatusCode, Json<Value>)> {
     let mut settings = state.settings.write().await;
 
@@ -72,7 +75,10 @@ pub async fn patch(
     }
     if let Some(ref theme) = body.theme {
         if !VALID_THEMES.contains(&theme.as_str()) {
-            return Err((StatusCode::BAD_REQUEST, Json(json!({"error": format!("Unknown theme: {}", theme)}))));
+            return Err((
+                StatusCode::BAD_REQUEST,
+                Json(json!({"error": format!("Unknown theme: {}", theme)})),
+            ));
         }
         settings.theme = theme.clone();
     }
@@ -82,11 +88,21 @@ pub async fn patch(
     if let Some(v) = body.export_reminder_snoozed_until {
         settings.export_reminder_snoozed_until = if v.is_empty() { None } else { Some(v) };
     }
-    if let Some(v) = body.ch_log_sessions        { settings.ch_log_sessions = v; }
-    if let Some(v) = body.ch_default_interval    { settings.ch_default_interval = v; }
-    if let Some(v) = body.ch_default_limit        { settings.ch_default_limit = v; }
-    if let Some(v) = body.ch_default_shuffle      { settings.ch_default_shuffle = v; }
-    if let Some(v) = body.ch_default_media_type  { settings.ch_default_media_type = v; }
+    if let Some(v) = body.ch_log_sessions {
+        settings.ch_log_sessions = v;
+    }
+    if let Some(v) = body.ch_default_interval {
+        settings.ch_default_interval = v;
+    }
+    if let Some(v) = body.ch_default_limit {
+        settings.ch_default_limit = v;
+    }
+    if let Some(v) = body.ch_default_shuffle {
+        settings.ch_default_shuffle = v;
+    }
+    if let Some(v) = body.ch_default_media_type {
+        settings.ch_default_media_type = v;
+    }
     if let Some(v) = body.nsfw_filter_enabled {
         settings.nsfw_filter_enabled = v;
     }

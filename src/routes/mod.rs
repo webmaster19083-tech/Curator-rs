@@ -21,6 +21,7 @@ use std::sync::Arc;
 
 pub fn build_router(state: Arc<AppState>) -> Router {
     Router::new()
+        .route("/api/library/summary", get(crate::hierarchy::endpoint))
         // ── First-run OOBE ─────────────────────────────────────────────────
         // Explicit routes on "/" and "/index.html" take priority over the
         // static-file fallback_service registered in main.rs, so a

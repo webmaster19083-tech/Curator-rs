@@ -263,6 +263,7 @@ pub fn run_migrations(conn: &Connection) -> Result<()> {
     }
 
     for (name, definition) in [
+        ("file_size_bytes", "INTEGER CHECK(file_size_bytes >= 0)"),
         ("missing", "INTEGER NOT NULL DEFAULT 0"),
         ("file_stamp", "TEXT"),
         ("nsfw_state", "TEXT NOT NULL DEFAULT 'pending'"),
@@ -285,6 +286,11 @@ pub fn run_migrations(conn: &Connection) -> Result<()> {
             ))?;
         }
     }
+    conn.execute_batch(
+        "CREATE INDEX IF NOT EXISTS idx_groups_parent ON groups(parent_id);
+        CREATE INDEX IF NOT EXISTS idx_sources_group ON sources(group_id);
+        CREATE INDEX IF NOT EXISTS idx_media_size ON media(file_size_bytes);",
+    )?;
     conn.execute_batch("CREATE TABLE IF NOT EXISTS clip_jobs (
         id INTEGER PRIMARY KEY AUTOINCREMENT, media_id INTEGER NOT NULL REFERENCES media(id) ON DELETE CASCADE,
         seconds INTEGER NOT NULL, status TEXT NOT NULL, clip_count INTEGER NOT NULL DEFAULT 0,

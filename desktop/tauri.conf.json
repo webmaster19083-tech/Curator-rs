@@ -1,0 +1,13 @@
+{
+  "$schema": "https://schema.tauri.app/config/2",
+  "productName": "Curator",
+  "version": "0.1.0",
+  "identifier": "tech.webmaster19083.curator",
+  "build": { "frontendDist": "../static" },
+  "app": {
+    "withGlobalTauri": true,
+    "windows": [],
+    "security": { "csp": null }
+  },
+  "bundle": { "active": true, "targets": "all", "icon": ["icons/icon.png", "icons/icon.ico", "icons/icon.icns"], "shortDescription": "Organize your media library", "category": "Photography", "resources": { "../static/": "static/" } }
+}

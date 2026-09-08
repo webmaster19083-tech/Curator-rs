@@ -5,7 +5,7 @@ use anyhow::Result;
 use futures::{Stream, StreamExt};
 use serde_json::Value;
 use tokio::io::{AsyncBufReadExt, AsyncReadExt, BufReader};
-use tokio::process::Command;
+
 use tracing::{info, warn};
 
 use crate::db::now_iso;
@@ -60,7 +60,7 @@ pub async fn kill_pid(pid: u32) {
     }
     #[cfg(target_os = "windows")]
     {
-        match Command::new("taskkill")
+        match crate::process::command("taskkill")
             .args(["/F", "/T", "/PID", &pid.to_string()])
             .output()
             .await
@@ -77,7 +77,7 @@ pub async fn kill_pid(pid: u32) {
     #[cfg(not(target_os = "windows"))]
     {
         unsafe {
-            libc::kill(pid as i32, libc::SIGTERM);
+            libc::kill(-(pid as i32), libc::SIGTERM);
         }
     }
 }
@@ -111,7 +111,7 @@ pub fn spawn_gallery_dl(
     state: Arc<AppState>,
 ) -> impl Stream<Item = Result<Value>> {
     async_stream::stream! {
-        let mut cmd = Command::new(&state.gallery_dl_bin);
+        let mut cmd = crate::process::command(&state.gallery_dl_bin);
         cmd.args(&args)
             .stdout(std::process::Stdio::piped())
             .stderr(std::process::Stdio::piped()).kill_on_drop(true);
@@ -460,6 +460,10 @@ pub fn index_file(state: &AppState, source_id: i64, path: &Path) -> Result<bool>
           origin_url=COALESCE(excluded.origin_url,media.origin_url), nsfw_state='pending', nsfw_attempts=0,
           nsfw_retry_at=0, duration_attempted=0, duration_secs=CASE WHEN media.file_stamp=excluded.file_stamp THEN media.duration_secs ELSE NULL END",
         rusqlite::params![source_id,rel,path.file_name().unwrap_or_default().to_string_lossy(),kind,now_iso(),origin,stamp])?;
+    tx.execute(
+        "UPDATE media SET file_size_bytes=?1 WHERE filepath=?2",
+        rusqlite::params![crate::media_files::file_size(path), rel],
+    )?;
     tx.commit()?;
     // Keep sidecars: restart recovery and late metadata events need their URL.
     Ok(true)
@@ -468,6 +472,9 @@ pub fn index_file(state: &AppState, source_id: i64, path: &Path) -> Result<bool>
 pub fn scan_and_index(state: &AppState, source_id: i64, dest: &Path) -> Result<(i64, i64)> {
     let mut added = 0;
     for entry in walkdir::WalkDir::new(dest).into_iter() {
+        if state.shutdown.is_cancelled() {
+            break;
+        }
         let entry = entry?;
         if entry.file_type().is_file() && index_file(state, source_id, entry.path())? {
             added += 1;
@@ -816,6 +823,12 @@ async fn run_download_inner(
         }
     };
 
+    if let Some(folder) = url.strip_prefix("local:") {
+        let folder = PathBuf::from(folder);
+        let local_state = state.clone();
+        let _ = tokio::task::spawn_blocking(move || crate::local_import::sync_folder(&local_state,source_id,&folder)).await;
+        return;
+    }
     let dest = dunce::simplified(&state.library_dir.join(&slug)).to_path_buf();
     let archive_path =
         dunce::simplified(&state.archives_dir.join(format!("{}.sqlite3", slug))).to_path_buf();
@@ -845,7 +858,7 @@ async fn run_download_inner(
         "--write-metadata".into(),
     ];
 
-    let mut child = match Command::new(&state.gallery_dl_bin)
+    let mut child = match crate::process::command(&state.gallery_dl_bin)
         .args(&args)
         .stdout(std::process::Stdio::piped())
         .stderr(std::process::Stdio::piped())
@@ -1207,7 +1220,7 @@ mod tests {
             .await
             .unwrap()
             .unwrap();
-        let output = Command::new("powershell.exe")
+        let output = crate::process::command("powershell.exe")
             .args([
                 "-NoProfile",
                 "-NonInteractive",

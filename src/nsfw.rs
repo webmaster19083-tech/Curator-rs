@@ -16,7 +16,7 @@ use std::sync::atomic::{AtomicI64, Ordering};
 
 use serde::{Deserialize, Serialize};
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader, Lines};
-use tokio::process::{ChildStdin, ChildStdout, Command};
+use tokio::process::{ChildStdin, ChildStdout};
 use tokio::sync::{mpsc, oneshot};
 use tracing::{info, warn};
 
@@ -45,6 +45,7 @@ struct Job {
 pub struct NsfwClassifier {
     tx: mpsc::Sender<Job>,
     ready: std::sync::Arc<std::sync::atomic::AtomicBool>,
+    task: std::sync::Arc<tokio::sync::Mutex<Option<tokio::task::JoinHandle<()>>>>,
 }
 
 impl NsfwClassifier {
@@ -55,13 +56,21 @@ impl NsfwClassifier {
     pub fn spawn(python_bin: String, worker_script: PathBuf) -> Self {
         let (tx, rx) = mpsc::channel::<Job>(32);
         let ready = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
-        tokio::spawn(supervisor_loop(
+        let task = tokio::spawn(supervisor_loop(
             python_bin,
             worker_script,
             rx,
             ready.clone(),
         ));
-        Self { tx, ready }
+        Self { tx, ready, task: std::sync::Arc::new(tokio::sync::Mutex::new(Some(task))) }
+    }
+
+    pub async fn shutdown(&self) {
+        if let Some(task) = self.task.lock().await.take() {
+            task.abort();
+            let _ = task.await;
+        }
+        self.ready.store(false, Ordering::Release);
     }
 
     pub async fn classify(&self, path: PathBuf) -> anyhow::Result<f32> {
@@ -98,7 +107,7 @@ async fn supervisor_loop(
         if rx.is_closed() {
             return;
         }
-        let mut child = match Command::new(&python_bin)
+        let mut child = match crate::process::command(&python_bin)
             .arg(&worker_script)
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
@@ -391,6 +400,7 @@ mod tests {
         let (tx, mut rx) = mpsc::channel(1);
         let classifier = NsfwClassifier {
             tx,
+            task: std::sync::Arc::new(tokio::sync::Mutex::new(None)),
             ready: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(true)),
         };
         assert!(classifier

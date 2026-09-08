@@ -3,6 +3,13 @@ use anyhow::Result;
 use rusqlite::{params, Connection};
 use std::path::Path;
 
+pub fn file_size(path: &Path) -> Option<i64> {
+    path.metadata()
+        .ok()
+        .filter(|m| m.is_file())
+        .and_then(|m| i64::try_from(m.len()).ok())
+}
+
 pub fn stamp(path: &Path) -> Option<String> {
     let m = path.metadata().ok()?;
     if !m.is_file() {
@@ -12,14 +19,26 @@ pub fn stamp(path: &Path) -> Option<String> {
 }
 
 pub fn mark_missing(conn: &Connection, id: i64) -> Result<()> {
-    conn.execute("UPDATE media SET missing=1, downloaded=0, nsfw_state='missing' WHERE id=?1 AND downloaded=1", [id])?;
+    conn.execute("UPDATE media SET missing=1, downloaded=0, file_size_bytes=NULL, nsfw_state='missing' WHERE id=?1 AND downloaded=1", [id])?;
     Ok(())
 }
 
+#[cfg(test)]
 pub fn reconcile(pool: &crate::db::DbPool, library: &Path) -> Result<usize> {
+    reconcile_cancellable(pool, library, None)
+}
+
+pub fn reconcile_cancellable(
+    pool: &crate::db::DbPool,
+    library: &Path,
+    cancel: Option<&tokio_util::sync::CancellationToken>,
+) -> Result<usize> {
     let mut after = 0;
     let mut missing = 0;
     loop {
+        if cancel.is_some_and(|token| token.is_cancelled()) {
+            break;
+        }
         let rows = {
             let conn = pool.get()?;
             let mut stmt = conn.prepare(
@@ -47,6 +66,10 @@ pub fn reconcile(pool: &crate::db::DbPool, library: &Path) -> Result<usize> {
             after = id;
             let path = library.join(filepath);
             if let Some(current) = stamp(&path) {
+                tx.execute(
+                    "UPDATE media SET file_size_bytes=?1 WHERE id=?2 AND file_size_bytes IS NOT ?1",
+                    params![file_size(&path), id],
+                )?;
                 if old_stamp.as_ref() != Some(&current) || was_missing {
                     tx.execute("UPDATE media SET downloaded=1, missing=0, file_stamp=?1,
                         nsfw_state='pending', nsfw_attempts=0, nsfw_retry_at=0, duration_attempted=0,

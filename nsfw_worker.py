@@ -39,6 +39,9 @@ import sys
 
 
 def main() -> int:
+    # The parent sends UTF-8 JSON regardless of the Windows locale.
+    sys.stdin.reconfigure(encoding="utf-8", errors="strict")
+    sys.stdout.reconfigure(encoding="utf-8", errors="strict")
     try:
         from opennsfw_onnx import NSFWClassifier
     except Exception as e:  # noqa: BLE001 - report anything, don't just crash silently

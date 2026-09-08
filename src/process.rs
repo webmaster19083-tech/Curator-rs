@@ -7,6 +7,7 @@ use std::{
 
 pub fn command(program: impl AsRef<std::ffi::OsStr>) -> tokio::process::Command {
     let mut cmd = tokio::process::Command::new(program);
+    cmd.env("PYTHONUTF8", "1").env("PYTHONIOENCODING", "utf-8");
     #[cfg(windows)]
     cmd.creation_flags(0x08000000);
     #[cfg(unix)]

@@ -1,4 +1,4 @@
-name: Windows Release Build
+name: Windows Headless Release Build
 
 on:
   push:
@@ -44,20 +44,20 @@ jobs:
       - name: Package release
         shell: pwsh
         run: |
-          $dest = "dist/curator-windows-x86_64"
+          $dest = "dist/curator-headless-windows-x86_64"
           New-Item -ItemType Directory -Force -Path $dest | Out-Null
           Copy-Item "target/x86_64-pc-windows-msvc/release/curator.exe" -Destination $dest
           Copy-Item -Recurse "static" -Destination "$dest/static"
-          Compress-Archive -Path "$dest/*" -DestinationPath "curator-windows-x86_64.zip" -Force
+          Compress-Archive -Path "$dest/*" -DestinationPath "curator-headless-windows-x86_64.zip" -Force
 
       - name: Upload artifact
         uses: actions/upload-artifact@v4
         with:
-          name: curator-windows-x86_64
-          path: curator-windows-x86_64.zip
+          name: curator-headless-windows-x86_64
+          path: curator-headless-windows-x86_64.zip
 
       - name: Attach to GitHub Release
         if: startsWith(github.ref, 'refs/tags/v')
         uses: softprops/action-gh-release@v2
         with:
-          files: curator-windows-x86_64.zip
+          files: curator-headless-windows-x86_64.zip

@@ -4,7 +4,7 @@ use std::sync::Arc;
 use anyhow::Result;
 use futures::{Stream, StreamExt};
 use serde_json::Value;
-use tokio::io::{AsyncBufReadExt, AsyncReadExt, BufReader};
+use tokio::io::{AsyncReadExt, BufReader};
 
 use tracing::{info, warn};
 
@@ -920,24 +920,12 @@ async fn run_download_inner(
         index_done.clone(),
     ));
 
-    // Drain stdout (keep last 500 lines)
+    // Drain raw bytes even if an external tool emits invalid UTF-8. A decoding
+    // error must never close the pipe while the child is still writing.
     let stdout = child.stdout.take().unwrap();
     let stderr = child.stderr.take().unwrap();
-
-    let mut lines_buf: std::collections::VecDeque<String> = std::collections::VecDeque::new();
-    let mut stdout_reader = BufReader::new(stdout).lines();
-
     let stderr_task = tokio::spawn(async move { drain_tail(stderr).await });
-
-    let stdout_task = tokio::spawn(async move {
-        while let Ok(Some(line)) = stdout_reader.next_line().await {
-            lines_buf.push_back(line);
-            if lines_buf.len() > 500 {
-                lines_buf.pop_front();
-            }
-        }
-        lines_buf
-    });
+    let stdout_task = tokio::spawn(async move { drain_tail(stdout).await });
     let interrupted;
     let returncode;
     tokio::select! {
@@ -951,9 +939,7 @@ async fn run_download_inner(
     }
     index_done.cancel();
     let _ = idx_task.await; // never abort a running blocking scan
-    let lines_buf = stdout_task.await.unwrap_or_default();
-
-    let log_text = lines_buf.into_iter().collect::<Vec<_>>().join("\n");
+    let log_text = stdout_task.await.unwrap_or_default();
     let stderr_text = stderr_task.await.unwrap_or_default();
 
     // Keep both diagnostic streams; cancellation comes from application state.
@@ -1102,6 +1088,17 @@ async fn drain_tail(mut reader: impl tokio::io::AsyncRead + Unpin) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn output_drain_survives_invalid_utf8_and_bounds_long_lines() {
+        let mut bytes = vec![b'x'; 100_000];
+        bytes.push(0xff);
+        bytes.extend_from_slice(b"still draining");
+        let tail = drain_tail(bytes.as_slice()).await;
+        assert!(tail.ends_with("still draining"));
+        assert!(tail.contains('\u{fffd}'));
+        assert!(tail.len() <= 65_538);
+    }
 
     #[cfg(unix)]
     #[tokio::test]

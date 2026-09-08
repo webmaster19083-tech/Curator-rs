@@ -12,6 +12,7 @@ pub fn state(root: &std::path::Path) -> Arc<AppState> {
         source_cancellations: Arc::new(Mutex::new(HashMap::new())),
         running_sources: Arc::new(Mutex::new(HashSet::new())),
         downloads_paused: Arc::new(AtomicBool::new(false)),
+        download_control: Arc::new(Mutex::new(())),
         active_processes: Arc::new(Mutex::new(HashMap::new())),
         paused_source_ids: Arc::new(Mutex::new(HashSet::new())),
         download_semaphore: Arc::new(Mutex::new(Arc::new(Semaphore::new(2)))),

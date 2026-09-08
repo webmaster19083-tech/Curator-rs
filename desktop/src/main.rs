@@ -29,6 +29,9 @@ async fn api_request(
     if !path.starts_with("/api/") {
         return Err("Only library API requests are accepted".into());
     }
+    if body.as_ref().map_or(0, String::len) > 32 * 1024 * 1024 {
+        return Err("API request body exceeds 32 MiB limit".into());
+    }
     let request = axum::http::Request::builder()
         .uri(path)
         .method(method.as_str())
@@ -105,10 +108,20 @@ async fn import_local_folder(app: tauri::AppHandle, backend: tauri::State<'_,Bac
 }
 
 fn main() {
-    let runtime = tokio::runtime::Runtime::new().expect("Runtime initialization failed");
-    let mut state = runtime
-        .block_on(curator::initialize())
-        .expect("Library initialization failed");
+    let runtime = match tokio::runtime::Runtime::new() {
+        Ok(runtime) => runtime,
+        Err(error) => {
+            eprintln!("Runtime initialization failed: {error}");
+            return;
+        }
+    };
+    let mut state = match runtime.block_on(curator::initialize()) {
+        Ok(state) => state,
+        Err(error) => {
+            eprintln!("Library initialization failed: {error:#}");
+            return;
+        }
+    };
     // Tauri resolves packaged resources independently of the process working directory.
     let shutdown_state = state.clone();
     let handle = runtime.handle().clone();
@@ -193,16 +206,28 @@ fn main() {
                         tauri::http::Response::builder()
                             .status(403)
                             .body(Vec::new())
-                            .unwrap(),
+                            .unwrap_or_else(|_| tauri::http::Response::new(Vec::new())),
                     );
                     return;
                 }
-                parts.uri = path.parse().unwrap();
-                let response = backend
+                parts.uri = match path.parse() {
+                    Ok(uri) => uri,
+                    Err(_) => {
+                        responder.respond(tauri::http::Response::builder().status(400).body(Vec::new()).unwrap_or_else(|_| tauri::http::Response::new(Vec::new())));
+                        return;
+                    }
+                };
+                let response = match backend
                     .app
                     .oneshot(axum::http::Request::from_parts(parts, Body::from(body)))
                     .await
-                    .unwrap();
+                {
+                    Ok(response) => response,
+                    Err(_) => {
+                        responder.respond(tauri::http::Response::builder().status(500).body(Vec::new()).unwrap_or_else(|_| tauri::http::Response::new(Vec::new())));
+                        return;
+                    }
+                };
                 let (parts, body) = response.into_parts();
                 match to_bytes(body, 256 * 1024 * 1024).await {
                     Ok(bytes) => {
@@ -212,13 +237,20 @@ fn main() {
                         tauri::http::Response::builder()
                             .status(413)
                             .body(Vec::new())
-                            .unwrap(),
+                            .unwrap_or_else(|_| tauri::http::Response::new(Vec::new())),
                     ),
                 }
             });
         })
-        .build(tauri::generate_context!())
-        .expect("Desktop initialization failed");
+        .build(tauri::generate_context!());
+    let app = match app {
+        Ok(app) => app,
+        Err(error) => {
+            eprintln!("Desktop initialization failed: {error}");
+            runtime.block_on(curator::shutdown(&shutdown_state));
+            return;
+        }
+    };
     app.run(move |_, event| {
         if let tauri::RunEvent::Exit = event {
             runtime.block_on(curator::shutdown(&shutdown_state));

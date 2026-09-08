@@ -29,6 +29,7 @@ pub async fn status(State(state): State<Arc<AppState>>) -> Json<Value> {
 // ─── POST /api/downloads/pause ───────────────────────────────────────────────
 
 pub async fn pause(State(state): State<Arc<AppState>>) -> Json<Value> {
+    let _control = state.download_control.lock().await;
     state.downloads_paused.store(true, Ordering::SeqCst);
 
     // Kill all running gallery-dl processes and mark their sources as paused
@@ -48,6 +49,7 @@ pub async fn pause(State(state): State<Arc<AppState>>) -> Json<Value> {
 // ─── POST /api/downloads/resume ──────────────────────────────────────────────
 
 pub async fn resume(State(state): State<Arc<AppState>>) -> Json<Value> {
+    let _control = state.download_control.lock().await;
     // Wait for killed children and their final index pass before requeueing.
     while state.downloads_paused.load(Ordering::SeqCst) {
         if state.running_sources.lock().await.is_empty() {
@@ -70,6 +72,19 @@ pub async fn resume(State(state): State<Arc<AppState>>) -> Json<Value> {
             .unwrap_or_default();
         ids
     };
+    // Claim paused rows before spawning. A second Resume call then sees zero
+    // paused rows instead of reporting/requeueing the same work again.
+    if !paused_ids.is_empty() {
+        let conn = match state.pool.get() {
+            Ok(c) => c,
+            Err(_) => return Json(json!({"error":"Database unavailable"})),
+        };
+        for id in &paused_ids {
+            if conn.execute("UPDATE sources SET status='pending' WHERE id=?1 AND status='paused'", [id]).is_err() {
+                return Json(json!({"error":"Database unavailable"}));
+            }
+        }
+    }
     state.paused_source_ids.lock().await.clear();
     state.downloads_paused.store(false, Ordering::SeqCst);
 
@@ -78,4 +93,30 @@ pub async fn resume(State(state): State<Arc<AppState>>) -> Json<Value> {
     }
 
     Json(json!({ "paused": false, "requeued": paused_ids.len() }))
+}
+
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn repeated_resume_claims_paused_source_once() {
+        let dir = tempfile::tempdir().unwrap();
+        let state = crate::test_support::state(dir.path());
+        crate::test_support::source(&state);
+        state
+            .pool
+            .get()
+            .unwrap()
+            .execute("UPDATE sources SET status='paused' WHERE id=1", [])
+            .unwrap();
+
+        let (a, b) = tokio::join!(
+            resume(State(state.clone())),
+            resume(State(state.clone()))
+        );
+        let total = a.0["requeued"].as_u64().unwrap_or(0) + b.0["requeued"].as_u64().unwrap_or(0);
+        assert_eq!(total, 1);
+    }
 }

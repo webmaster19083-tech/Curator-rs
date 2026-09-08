@@ -205,23 +205,29 @@ async fn split_video(
         let destination = original.parent().unwrap().join(format!("curator-clips-{id}-{job}"));
         anyhow::ensure!(!destination.exists(), "Clip output directory already exists; nothing overwritten");
         std::fs::rename(staging.path(), &destination)?;
-        let conn = state.pool.get()?;
-        let tx = conn.unchecked_transaction()?;
-        for (clip,duration) in clips.iter().zip(durations) {
-            let path = destination.join(clip.file_name());
-            let relative = path.strip_prefix(&library)?.to_string_lossy().replace('\\',"/");
-            tx.execute("INSERT INTO media(source_id,filepath,filename,type,added_at,downloaded,duration_secs,duration_attempted,file_stamp,clip_parent_id,auto_rating,auto_rating_score,rating,rating_source)
-                SELECT source_id,?1,?2,'video',?3,1,?4,1,?5,id,auto_rating,auto_rating_score,auto_rating,
-                CASE WHEN auto_rating>0 THEN 'auto' ELSE 'none' END FROM media WHERE id=?6
-                ON CONFLICT(filepath) DO UPDATE SET clip_parent_id=excluded.clip_parent_id,
-                duration_secs=excluded.duration_secs,duration_attempted=1,
-                auto_rating=excluded.auto_rating,auto_rating_score=excluded.auto_rating_score,
-                rating=CASE WHEN media.rating_reviewed=0 THEN excluded.rating ELSE media.rating END,
-                rating_source=CASE WHEN media.rating_reviewed=0 THEN excluded.rating_source ELSE media.rating_source END", rusqlite::params![relative,clip.file_name().to_string_lossy(),now_iso(),duration,crate::media_files::stamp(&path),id])?;
-            tx.execute("INSERT OR IGNORE INTO media_tags(media_id,tag_id) SELECT m.id,mt.tag_id FROM media m JOIN media_tags mt ON mt.media_id=?1 WHERE m.filepath=?2", rusqlite::params![id,relative])?;
+        let db_result = (|| -> anyhow::Result<i64> {
+            let conn = state.pool.get()?;
+            let tx = conn.unchecked_transaction()?;
+            for (clip,duration) in clips.iter().zip(durations) {
+                let path = destination.join(clip.file_name());
+                let relative = path.strip_prefix(&library)?.to_string_lossy().replace('\\',"/");
+                tx.execute("INSERT INTO media(source_id,filepath,filename,type,added_at,downloaded,duration_secs,duration_attempted,file_stamp,clip_parent_id,auto_rating,auto_rating_score,rating,rating_source)
+                    SELECT source_id,?1,?2,'video',?3,1,?4,1,?5,id,auto_rating,auto_rating_score,auto_rating,
+                    CASE WHEN auto_rating>0 THEN 'auto' ELSE 'none' END FROM media WHERE id=?6
+                    ON CONFLICT(filepath) DO UPDATE SET clip_parent_id=excluded.clip_parent_id,
+                    duration_secs=excluded.duration_secs,duration_attempted=1,
+                    auto_rating=excluded.auto_rating,auto_rating_score=excluded.auto_rating_score,
+                    rating=CASE WHEN media.rating_reviewed=0 THEN excluded.rating ELSE media.rating END,
+                    rating_source=CASE WHEN media.rating_reviewed=0 THEN excluded.rating_source ELSE media.rating_source END", rusqlite::params![relative,clip.file_name().to_string_lossy(),now_iso(),duration,crate::media_files::stamp(&path),id])?;
+                tx.execute("INSERT OR IGNORE INTO media_tags(media_id,tag_id) SELECT m.id,mt.tag_id FROM media m JOIN media_tags mt ON mt.media_id=?1 WHERE m.filepath=?2", rusqlite::params![id,relative])?;
+            }
+            tx.commit()?;
+            Ok(clips.len() as i64)
+        })();
+        if db_result.is_err() {
+            let _ = std::fs::remove_dir_all(&destination);
         }
-        tx.commit()?;
-        Ok(clips.len() as i64)
+        db_result
     }).await?
 }
 

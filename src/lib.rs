@@ -45,6 +45,8 @@ pub struct AppState {
     pub source_cancellations: Arc<Mutex<HashMap<i64, tokio_util::sync::CancellationToken>>>,
     pub running_sources: Arc<Mutex<HashSet<i64>>>,
     pub downloads_paused: Arc<AtomicBool>,
+    /// Serializes pause/resume transitions so repeated controls are idempotent.
+    pub download_control: Arc<Mutex<()>>,
     /// source_id → PID of the running gallery-dl process.
     pub active_processes: Arc<Mutex<HashMap<i64, u32>>>,
     pub paused_source_ids: Arc<Mutex<HashSet<i64>>>,
@@ -225,6 +227,7 @@ pub async fn initialize() -> Result<AppState> {
         source_cancellations: Arc::new(Mutex::new(HashMap::new())),
         running_sources: Arc::new(Mutex::new(HashSet::new())),
         downloads_paused: Arc::new(AtomicBool::new(false)),
+        download_control: Arc::new(Mutex::new(())),
         active_processes: Arc::new(Mutex::new(HashMap::new())),
         paused_source_ids: Arc::new(Mutex::new(HashSet::new())),
         download_semaphore: Arc::new(Mutex::new(Arc::new(Semaphore::new(max_concurrent)))),

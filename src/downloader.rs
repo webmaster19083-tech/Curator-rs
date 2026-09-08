@@ -155,14 +155,22 @@ pub fn spawn_gallery_dl(
             let _=child.kill().await;
             let _=child.wait().await;
         }
-        let (raw,_) = output_task.await.unwrap_or_else(|_| (String::new(), Ok(0)));
+        let (raw,read_result) = output_task.await.unwrap_or_else(|_| (String::new(), Ok(0)));
+        // Deregister immediately after the child has stopped, before any error return.
+        // Timeout/cancellation used to return above the old cleanup path and leave a
+        // stale source -> PID entry forever.
+        if let Some(id) = source_id {
+            state.active_processes.lock().await.remove(&id);
+        }
         if stopped || raw.len()>16*1024*1024 {
             let _=stderr_handle.await;
             yield Err(anyhow::anyhow!("Listing stopped (30s deadline, cancellation, or 16 MiB output limit)"));
             return;
         }
-        if let (Some(id), Some(_)) = (source_id, pid) {
-            state.active_processes.lock().await.remove(&id);
+        if let Err(e) = read_result {
+            let _=stderr_handle.await;
+            yield Err(anyhow::anyhow!("Could not read gallery-dl output: {e}"));
+            return;
         }
 
         let stderr_text = stderr_handle.await.unwrap_or_default();
@@ -752,21 +760,26 @@ async fn run_download_impl(
         .downloads_paused
         .load(std::sync::atomic::Ordering::SeqCst)
     {
-        let conn = state.pool.get().unwrap();
-        let _ = conn.execute(
-            "UPDATE sources SET status='paused' WHERE id=?1",
-            [source_id],
-        );
+        if let Ok(conn) = state.pool.get() {
+            let _ = conn.execute(
+                "UPDATE sources SET status='paused' WHERE id=?1",
+                [source_id],
+            );
+        }
         return;
     }
 
     // Claim status NOW (before the semaphore wait) to avoid concurrent duplicate downloads
     {
-        let conn = state.pool.get().unwrap();
-        let _ = conn.execute(
-            "UPDATE sources SET status='downloading', error_message=NULL WHERE id=?1",
-            [source_id],
-        );
+        if let Ok(conn) = state.pool.get() {
+            let _ = conn.execute(
+                "UPDATE sources SET status='downloading', error_message=NULL WHERE id=?1",
+                [source_id],
+            );
+        } else {
+            warn!("Source {source_id} could not claim downloading status: database unavailable");
+            return;
+        }
     }
 
     let sem = {
@@ -786,11 +799,12 @@ async fn run_download_impl(
         .downloads_paused
         .load(std::sync::atomic::Ordering::SeqCst)
     {
-        let conn = state.pool.get().unwrap();
-        let _ = conn.execute(
-            "UPDATE sources SET status='paused' WHERE id=?1",
-            [source_id],
-        );
+        if let Ok(conn) = state.pool.get() {
+            let _ = conn.execute(
+                "UPDATE sources SET status='paused' WHERE id=?1",
+                [source_id],
+            );
+        }
         return;
     }
 
@@ -871,11 +885,14 @@ async fn run_download_inner(
                 "gallery-dl could not be launched: {}. Is it on your PATH?",
                 e
             );
-            let conn = state.pool.get().unwrap();
-            let _ = conn.execute(
-                "UPDATE sources SET status='error', error_message=?1, synced_at=?2 WHERE id=?3",
-                rusqlite::params![msg, now_iso(), source_id],
-            );
+            if let Ok(conn) = state.pool.get() {
+                let _ = conn.execute(
+                    "UPDATE sources SET status='error', error_message=?1, synced_at=?2 WHERE id=?3",
+                    rusqlite::params![msg, now_iso(), source_id],
+                );
+            } else {
+                warn!("Source {source_id} failed to launch gallery-dl and database was unavailable: {msg}");
+            }
             return;
         }
     };
@@ -1035,11 +1052,14 @@ async fn run_download_inner(
             .collect()
     };
 
-    let conn = state.pool.get().unwrap();
-    let _ = conn.execute(
-        "UPDATE sources SET status=?1, item_count=?2, error_message=?3, log=?4, synced_at=?5 WHERE id=?6",
-        rusqlite::params![status, total, error_msg, log_tail, now_iso(), source_id],
-    );
+    if let Ok(conn) = state.pool.get() {
+        let _ = conn.execute(
+            "UPDATE sources SET status=?1, item_count=?2, error_message=?3, log=?4, synced_at=?5 WHERE id=?6",
+            rusqlite::params![status, total, error_msg, log_tail, now_iso(), source_id],
+        );
+    } else {
+        warn!("Source {source_id} finished but final status could not be persisted: database unavailable");
+    }
 }
 
 fn short_error_summary(log_text: &str) -> String {
@@ -1079,6 +1099,36 @@ async fn drain_tail(mut reader: impl tokio::io::AsyncRead + Unpin) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn listing_shutdown_removes_registered_process() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut state = crate::test_support::state(dir.path());
+        Arc::get_mut(&mut state).unwrap().gallery_dl_bin = "sh".into();
+        let stream = spawn_gallery_dl(
+            vec!["-c".into(), "sleep 30".into()],
+            Some(77),
+            state.clone(),
+        );
+        futures::pin_mut!(stream);
+        let cancel = async {
+            tokio::time::timeout(std::time::Duration::from_secs(2), async {
+                loop {
+                    if state.active_processes.lock().await.contains_key(&77) {
+                        break;
+                    }
+                    tokio::task::yield_now().await;
+                }
+            })
+            .await
+            .unwrap();
+            state.shutdown.cancel();
+        };
+        let consume = async { while stream.next().await.is_some() {} };
+        tokio::join!(consume, cancel);
+        assert!(state.active_processes.lock().await.is_empty());
+    }
 
     #[cfg(windows)]
     #[tokio::test]

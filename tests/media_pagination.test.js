@@ -11,7 +11,7 @@ function browser(api) {
   const nodes = new Map();
   const state = {view:{type:'all'},typeFilter:'all',sortOrder:'default',maxRatingFilter:'',PAGE_SIZE:150,currentItems:[],page:0};
   const context = vm.createContext({state,api,URLSearchParams,Set,ss:{active:false},toast:()=>{},buildTile:item=>item,
-    document:{createDocumentFragment:()=>({items:[],appendChild(item){this.items.push(item);}})},
+    document:{querySelector:()=>null,createDocumentFragment:()=>({items:[],appendChild(item){this.items.push(item);}})},
     el:selector=>{
       if(!nodes.has(selector)) nodes.set(selector,{hidden:false,items:[],set innerHTML(_){this.items=[];},appendChild(fragment){this.items.push(...fragment.items);}});
       return nodes.get(selector);

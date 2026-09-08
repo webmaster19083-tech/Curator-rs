@@ -840,7 +840,10 @@ async fn run_download_inner(
     if let Some(folder) = url.strip_prefix("local:") {
         let folder = PathBuf::from(folder);
         let local_state = state.clone();
-        let _ = tokio::task::spawn_blocking(move || crate::local_import::sync_folder(&local_state,source_id,&folder)).await;
+        let _ = tokio::task::spawn_blocking(move || {
+            crate::local_import::sync_folder(&local_state, source_id, &folder)
+        })
+        .await;
         return;
     }
     let dest = dunce::simplified(&state.library_dir.join(&slug)).to_path_buf();

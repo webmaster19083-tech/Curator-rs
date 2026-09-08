@@ -16,6 +16,7 @@ mod slug;
 #[cfg(test)]
 mod test_support;
 mod thumb_worker;
+mod virtual_clips;
 
 use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
@@ -302,7 +303,9 @@ pub fn router(state: AppState) -> axum::Router {
 
 pub async fn shutdown(state: &AppState) {
     state.shutdown.cancel();
-    if let Some(worker) = &state.nsfw { worker.shutdown().await; }
+    if let Some(worker) = &state.nsfw {
+        worker.shutdown().await;
+    }
     state.download_tasks.close();
     state.download_tasks.wait().await;
 }
@@ -314,7 +317,7 @@ pub async fn library_summary(state: &AppState) -> Result<serde_json::Value> {
 
 pub fn media_path(state: &AppState, id: i64) -> Result<PathBuf> {
     let relative: String = state.pool.get()?.query_row(
-        "SELECT filepath FROM media WHERE id=?1 AND downloaded=1 AND missing=0",
+        "SELECT CASE WHEN m.clip_start_secs IS NOT NULL THEN (SELECT filepath FROM media parent WHERE parent.id=m.clip_parent_id AND parent.missing=0) ELSE m.filepath END FROM media m WHERE id=?1 AND downloaded=1 AND missing=0",
         [id],
         |r| r.get(0),
     )?;

@@ -62,7 +62,11 @@ impl NsfwClassifier {
             rx,
             ready.clone(),
         ));
-        Self { tx, ready, task: std::sync::Arc::new(tokio::sync::Mutex::new(Some(task))) }
+        Self {
+            tx,
+            ready,
+            task: std::sync::Arc::new(tokio::sync::Mutex::new(Some(task))),
+        }
     }
 
     pub async fn shutdown(&self) {

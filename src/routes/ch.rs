@@ -152,7 +152,7 @@ pub async fn get_playlist(
     let min_rating = q.min_rating.unwrap_or(0);
 
     let mut params: Vec<rusqlite::types::Value> = Vec::new();
-    let mut filters = String::new();
+    let mut filters = String::from(" AND m.missing=0 AND (m.clip_start_secs IS NULL OR EXISTS(SELECT 1 FROM media parent WHERE parent.id=m.clip_parent_id AND parent.downloaded=1 AND parent.missing=0))");
     for (tags, exclude) in [(&require_tags, false), (&exclude_tags, true)] {
         for tag in tags {
             let predicate =
@@ -172,8 +172,8 @@ pub async fn get_playlist(
     let order = if do_shuffle { "RANDOM()" } else { "m.id" };
     let base_sql = format!(
         "{with_clause}\
-         SELECT m.id, m.filepath, m.filename, m.type, m.rating, s.group_id, \
-            (SELECT GROUP_CONCAT(t.name, ',') FROM media_tags mt JOIN tags t ON t.id=mt.tag_id WHERE mt.media_id=m.id) AS tags_csv \
+         SELECT m.id, CASE WHEN m.clip_start_secs IS NOT NULL THEN (SELECT filepath FROM media parent WHERE parent.id=m.clip_parent_id) ELSE m.filepath END, m.filename, m.type, m.rating, s.group_id, \
+            (SELECT GROUP_CONCAT(t.name, ',') FROM media_tags mt JOIN tags t ON t.id=mt.tag_id WHERE mt.media_id=m.id) AS tags_csv, m.clip_start_secs,m.clip_end_secs \
          FROM media m JOIN sources s ON s.id=m.source_id \
          WHERE m.downloaded=1 AND s.included=1{scope_sql}{filters} ORDER BY {order} LIMIT {limit}"
     );
@@ -186,6 +186,8 @@ pub async fn get_playlist(
         rating: i64,
         group_id: Option<i64>,
         tags_csv: Option<String>,
+        clip_start_secs: Option<f64>,
+        clip_end_secs: Option<f64>,
     }
 
     let rows: Vec<Row> = {
@@ -200,6 +202,8 @@ pub async fn get_playlist(
                     rating: r.get(4)?,
                     group_id: r.get(5)?,
                     tags_csv: r.get(6)?,
+                    clip_start_secs: r.get(7)?,
+                    clip_end_secs: r.get(8)?,
                 })
             })
             .map_err(db_err)?
@@ -230,6 +234,8 @@ pub async fn get_playlist(
                 "type":     row.kind,
                 "rating":   row.rating,
                 "tags":     tags_vec,
+                "clip_start_secs": row.clip_start_secs,
+                "clip_end_secs": row.clip_end_secs,
                 "url":      format!("/library/{}", urlencoding::encode(&row.filepath).replace("%2F", "/")),
             })
         })

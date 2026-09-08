@@ -110,7 +110,7 @@ pub async fn list(
         String::new()
     };
 
-    let mut extra = String::from(" AND m.missing=0");
+    let mut extra = String::from(" AND m.missing=0 AND (m.clip_start_secs IS NULL OR EXISTS(SELECT 1 FROM media parent WHERE parent.id=m.clip_parent_id AND parent.missing=0 AND parent.downloaded=1))");
     for (bound, op) in [(q.min_size, ">="), (q.max_size, "<=")] {
         if let Some(bytes) = bound {
             if bytes < 0 {
@@ -228,7 +228,7 @@ pub async fn list(
     params.push(((limit + 1) as i64).into());
     let limit_param = params.len();
     let query = format!(
-        "SELECT m.id,m.source_id,m.filepath,m.filename,m.type,m.added_at,m.rating,m.auto_rating,m.auto_rating_score,m.rating_source,m.rating_reviewed,m.rating_reviewed_at,m.origin_url,m.downloaded,m.duration_secs,m.clip_parent_id,m.file_size_bytes, {key} AS _cursor_key, s.group_id AS _source_group_id, \
+        "SELECT m.id,m.source_id,m.filepath,m.filename,m.type,m.added_at,m.rating,m.auto_rating,m.auto_rating_score,m.rating_source,m.rating_reviewed,m.rating_reviewed_at,m.origin_url,m.downloaded,m.duration_secs,m.clip_parent_id,m.file_size_bytes,m.clip_start_secs,m.clip_end_secs,CASE WHEN m.clip_start_secs IS NOT NULL THEN (SELECT filepath FROM media parent WHERE parent.id=m.clip_parent_id) ELSE m.filepath END AS playback_filepath, {key} AS _cursor_key, s.group_id AS _source_group_id, \
             (SELECT GROUP_CONCAT(t.name, ',') FROM media_tags mt \
              JOIN tags t ON t.id = mt.tag_id WHERE mt.media_id = m.id) AS tags_csv \
          FROM media m \

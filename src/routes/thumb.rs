@@ -24,7 +24,7 @@ pub async fn get_thumbnail(State(state): State<Arc<AppState>>, Path(id): Path<i6
     };
 
     let row = conn.query_row(
-        "SELECT filepath, type, downloaded, origin_url FROM media WHERE id=?1 AND missing=0",
+        "SELECT CASE WHEN m.clip_start_secs IS NOT NULL THEN (SELECT filepath FROM media parent WHERE parent.id=m.clip_parent_id AND parent.missing=0) ELSE m.filepath END, type, downloaded, origin_url FROM media m WHERE id=?1 AND missing=0",
         [id],
         |r| {
             Ok((

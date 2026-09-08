@@ -264,6 +264,11 @@ pub fn run_migrations(conn: &Connection) -> Result<()> {
 
     for (name, definition) in [
         ("file_size_bytes", "INTEGER CHECK(file_size_bytes >= 0)"),
+        ("clip_start_secs", "REAL CHECK(clip_start_secs >= 0)"),
+        (
+            "clip_end_secs",
+            "REAL CHECK(clip_end_secs > clip_start_secs)",
+        ),
         ("missing", "INTEGER NOT NULL DEFAULT 0"),
         ("file_stamp", "TEXT"),
         ("nsfw_state", "TEXT NOT NULL DEFAULT 'pending'"),
@@ -299,6 +304,9 @@ pub fn run_migrations(conn: &Connection) -> Result<()> {
     conn.execute_batch(
         "CREATE INDEX IF NOT EXISTS idx_media_review ON media(rating_reviewed, auto_rating, id);",
     )?;
+    if !column_names(conn, "clip_jobs").contains("virtual") {
+        conn.execute_batch("ALTER TABLE clip_jobs ADD COLUMN virtual INTEGER NOT NULL DEFAULT 0;")?;
+    }
     conn.execute_batch("CREATE TABLE IF NOT EXISTS placeholder_scans (
         source_id INTEGER PRIMARY KEY REFERENCES sources(id) ON DELETE CASCADE,
         url TEXT NOT NULL, retry_at INTEGER NOT NULL);

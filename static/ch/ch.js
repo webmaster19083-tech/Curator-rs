@@ -147,6 +147,7 @@ function showItem(idx) {
   if (item.type === "video") {
     els.mediaImg.style.display = "none";
     els.mediaVid.style.display = "block";
+    bindVirtualClip(els.mediaVid,item);
     els.mediaVid.src           = item.url;
     els.mediaVid.loop          = true;
     els.mediaVid.autoplay      = true;

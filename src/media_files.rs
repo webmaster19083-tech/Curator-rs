@@ -43,7 +43,7 @@ pub fn reconcile_cancellable(
             let conn = pool.get()?;
             let mut stmt = conn.prepare(
                 "SELECT id, filepath, file_stamp, missing FROM media
-                WHERE id>?1 AND (downloaded=1 OR missing=1) ORDER BY id LIMIT 256",
+                WHERE id>?1 AND clip_start_secs IS NULL AND (downloaded=1 OR missing=1) ORDER BY id LIMIT 256",
             )?;
             let rows = stmt
                 .query_map([after], |r| {
@@ -90,6 +90,7 @@ pub fn reconcile_cancellable(
         tx.commit()?;
     }
     let conn = pool.get()?;
+    conn.execute("UPDATE media AS clip SET downloaded=CASE WHEN EXISTS(SELECT 1 FROM media parent WHERE parent.id=clip.clip_parent_id AND parent.downloaded=1 AND parent.missing=0) THEN 1 ELSE 0 END, missing=CASE WHEN EXISTS(SELECT 1 FROM media parent WHERE parent.id=clip.clip_parent_id AND parent.downloaded=1 AND parent.missing=0) THEN 0 ELSE 1 END WHERE clip.clip_start_secs IS NOT NULL", [])?;
     conn.execute("UPDATE sources SET item_count=(SELECT COUNT(*) FROM media WHERE source_id=sources.id AND downloaded=1)", [])?;
     Ok(missing)
 }

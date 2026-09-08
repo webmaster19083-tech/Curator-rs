@@ -99,12 +99,26 @@ async fn choose_path(app: tauri::AppHandle, directory: bool) -> Result<Option<St
 }
 
 #[tauri::command]
-async fn import_local_folder(app: tauri::AppHandle, backend: tauri::State<'_,Backend>, group_id: Option<i64>) -> Result<Option<i64>,String> {
-    let state=backend.state.clone();
+async fn import_local_folder(
+    app: tauri::AppHandle,
+    backend: tauri::State<'_, Backend>,
+    group_id: Option<i64>,
+) -> Result<Option<i64>, String> {
+    let state = backend.state.clone();
     tokio::task::spawn_blocking(move || {
-        let Some(folder)=app.dialog().file().blocking_pick_folder() else { return Ok(None); };
-        curator::local_import::import_folder(&state,std::path::Path::new(&folder.to_string()),group_id).map(Some).map_err(|e|e.to_string())
-    }).await.map_err(|e|e.to_string())?
+        let Some(folder) = app.dialog().file().blocking_pick_folder() else {
+            return Ok(None);
+        };
+        curator::local_import::import_folder(
+            &state,
+            std::path::Path::new(&folder.to_string()),
+            group_id,
+        )
+        .map(Some)
+        .map_err(|e| e.to_string())
+    })
+    .await
+    .map_err(|e| e.to_string())?
 }
 
 fn main() {
@@ -213,7 +227,12 @@ fn main() {
                 parts.uri = match path.parse() {
                     Ok(uri) => uri,
                     Err(_) => {
-                        responder.respond(tauri::http::Response::builder().status(400).body(Vec::new()).unwrap_or_else(|_| tauri::http::Response::new(Vec::new())));
+                        responder.respond(
+                            tauri::http::Response::builder()
+                                .status(400)
+                                .body(Vec::new())
+                                .unwrap_or_else(|_| tauri::http::Response::new(Vec::new())),
+                        );
                         return;
                     }
                 };
@@ -224,7 +243,12 @@ fn main() {
                 {
                     Ok(response) => response,
                     Err(_) => {
-                        responder.respond(tauri::http::Response::builder().status(500).body(Vec::new()).unwrap_or_else(|_| tauri::http::Response::new(Vec::new())));
+                        responder.respond(
+                            tauri::http::Response::builder()
+                                .status(500)
+                                .body(Vec::new())
+                                .unwrap_or_else(|_| tauri::http::Response::new(Vec::new())),
+                        );
                         return;
                     }
                 };

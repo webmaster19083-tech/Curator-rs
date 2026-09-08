@@ -48,6 +48,8 @@ function mediaMatchesTypeFilter(item, typeFilter) {
 }
 
 function reportVideoDuration(video, item) {
+  bindVirtualClip(video, item);
+  if (item.clip_start_secs != null) return;
   if (item.duration_secs != null || item._durationPending) return;
   video.addEventListener('loadedmetadata', async () => {
     const duration = video.duration;
@@ -71,7 +73,7 @@ function reportVideoDuration(video, item) {
 // visibly different code path (that's the whole point: nothing about
 // how it's displayed should reveal which one it is).
 function mediaFullSrc(item) {
-  return item.downloaded === 0 ? item.origin_url : `/library/${encodeURI(item.filepath)}`;
+  return item.downloaded === 0 ? item.origin_url : `/library/${encodeURI(item.playback_filepath || item.filepath)}`;
 }
 function mediaThumbSrc(item) {
   // No local file to thumbnail yet, so this is the one place a
@@ -1320,7 +1322,7 @@ let gridShuffleSeed = null;
 async function loadView() {
   const requestId = ++viewRequestSeq;
   const params = new URLSearchParams({limit: 150, media_type: state.typeFilter});
-  const sizeFilter = document.querySelector('#size-filter')?.value;
+  const sizeFilter = el('#size-filter')?.value;
   if (sizeFilter === 'unknown') params.set('unknown_size','true');
   else if (sizeFilter) params.set('min_size',sizeFilter);
   if (state.view.type === 'creator') params.set('source_id', state.view.id);
@@ -1577,7 +1579,7 @@ async function watchClipJob(id) {
   try {
     const job = await api(`/api/clip-jobs/${id}`);
     if (job.status === 'running') {
-      el('#clip-job-status').textContent = 'Creating clips in background. Original preserved.';
+      el('#clip-job-status').textContent = 'Saving virtual clip ranges. No video files are copied.';
       setTimeout(() => watchClipJob(id), 3000); return;
     }
     localStorage.removeItem('curatorClipJob');
@@ -1819,10 +1821,11 @@ function pwCheckAndPrepare(item) {
         // server-backfilled duration_secs, which may not be known yet for
         // this file) so the exclusion is correct immediately, not only
         // once the background backfill has caught up to it.
-        if (v.duration > CLIP_MAX_SECONDS) { resolve(null); return; }
+        if ((item.clip_start_secs != null ? item.duration_secs : v.duration) > CLIP_MAX_SECONDS) { resolve(null); return; }
         resolve(v.videoHeight > v.videoWidth ? { item, el: v } : null);
       };
       v.onerror = () => resolve(null);
+      bindVirtualClip(v, item);
       v.src = mediaFullSrc(item);
     } else {
       const probe = new Image();
@@ -2061,7 +2064,7 @@ function feedBuildItem(item) {
       // duration_secs, which may not be known yet for this file) so the
       // exclusion is correct immediately, not only once the backfill has
       // caught up to it.
-      return ok && !feed.review && mediaEl.duration > CLIP_MAX_SECONDS ? false : ok;
+      return ok && !feed.review && (item.clip_start_secs != null ? item.duration_secs : mediaEl.duration) > CLIP_MAX_SECONDS ? false : ok;
     });
     mediaEl.onloadedmetadata = () => {
       if (mediaEl.videoWidth > mediaEl.videoHeight) wrap.classList.add('rotated');
@@ -2071,7 +2074,7 @@ function feedBuildItem(item) {
     mediaEl.addEventListener('timeupdate', () => {
       if (!mediaEl.duration) return;
       fill.style.transition = 'none';
-      fill.style.width = ((mediaEl.currentTime / mediaEl.duration) * 100) + '%';
+      fill.style.width = (clipProgress(mediaEl) * 100) + '%';
     });
     mediaEl.addEventListener('ended', () => { if (feed.active && !feed.review && feed.activeSection === section) feedGoNext(section); });
 
@@ -2103,7 +2106,7 @@ function feedBuildItem(item) {
       if (!mediaEl.duration) return;
       const rect = track.getBoundingClientRect();
       const ratio = Math.min(1, Math.max(0, (e.clientX - rect.left) / rect.width));
-      mediaEl.currentTime = ratio * mediaEl.duration;
+      mediaEl.currentTime = clipStart(mediaEl) + ratio * clipDuration(mediaEl);
       fill.style.transition = 'none';
       fill.style.width = (ratio * 100) + '%';
     };
@@ -2164,7 +2167,7 @@ function feedGoNext(section) {
     if (!feed.review && !feed.page.more && !feed.page.pending && !feed.inFlight &&
         [...feed.recyclePool.keys()].filter(id => !feed.failedIds.has(id)).length === 1) {
       feedDeactivate(section);
-      if (section._mediaEl.tagName === 'VIDEO') section._mediaEl.currentTime = 0;
+      if (section._mediaEl.tagName === 'VIDEO') section._mediaEl.currentTime = clipStart(section._mediaEl);
       feedActivate(section);
     }
   }
@@ -2776,6 +2779,7 @@ function renderSlide() {
 
   if (item.type === 'video') {
     const v = document.createElement('video');
+    bindVirtualClip(v, item);
     v.src = src;
     v.className = 'slideshow-media';
     v.playsInline = true;
@@ -2823,7 +2827,7 @@ function onVideoTimeUpdate() {
   if (!ss.videoEl || !ss.videoEl.duration) return;
   const fill = el('#slideshow-progress-fill');
   fill.style.transition = 'none';
-  fill.style.width = ((ss.videoEl.currentTime / ss.videoEl.duration) * 100) + '%';
+  fill.style.width = (clipProgress(ss.videoEl) * 100) + '%';
 }
 
 function onVideoEnded() {
@@ -2843,7 +2847,7 @@ function onVideoPause() {
   // manually paused, flipping ss.playing to false a moment before
   // onVideoEnded checks that very flag. Net effect: videos never actually
   // advanced the slideshow, silently, on every single completion.
-  if (ss.videoEl && ss.videoEl.ended) return;
+  if (ss.videoEl && (ss.videoEl.ended || ss.videoEl._clipEnded)) return;
   if (ss.playing) { ss.playing = false; updateSlideshowUI(); }
 }
 

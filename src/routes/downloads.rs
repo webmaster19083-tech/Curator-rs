@@ -79,10 +79,23 @@ pub async fn resume(State(state): State<Arc<AppState>>) -> Json<Value> {
             Ok(c) => c,
             Err(_) => return Json(json!({"error":"Database unavailable"})),
         };
+        let tx = match conn.unchecked_transaction() {
+            Ok(tx) => tx,
+            Err(_) => return Json(json!({"error":"Database unavailable"})),
+        };
         for id in &paused_ids {
-            if conn.execute("UPDATE sources SET status='pending' WHERE id=?1 AND status='paused'", [id]).is_err() {
+            if tx
+                .execute(
+                    "UPDATE sources SET status='pending' WHERE id=?1 AND status='paused'",
+                    [id],
+                )
+                .is_err()
+            {
                 return Json(json!({"error":"Database unavailable"}));
             }
+        }
+        if tx.commit().is_err() {
+            return Json(json!({"error":"Database unavailable"}));
         }
     }
     state.paused_source_ids.lock().await.clear();
@@ -95,10 +108,33 @@ pub async fn resume(State(state): State<Arc<AppState>>) -> Json<Value> {
     Json(json!({ "paused": false, "requeued": paused_ids.len() }))
 }
 
-
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn failed_resume_keeps_all_sources_paused() {
+        let dir = tempfile::tempdir().unwrap();
+        let state = crate::test_support::state(dir.path());
+        crate::test_support::source(&state);
+        state.downloads_paused.store(true, Ordering::SeqCst);
+        let conn = state.pool.get().unwrap();
+        conn.execute("UPDATE sources SET status='paused' WHERE id=1", [])
+            .unwrap();
+        conn.execute("INSERT INTO sources(id,name,url,slug,status,added_at) VALUES(2,'second','https://example.org/second','second','paused','now')", []).unwrap();
+        conn.execute_batch("CREATE TRIGGER fail_second_resume BEFORE UPDATE OF status ON sources WHEN NEW.id=2 AND NEW.status='pending' BEGIN SELECT RAISE(ABORT,'test failure'); END;").unwrap();
+        let response = resume(State(state.clone())).await;
+        assert!(response.0.get("error").is_some());
+        let paused: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM sources WHERE status='paused'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(paused, 2);
+        assert!(state.downloads_paused.load(Ordering::SeqCst));
+    }
 
     #[tokio::test]
     async fn repeated_resume_claims_paused_source_once() {
@@ -112,10 +148,7 @@ mod tests {
             .execute("UPDATE sources SET status='paused' WHERE id=1", [])
             .unwrap();
 
-        let (a, b) = tokio::join!(
-            resume(State(state.clone())),
-            resume(State(state.clone()))
-        );
+        let (a, b) = tokio::join!(resume(State(state.clone())), resume(State(state.clone())));
         let total = a.0["requeued"].as_u64().unwrap_or(0) + b.0["requeued"].as_u64().unwrap_or(0);
         assert_eq!(total, 1);
     }

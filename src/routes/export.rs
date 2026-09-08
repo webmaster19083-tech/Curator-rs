@@ -226,7 +226,7 @@ pub async fn export_chpack(
         let mut stmt = conn.prepare(
             "SELECT m.filepath, m.type, m.rating, \
                 (SELECT GROUP_CONCAT(t.name, ',') FROM media_tags mt JOIN tags t ON t.id=mt.tag_id WHERE mt.media_id=m.id) AS tags_csv \
-             FROM media m WHERE m.source_id=?1 AND m.downloaded=1 ORDER BY m.id"
+             FROM media m WHERE m.source_id=?1 AND m.downloaded=1 AND m.clip_start_secs IS NULL ORDER BY m.id"
         ).unwrap();
         let rows: Vec<Row> = stmt
             .query_map([sid], |r| {
@@ -247,7 +247,7 @@ pub async fn export_chpack(
         let mut stmt = conn.prepare(
             "SELECT m.filepath, m.type, m.rating, \
                 (SELECT GROUP_CONCAT(t.name, ',') FROM media_tags mt JOIN tags t ON t.id=mt.tag_id WHERE mt.media_id=m.id) AS tags_csv \
-             FROM media m WHERE m.downloaded=1 ORDER BY m.id"
+             FROM media m WHERE m.downloaded=1 AND m.clip_start_secs IS NULL ORDER BY m.id"
         ).unwrap();
         let rows: Vec<Row> = stmt
             .query_map([], |r| {

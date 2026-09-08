@@ -259,7 +259,7 @@
       <div class="lightbox-meta mono small" id="lightbox-meta"></div>
       <div id="lightbox-clip-tools" hidden>
         <label>Clip length <select id="clip-seconds"><option value="15">15s</option><option value="30">30s</option><option value="60" selected>60s</option></select></label>
-        <button id="create-clips-btn" class="btn btn-ghost" title="Create separate MP4 files. Original stays untouched; this uses additional disk space.">Create clips (keep original)</button>
+        <button id="create-clips-btn" class="btn btn-ghost" title="Save time ranges that play from the original video. No copied video files.">Create virtual clips</button>
       </div>
       <span id="clip-job-status" role="status" class="mono small"></span>
       <button class="btn btn-accent" id="lightbox-start-slideshow">▶ slideshow from here</button>
@@ -336,6 +336,7 @@
 </div>
 
 <script src="https://cdnjs.cloudflare.com/ajax/libs/three.js/r128/three.min.js"></script>
+<script src="/virtual-clips.js"></script>
 <script src="/app.js"></script>
 <script src="/library.js"></script>
 </body>

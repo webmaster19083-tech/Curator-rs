@@ -71,8 +71,12 @@ pub fn save_config(cfg: &Config) -> std::io::Result<()> {
 }
 
 pub fn resolve_data_dir(cfg: &Config) -> PathBuf {
+    resolve_data_dir_with_env(cfg, std::env::var("CURATOR_DATA_DIR").ok().as_deref())
+}
+
+fn resolve_data_dir_with_env(cfg: &Config, env_value: Option<&str>) -> PathBuf {
     // 1. Environment variable
-    if let Ok(env_val) = std::env::var("CURATOR_DATA_DIR") {
+    if let Some(env_val) = env_value {
         if !env_val.is_empty() {
             return PathBuf::from(env_val);
         }
@@ -114,21 +118,18 @@ mod tests {
     fn resolve_data_dir_prefers_env_var_over_config() {
         // Isolate from whatever the real environment/config might have —
         // this only asserts precedence, not the literal default path.
-        std::env::set_var("CURATOR_DATA_DIR", "/tmp/curator-env-test-dir");
         let cfg = Config {
             data_dir: Some("/tmp/curator-config-test-dir".into()),
             ..Default::default()
         };
-        let resolved = resolve_data_dir(&cfg);
-        std::env::remove_var("CURATOR_DATA_DIR");
+        let resolved = resolve_data_dir_with_env(&cfg, Some("/tmp/curator-env-test-dir"));
         assert_eq!(resolved, PathBuf::from("/tmp/curator-env-test-dir"));
     }
 
     #[test]
     fn resolve_data_dir_falls_back_to_home_curator() {
-        std::env::remove_var("CURATOR_DATA_DIR");
         let cfg = Config::default();
-        let resolved = resolve_data_dir(&cfg);
+        let resolved = resolve_data_dir_with_env(&cfg, None);
         assert!(resolved.ends_with("Curator"));
     }
 }

@@ -59,7 +59,7 @@ jobs:
         run: npm install --global @tauri-apps/cli@2
       - name: Build native application and installer
         working-directory: desktop
-        run: tauri build --target ${{ matrix.target }} --bundles ${{ matrix.bundles }}
+        run: tauri build --target ${{ matrix.target }} --bundles "${{ matrix.bundles }}"
       - uses: actions/upload-artifact@v4
         with:
           name: curator-${{ matrix.target }}

@@ -513,6 +513,10 @@ async fn index_download(
     let (tx, mut rx) = tokio::sync::mpsc::channel::<PathBuf>(1024);
     let dirty = Arc::new(AtomicBool::new(false));
     let dirty_event = dirty.clone();
+    // FSEvents reports canonical paths (/private/var instead of /var on macOS).
+    // Map them back to the library spelling used by the database/indexer.
+    let watched_root = dunce::canonicalize(&dest).unwrap_or_else(|_| dest.clone());
+    let indexed_root = dest.clone();
     let mut watcher =
         notify::recommended_watcher(move |event: notify::Result<notify::Event>| match event {
             Ok(e) => {
@@ -523,6 +527,10 @@ async fn index_download(
                     return;
                 }
                 for path in e.paths {
+                    let path = path
+                        .strip_prefix(&watched_root)
+                        .map(|relative| indexed_root.join(relative))
+                        .unwrap_or(path);
                     if tx.try_send(path).is_err() {
                         dirty_event.store(true, Ordering::Relaxed);
                     }
@@ -566,7 +574,8 @@ async fn index_download(
             else {
                 for mut path in paths {
                     if path.extension().is_some_and(|e| e=="json") { path.set_extension(""); }
-                    if path.is_file() { index_file(&s,source_id,&path)?; }
+                    if path.is_dir() { scan_and_index(&s,source_id,&path)?; }
+                    else if path.is_file() { index_file(&s,source_id,&path)?; }
                     else if let Ok(rel)=path.strip_prefix(&s.library_dir) {
                         let conn=s.pool.get()?;
                         conn.execute("UPDATE media SET missing=1,downloaded=0,nsfw_state='missing' WHERE filepath=?1 AND downloaded=1",[rel.to_string_lossy().replace('\\',"/")])?;

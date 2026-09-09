@@ -148,6 +148,7 @@ pub async fn initialize() -> Result<AppState> {
     std::fs::create_dir_all(&library_dir)?;
     std::fs::create_dir_all(&archives_dir)?;
     std::fs::create_dir_all(&thumbs_dir)?;
+    std::fs::create_dir_all(data_dir.join("webview"))?;
 
     setup_logging(&log_path);
 

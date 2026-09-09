@@ -8,6 +8,119 @@ use tauri::{Emitter, Manager};
 use tauri_plugin_dialog::DialogExt;
 use tower::ServiceExt;
 
+#[cfg(target_os = "windows")]
+mod single_instance {
+    use std::ffi::OsStr;
+    use std::os::windows::ffi::OsStrExt;
+
+    use windows_sys::Win32::Foundation::{
+        CloseHandle, GetLastError, SetLastError, ERROR_ALREADY_EXISTS, HANDLE, WAIT_OBJECT_0,
+    };
+    use windows_sys::Win32::System::Threading::{
+        CreateEventW, CreateMutexW, OpenEventW, SetEvent, WaitForSingleObject, EVENT_MODIFY_STATE,
+        INFINITE,
+    };
+
+    const MUTEX_NAME: &str = "Local\\Curator.Desktop.SingleInstance";
+    const ACTIVATE_EVENT_NAME: &str = "Local\\Curator.Desktop.Activate";
+
+    pub enum Claim {
+        Primary(Guard),
+        Secondary,
+    }
+
+    pub struct Guard {
+        _mutex: HANDLE,
+        activation_event: HANDLE,
+    }
+
+    fn wide(value: &str) -> Vec<u16> {
+        OsStr::new(value).encode_wide().chain(Some(0)).collect()
+    }
+
+    pub fn claim(activate_existing: bool) -> Result<Claim, String> {
+        let mutex_name = wide(MUTEX_NAME);
+        unsafe { SetLastError(0) };
+        let mutex = unsafe { CreateMutexW(std::ptr::null(), 0, mutex_name.as_ptr()) };
+        if mutex.is_null() {
+            return Err(format!(
+                "could not create Curator instance lock: {}",
+                unsafe { GetLastError() }
+            ));
+        }
+        if unsafe { GetLastError() } == ERROR_ALREADY_EXISTS {
+            unsafe { CloseHandle(mutex) };
+            if activate_existing {
+                let event_name = wide(ACTIVATE_EVENT_NAME);
+                let event = unsafe { OpenEventW(EVENT_MODIFY_STATE, 0, event_name.as_ptr()) };
+                if !event.is_null() {
+                    unsafe {
+                        SetEvent(event);
+                        CloseHandle(event);
+                    }
+                }
+            }
+            return Ok(Claim::Secondary);
+        }
+
+        let event_name = wide(ACTIVATE_EVENT_NAME);
+        let activation_event = unsafe { CreateEventW(std::ptr::null(), 0, 0, event_name.as_ptr()) };
+        if activation_event.is_null() {
+            let error = unsafe { GetLastError() };
+            unsafe { CloseHandle(mutex) };
+            return Err(format!(
+                "could not create Curator activation event: {error}"
+            ));
+        }
+        Ok(Claim::Primary(Guard {
+            _mutex: mutex,
+            activation_event,
+        }))
+    }
+
+    impl Guard {
+        pub fn listen_for_activation(&self, app: tauri::AppHandle) {
+            // Windows HANDLE is a raw pointer type, so carry its opaque value
+            // across the listener thread as an integer and restore it only at
+            // the FFI call boundary.
+            let event = self.activation_event as usize;
+            let _ = std::thread::Builder::new()
+                .name("curator-instance-activation".into())
+                .spawn(move || loop {
+                    if unsafe { WaitForSingleObject(event as HANDLE, INFINITE) } != WAIT_OBJECT_0 {
+                        break;
+                    }
+                    let app = app.clone();
+                    let app_for_ui = app.clone();
+                    let _ = app.run_on_main_thread(move || super::open_curator(&app_for_ui));
+                });
+        }
+    }
+
+    impl Drop for Guard {
+        fn drop(&mut self) {
+            unsafe {
+                CloseHandle(self.activation_event);
+                CloseHandle(self._mutex);
+            }
+        }
+    }
+}
+
+#[cfg(not(target_os = "windows"))]
+mod single_instance {
+    pub struct Guard;
+    pub enum Claim {
+        Primary(Guard),
+    }
+    pub fn claim(_: bool) -> Result<Claim, String> {
+        Ok(Claim::Primary(Guard))
+    }
+    impl Guard {
+        pub fn listen_for_activation(&self, _: tauri::AppHandle) {}
+    }
+}
+
 #[derive(Clone)]
 struct Backend {
     app: axum::Router,
@@ -35,11 +148,11 @@ fn background_launch_requested() -> bool {
     std::env::args().any(|argument| argument == "--background")
 }
 
-fn create_main_window(
-    app: &tauri::AppHandle,
-    completed: bool,
-    visible: bool,
-) -> tauri::Result<()> {
+fn create_main_window(app: &tauri::AppHandle, completed: bool, visible: bool) -> tauri::Result<()> {
+    // Keep WebView2 state with Curator's own data rather than its implicit
+    // system profile. Besides keeping the cache scoped to the app, this lets
+    // a fresh build recover from an abandoned profile left by an older build.
+    let webview_data_dir = app.state::<Backend>().state.data_dir.join("webview");
     tauri::WebviewWindowBuilder::new(
         app,
         "main",
@@ -49,6 +162,7 @@ fn create_main_window(
     .inner_size(1440.0, 900.0)
     .min_inner_size(960.0, 600.0)
     .visible(visible)
+    .data_directory(webview_data_dir)
     .disable_drag_drop_handler()
     .build()
     .map(|_| ())
@@ -88,7 +202,13 @@ async fn refresh_tray_controls(state: &curator::AppState, controls: &TrayControl
                 COALESCE(SUM(status='retrying'),0) \
              FROM sources",
             [],
-            |row| Ok((row.get::<_, i64>(0)?, row.get::<_, i64>(1)?, row.get::<_, i64>(2)?)),
+            |row| {
+                Ok((
+                    row.get::<_, i64>(0)?,
+                    row.get::<_, i64>(1)?,
+                    row.get::<_, i64>(2)?,
+                ))
+            },
         )
         .ok()
     })
@@ -108,9 +228,11 @@ async fn refresh_tray_controls(state: &curator::AppState, controls: &TrayControl
         format!("Downloads: {active} active ({retrying} retrying)")
     };
     let _ = controls.status.set_text(status);
-    let _ = controls
-        .pause
-        .set_text(if paused { "Resume Downloads" } else { "Pause Downloads" });
+    let _ = controls.pause.set_text(if paused {
+        "Resume Downloads"
+    } else {
+        "Pause Downloads"
+    });
     if let Ok(settings) = state.settings.try_read() {
         let _ = controls.startup.set_checked(settings.start_with_windows);
     }
@@ -278,6 +400,21 @@ async fn import_local_folder(
 }
 
 fn main() {
+    // Curator's backend deliberately outlives its visible window. Without an
+    // instance gate, launching the shortcut while the tray process is alive
+    // opens a second WebView2 profile and produces a blank, non-responsive
+    // window (0x800700AA). A later launch now signals the primary process to
+    // restore its existing window and exits before it can bind another server.
+    let background_launch = background_launch_requested();
+    let instance = match single_instance::claim(!background_launch) {
+        Ok(single_instance::Claim::Primary(guard)) => guard,
+        #[cfg(target_os = "windows")]
+        Ok(single_instance::Claim::Secondary) => return,
+        Err(error) => {
+            eprintln!("Curator instance initialization failed: {error}");
+            return;
+        }
+    };
     let runtime = match tokio::runtime::Runtime::new() {
         Ok(runtime) => runtime,
         Err(error) => {
@@ -294,7 +431,6 @@ fn main() {
     };
     // Tauri resolves packaged resources independently of the process working directory.
     let shutdown_state = state.clone();
-    let background_launch = background_launch_requested();
     let handle = runtime.handle().clone();
     let protocol_handle = handle.clone();
     let app = tauri::Builder::default()
@@ -328,7 +464,7 @@ fn main() {
             let completed = handle.block_on(async { state.settings.read().await.oobe_completed });
             // Windows startup starts in the tray without briefly flashing a
             // webview. Users can always restore it from the tray menu.
-            create_main_window(&app.handle(), completed, !background_launch)?;
+            create_main_window(app.handle(), completed, !background_launch)?;
 
             let tray_open = tauri::menu::MenuItem::with_id(
                 app,
@@ -351,9 +487,8 @@ fn main() {
                 true,
                 None::<&str>,
             )?;
-            let start_with_windows = handle.block_on(async {
-                state.settings.read().await.start_with_windows
-            });
+            let start_with_windows =
+                handle.block_on(async { state.settings.read().await.start_with_windows });
             let tray_startup = tauri::menu::CheckMenuItem::with_id(
                 app,
                 "start-with-windows",
@@ -451,15 +586,13 @@ fn main() {
             spawn_tray_status_poller(state.clone(), tray_controls);
             Ok(())
         })
-        .on_menu_event(|app, event| {
-            match event.id().as_ref() {
-                "open-curator" => open_curator(app),
-                "pause-downloads" => toggle_downloads(app),
-                "start-with-windows" => toggle_start_with_windows(app),
-                "quit-curator" => request_explicit_quit(app),
-                _ => {
-                    let _ = app.emit("desktop-menu", event.id().as_ref());
-                }
+        .on_menu_event(|app, event| match event.id().as_ref() {
+            "open-curator" => open_curator(app),
+            "pause-downloads" => toggle_downloads(app),
+            "start-with-windows" => toggle_start_with_windows(app),
+            "quit-curator" => request_explicit_quit(app),
+            _ => {
+                let _ = app.emit("desktop-menu", event.id().as_ref());
             }
         })
         .register_asynchronous_uri_scheme_protocol("curator", move |context, request, responder| {
@@ -531,6 +664,7 @@ fn main() {
             return;
         }
     };
+    instance.listen_for_activation(app.handle().clone());
     app.run(move |app_handle, event| match event {
         tauri::RunEvent::ExitRequested { api, .. } => {
             if !app_handle

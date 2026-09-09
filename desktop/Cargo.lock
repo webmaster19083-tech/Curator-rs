@@ -932,7 +932,7 @@ dependencies = [
 
 [[package]]
 name = "curator-desktop"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "axum",
  "curator",
@@ -945,6 +945,7 @@ dependencies = [
  "tauri-plugin-window-state",
  "tokio",
  "tower 0.4.13",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]

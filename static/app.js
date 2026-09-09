@@ -2601,8 +2601,8 @@ function feedBuildReviewControls(section, item) {
 }
 
 // ---------------------------------------------------------------------
-// VR — WebXR immersive viewing via Three.js (loaded from CDN in
-// index.html). Images only for now: a video in VR needs a live <video>
+// VR — WebXR immersive viewing via an optional asynchronous Three.js
+// enhancement. Images only for now: a video in VR needs a live <video>
 // element wrapped in THREE.VideoTexture, which is meaningfully more
 // complexity on top of something that's already hard to verify without
 // real headset hardware — skipped for this first version. Videos in the

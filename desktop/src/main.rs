@@ -1,5 +1,8 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::time::Duration;
+
 use axum::body::{to_bytes, Body};
 use tauri::{Emitter, Manager};
 use tauri_plugin_dialog::DialogExt;
@@ -9,6 +12,159 @@ use tower::ServiceExt;
 struct Backend {
     app: axum::Router,
     state: curator::AppState,
+}
+
+#[derive(Clone)]
+struct DesktopRuntime {
+    handle: tokio::runtime::Handle,
+}
+
+#[derive(Default)]
+struct DesktopLifecycle {
+    explicit_quit: AtomicBool,
+}
+
+#[derive(Clone)]
+struct TrayControls {
+    status: tauri::menu::MenuItem<tauri::Wry>,
+    pause: tauri::menu::MenuItem<tauri::Wry>,
+    startup: tauri::menu::CheckMenuItem<tauri::Wry>,
+}
+
+fn background_launch_requested() -> bool {
+    std::env::args().any(|argument| argument == "--background")
+}
+
+fn create_main_window(
+    app: &tauri::AppHandle,
+    completed: bool,
+    visible: bool,
+) -> tauri::Result<()> {
+    tauri::WebviewWindowBuilder::new(
+        app,
+        "main",
+        tauri::WebviewUrl::App(if completed { "index.html" } else { "oobe.html" }.into()),
+    )
+    .title("Curator")
+    .inner_size(1440.0, 900.0)
+    .min_inner_size(960.0, 600.0)
+    .visible(visible)
+    .disable_drag_drop_handler()
+    .build()
+    .map(|_| ())
+}
+
+fn open_curator(app: &tauri::AppHandle) {
+    if let Some(window) = app.get_webview_window("main") {
+        let _ = window.show();
+        let _ = window.set_focus();
+        return;
+    }
+    let completed = app
+        .state::<Backend>()
+        .state
+        .settings
+        .try_read()
+        .map(|settings| settings.oobe_completed)
+        .unwrap_or(true);
+    let _ = create_main_window(app, completed, true);
+}
+
+fn request_explicit_quit(app: &tauri::AppHandle) {
+    app.state::<DesktopLifecycle>()
+        .explicit_quit
+        .store(true, Ordering::Release);
+    app.exit(0);
+}
+
+async fn refresh_tray_controls(state: &curator::AppState, controls: &TrayControls) {
+    let pool = state.pool.clone();
+    let (downloading, pending, retrying) = tokio::task::spawn_blocking(move || {
+        let conn = pool.get().ok()?;
+        conn.query_row(
+            "SELECT \
+                COALESCE(SUM(status='downloading'),0), \
+                COALESCE(SUM(status='pending'),0), \
+                COALESCE(SUM(status='retrying'),0) \
+             FROM sources",
+            [],
+            |row| Ok((row.get::<_, i64>(0)?, row.get::<_, i64>(1)?, row.get::<_, i64>(2)?)),
+        )
+        .ok()
+    })
+    .await
+    .ok()
+    .flatten()
+    .unwrap_or((0, 0, 0));
+    let paused = state.downloads_paused.load(Ordering::Acquire);
+    let active = downloading + pending + retrying;
+    let status = if paused {
+        "Downloads: paused".to_string()
+    } else if active == 0 {
+        "Downloads: idle".to_string()
+    } else if retrying == 0 {
+        format!("Downloads: {active} active")
+    } else {
+        format!("Downloads: {active} active ({retrying} retrying)")
+    };
+    let _ = controls.status.set_text(status);
+    let _ = controls
+        .pause
+        .set_text(if paused { "Resume Downloads" } else { "Pause Downloads" });
+    if let Ok(settings) = state.settings.try_read() {
+        let _ = controls.startup.set_checked(settings.start_with_windows);
+    }
+}
+
+fn spawn_tray_status_poller(state: curator::AppState, controls: TrayControls) {
+    let cancellation = state.shutdown.clone();
+    let server_tasks = state.server_tasks.clone();
+    server_tasks.spawn(async move {
+        loop {
+            refresh_tray_controls(&state, &controls).await;
+            tokio::select! {
+                _ = cancellation.cancelled() => break,
+                _ = tokio::time::sleep(Duration::from_secs(2)) => {}
+            }
+        }
+    });
+}
+
+fn toggle_downloads(app: &tauri::AppHandle) {
+    let backend = app.state::<Backend>().inner().clone();
+    let controls = app.state::<TrayControls>().inner().clone();
+    let handle = app.state::<DesktopRuntime>().handle.clone();
+    handle.spawn(async move {
+        let state = std::sync::Arc::new(backend.state.clone());
+        if state.downloads_paused.load(Ordering::Acquire) {
+            let _ = curator::routes::downloads::resume(axum::extract::State(state.clone())).await;
+        } else {
+            let _ = curator::routes::downloads::pause(axum::extract::State(state.clone())).await;
+        }
+        refresh_tray_controls(&backend.state, &controls).await;
+    });
+}
+
+fn toggle_start_with_windows(app: &tauri::AppHandle) {
+    let backend = app.state::<Backend>().inner().clone();
+    let controls = app.state::<TrayControls>().inner().clone();
+    let handle = app.state::<DesktopRuntime>().handle.clone();
+    let current = backend
+        .state
+        .settings
+        .try_read()
+        .map(|settings| settings.start_with_windows)
+        .unwrap_or(false);
+    let enabled = !current;
+    let _ = controls.startup.set_checked(enabled);
+    handle.spawn(async move {
+        if curator::set_start_with_windows_preference(&backend.state, enabled)
+            .await
+            .is_err()
+        {
+            let _ = controls.startup.set_checked(current);
+        }
+    });
 }
 
 #[derive(serde::Serialize)]
@@ -138,6 +294,7 @@ fn main() {
     };
     // Tauri resolves packaged resources independently of the process working directory.
     let shutdown_state = state.clone();
+    let background_launch = background_launch_requested();
     let handle = runtime.handle().clone();
     let protocol_handle = handle.clone();
     let app = tauri::Builder::default()
@@ -153,21 +310,105 @@ fn main() {
         ])
         .setup(move |app| {
             state.static_dir = app.path().resource_dir()?.join("static");
+            // This is intentionally started before the webview is created. The
+            // Tauri shell and headless binary share this exact listener, so a
+            // hidden/tray-only desktop process remains reachable to LAN and
+            // Tailscale clients without a second server.
+            handle
+                .block_on(curator::remote::start_http_server(&state))
+                .map_err(|error| std::io::Error::other(error.to_string()))?;
             app.manage(Backend {
                 app: curator::router(state.clone()),
                 state: state.clone(),
             });
+            app.manage(DesktopRuntime {
+                handle: handle.clone(),
+            });
+            app.manage(DesktopLifecycle::default());
             let completed = handle.block_on(async { state.settings.read().await.oobe_completed });
-            tauri::WebviewWindowBuilder::new(
+            // Windows startup starts in the tray without briefly flashing a
+            // webview. Users can always restore it from the tray menu.
+            create_main_window(&app.handle(), completed, !background_launch)?;
+
+            let tray_open = tauri::menu::MenuItem::with_id(
                 app,
-                "main",
-                tauri::WebviewUrl::App(if completed { "index.html" } else { "oobe.html" }.into()),
-            )
-            .title("Curator")
-            .inner_size(1440.0, 900.0)
-            .min_inner_size(960.0, 600.0)
-            .disable_drag_drop_handler()
-            .build()?;
+                "open-curator",
+                "Open Curator",
+                true,
+                None::<&str>,
+            )?;
+            let tray_status = tauri::menu::MenuItem::with_id(
+                app,
+                "download-status",
+                "Downloads: checking…",
+                false,
+                None::<&str>,
+            )?;
+            let tray_pause = tauri::menu::MenuItem::with_id(
+                app,
+                "pause-downloads",
+                "Pause Downloads",
+                true,
+                None::<&str>,
+            )?;
+            let start_with_windows = handle.block_on(async {
+                state.settings.read().await.start_with_windows
+            });
+            let tray_startup = tauri::menu::CheckMenuItem::with_id(
+                app,
+                "start-with-windows",
+                "Start with Windows",
+                true,
+                start_with_windows,
+                None::<&str>,
+            )?;
+            let tray_quit = tauri::menu::MenuItem::with_id(
+                app,
+                "quit-curator",
+                "Quit Curator",
+                true,
+                None::<&str>,
+            )?;
+            let tray_menu = tauri::menu::Menu::with_items(
+                app,
+                &[
+                    &tray_open,
+                    &tray_status,
+                    &tray_pause,
+                    &tray_startup,
+                    &tauri::menu::PredefinedMenuItem::separator(app)?,
+                    &tray_quit,
+                ],
+            )?;
+            let tray_controls = TrayControls {
+                status: tray_status,
+                pause: tray_pause,
+                startup: tray_startup,
+            };
+            app.manage(tray_controls.clone());
+            let mut tray_builder = tauri::tray::TrayIconBuilder::with_id("curator-tray")
+                .menu(&tray_menu)
+                .tooltip("Curator")
+                .show_menu_on_left_click(false)
+                .on_tray_icon_event(|tray, event| match event {
+                    tauri::tray::TrayIconEvent::Click {
+                        button: tauri::tray::MouseButton::Left,
+                        button_state: tauri::tray::MouseButtonState::Up,
+                        ..
+                    }
+                    | tauri::tray::TrayIconEvent::DoubleClick {
+                        button: tauri::tray::MouseButton::Left,
+                        ..
+                    } => open_curator(tray.app_handle()),
+                    _ => {}
+                });
+            if let Some(icon) = app.default_window_icon().cloned() {
+                tray_builder = tray_builder.icon(icon);
+            }
+            // Tauri retains a registered clone for the process lifetime; the
+            // local value can drop after build without making the icon vanish.
+            let _tray = tray_builder.build(app)?;
+
             let menu = tauri::menu::Menu::with_items(
                 app,
                 &[
@@ -183,7 +424,13 @@ fn main() {
                                 true,
                                 Some("CmdOrCtrl+N"),
                             )?,
-                            &tauri::menu::PredefinedMenuItem::quit(app, None)?,
+                            &tauri::menu::MenuItem::with_id(
+                                app,
+                                "quit-curator",
+                                "Quit Curator",
+                                true,
+                                None::<&str>,
+                            )?,
                         ],
                     )?,
                     &tauri::menu::Submenu::with_items(
@@ -201,10 +448,19 @@ fn main() {
                 ],
             )?;
             app.set_menu(menu)?;
+            spawn_tray_status_poller(state.clone(), tray_controls);
             Ok(())
         })
         .on_menu_event(|app, event| {
-            let _ = app.emit("desktop-menu", event.id().as_ref());
+            match event.id().as_ref() {
+                "open-curator" => open_curator(app),
+                "pause-downloads" => toggle_downloads(app),
+                "start-with-windows" => toggle_start_with_windows(app),
+                "quit-curator" => request_explicit_quit(app),
+                _ => {
+                    let _ = app.emit("desktop-menu", event.id().as_ref());
+                }
+            }
         })
         .register_asynchronous_uri_scheme_protocol("curator", move |context, request, responder| {
             let backend = context.app_handle().state::<Backend>().inner().clone();
@@ -275,9 +531,42 @@ fn main() {
             return;
         }
     };
-    app.run(move |_, event| {
-        if let tauri::RunEvent::Exit = event {
-            runtime.block_on(curator::shutdown(&shutdown_state));
+    app.run(move |app_handle, event| match event {
+        tauri::RunEvent::ExitRequested { api, .. } => {
+            if !app_handle
+                .state::<DesktopLifecycle>()
+                .explicit_quit
+                .load(Ordering::Acquire)
+            {
+                api.prevent_exit();
+            }
         }
+        tauri::RunEvent::WindowEvent {
+            label,
+            event: tauri::WindowEvent::CloseRequested { api, .. },
+            ..
+        } if label == "main" => {
+            if !app_handle
+                .state::<DesktopLifecycle>()
+                .explicit_quit
+                .load(Ordering::Acquire)
+            {
+                let keep_running_in_tray = app_handle
+                    .state::<Backend>()
+                    .state
+                    .settings
+                    .try_read()
+                    .map(|settings| settings.keep_running_in_tray)
+                    .unwrap_or(true);
+                if keep_running_in_tray {
+                    api.prevent_close();
+                    if let Some(window) = app_handle.get_webview_window("main") {
+                        let _ = window.hide();
+                    }
+                }
+            }
+        }
+        tauri::RunEvent::Exit => runtime.block_on(curator::shutdown(&shutdown_state)),
+        _ => {}
     });
 }

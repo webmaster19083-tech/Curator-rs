@@ -234,15 +234,13 @@ browse it immediately; anything you like there can be added to the real
 library with one click. Useful for previewing before committing disk space.
 
 
-COCK HERO SESSION (TIER 3)
------------------------------
-Open /ch/ in your browser for the Cock Hero session UI. Configure tag/source
-filters, a pacing profile, and session duration. Cock hero fetches a filtered
-playlist from curator's /api/ch/playlist endpoint and drives the display —
-advancing media, playing video clips, layering a HUD with pace cues and
-elapsed time. Beat sync uses the Web Audio API, entirely client-side.
-
-To enable session logging, set "ch_log_sessions": true in Settings.
+GOON SESSION
+-------------
+Choose Play → GOON in Curator for an interactive, data-driven session. It
+uses the normal playback engine and a short-form, human-rating-aware media
+selection, with stages, timers, prompts, intensity changes, and a cooldown.
+The last Play mode is remembered. Optional session logging is controlled by
+the `goon_log_sessions` setting.
 
 
 LOGS & FINDING ERRORS

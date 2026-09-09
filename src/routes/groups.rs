@@ -38,6 +38,7 @@ pub async fn list(
         .prepare(
             "SELECT g.*, \
             (SELECT COUNT(*) FROM sources s WHERE s.group_id = g.id) AS source_count, \
+            (SELECT COUNT(*) FROM media_groups mg WHERE mg.group_id = g.id) AS media_count, \
             (SELECT GROUP_CONCAT(t.name, ',') FROM group_tags gt \
              JOIN tags t ON t.id = gt.tag_id WHERE gt.group_id = g.id) AS tags_csv \
          FROM groups g ORDER BY g.added_at",

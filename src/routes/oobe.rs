@@ -116,6 +116,9 @@ async fn build_status(state: &Arc<AppState>) -> Value {
             "default_slideshow_loop": settings.default_slideshow_loop,
             "default_slideshow_shuffle": settings.default_slideshow_shuffle,
             "nsfw_filter_enabled": settings.nsfw_filter_enabled,
+            "max_clip_length_secs": settings.max_clip_length_secs,
+            "start_with_windows": settings.start_with_windows,
+            "keep_running_in_tray": settings.keep_running_in_tray,
         },
     })
 }
@@ -223,6 +226,9 @@ pub struct OobeSettingsBody {
     pub default_slideshow_loop: Option<bool>,
     pub default_slideshow_shuffle: Option<bool>,
     pub nsfw_filter_enabled: Option<bool>,
+    pub max_clip_length_secs: Option<u32>,
+    pub start_with_windows: Option<bool>,
+    pub keep_running_in_tray: Option<bool>,
 }
 
 /// A configured executable is either a bare command name (resolved via
@@ -282,6 +288,12 @@ pub async fn save_settings(
         })?;
     }
 
+    if let Some(enabled) = body.start_with_windows {
+        crate::set_start_with_windows_preference(&state, enabled)
+            .await
+            .map_err(|error| err(StatusCode::BAD_REQUEST, error))?;
+    }
+
     // ── settings.json fields (reuses the exact same field semantics as
     //    PATCH /api/settings — see routes/settings.rs) ──────────────────────
     {
@@ -312,6 +324,15 @@ pub async fn save_settings(
         }
         if let Some(v) = body.nsfw_filter_enabled {
             settings.nsfw_filter_enabled = v;
+        }
+        if let Some(v) = body.max_clip_length_secs {
+            settings.max_clip_length_secs = v.clamp(5, 3600);
+        }
+        if let Some(v) = body.start_with_windows {
+            settings.start_with_windows = v;
+        }
+        if let Some(v) = body.keep_running_in_tray {
+            settings.keep_running_in_tray = v;
         }
         db::save_settings(&state.data_dir, &settings);
     }

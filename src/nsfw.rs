@@ -371,8 +371,9 @@ pub(crate) fn persist_score(
     }
     conn.execute(
         "UPDATE media SET auto_rating=?1, auto_rating_score=?2,
-        rating=CASE WHEN rating_reviewed=0 THEN ?1 ELSE rating END,
-        rating_source=CASE WHEN rating_reviewed=0 THEN 'auto' ELSE rating_source END,
+        rating=CASE WHEN human_rating IS NULL THEN ?1 ELSE human_rating END,
+        rating_source=CASE WHEN human_rating IS NULL THEN 'auto' ELSE 'human' END,
+        rating_reviewed=CASE WHEN human_rating IS NULL THEN 0 ELSE 1 END,
         nsfw_state='done' WHERE id=?3 AND downloaded=1 AND missing=0",
         rusqlite::params![score_to_rating(score), score, id],
     )

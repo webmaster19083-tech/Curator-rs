@@ -25,10 +25,11 @@ pub async fn create(
     Path(id): Path<i64>,
     Json(body): Json<ClipBody>,
 ) -> ApiResult {
-    if !(15..=60).contains(&body.seconds) {
+    let max_clip_length = state.settings.read().await.max_clip_length_secs;
+    if body.seconds < 5 || body.seconds > max_clip_length {
         return Err((
             StatusCode::BAD_REQUEST,
-            Json(json!({"error":"Clip length must be 15 to 60 seconds"})),
+            Json(json!({"error":format!("Clip length must be 5 to {max_clip_length} seconds")})),
         ));
     }
     let permit = CLIP_SLOT.clone().try_acquire_owned().map_err(|_| {

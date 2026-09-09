@@ -1,4 +1,3 @@
-mod chpack;
 mod config;
 mod db;
 #[cfg(test)]
@@ -11,16 +10,20 @@ mod media_files;
 mod nsfw;
 mod oobe;
 mod process;
-mod routes;
+mod provenance;
+pub mod remote;
+pub mod routes;
 mod slug;
+mod startup;
 #[cfg(test)]
 mod test_support;
 mod thumb_worker;
 mod virtual_clips;
 
-use std::collections::{HashMap, HashSet};
+use std::collections::{HashMap, HashSet, VecDeque};
 use std::path::PathBuf;
 use std::sync::{atomic::AtomicBool, Arc};
+use std::time::Instant;
 
 use anyhow::Result;
 use r2d2::Pool;
@@ -35,6 +38,24 @@ pub static NSFW_WORKER_PY: &str = include_str!("../nsfw_worker.py");
 
 pub type GroupTagCache = Arc<RwLock<Option<Arc<HashMap<i64, HashSet<String>>>>>>;
 
+pub use startup::set_start_with_windows;
+
+/// Apply the Windows Run registration and persist the matching Curator
+/// preference as one operation. Keeping this in the backend prevents the tray,
+/// Settings dialog, and OOBE from drifting into contradictory states.
+pub async fn set_start_with_windows_preference(
+    state: &AppState,
+    enabled: bool,
+) -> std::result::Result<(), String> {
+    tokio::task::spawn_blocking(move || startup::set_start_with_windows(enabled))
+        .await
+        .map_err(|_| "Windows startup update did not complete".to_string())??;
+    let mut settings = state.settings.write().await;
+    settings.start_with_windows = enabled;
+    db::save_settings(&state.data_dir, &settings);
+    Ok(())
+}
+
 /// Shared application state passed to every Axum route handler.
 #[derive(Clone)]
 pub struct AppState {
@@ -43,6 +64,9 @@ pub struct AppState {
     pub group_tag_cache: GroupTagCache,
     pub shutdown: tokio_util::sync::CancellationToken,
     pub download_tasks: tokio_util::task::TaskTracker,
+    /// Listener tasks are intentionally separate from downloads so a desktop
+    /// window can disappear without affecting the shared HTTP server.
+    pub server_tasks: tokio_util::task::TaskTracker,
     pub source_cancellations: Arc<Mutex<HashMap<i64, tokio_util::sync::CancellationToken>>>,
     pub running_sources: Arc<Mutex<HashSet<i64>>>,
     pub downloads_paused: Arc<AtomicBool>,
@@ -55,6 +79,16 @@ pub struct AppState {
     pub download_semaphore: Arc<Mutex<Arc<Semaphore>>>,
     /// Limits concurrent populate_placeholder scans to 3, independent of real downloads.
     pub placeholder_semaphore: Arc<Semaphore>,
+    /// Provider-wide cooldowns complement persisted source retries. They are
+    /// process-local by design; source-level retry timestamps survive restart.
+    pub download_cooldowns: Arc<Mutex<HashMap<String, Instant>>>,
+    /// Tracks the one process-owned HTTP listener used by desktop, LAN, and
+    /// Tailscale clients.
+    pub remote_server: Arc<remote::ServerStatus>,
+    /// A small cross-mode history makes a freshly randomized session avoid
+    /// picking the item that just played. It is intentionally ephemeral: media
+    /// is not private activity telemetry and a restart begins a new session.
+    pub playback_history: Arc<Mutex<VecDeque<i64>>>,
     pub settings: Arc<RwLock<db::Settings>>,
     pub data_dir: PathBuf,
     pub library_dir: PathBuf,
@@ -225,6 +259,7 @@ pub async fn initialize() -> Result<AppState> {
         group_tag_cache: Arc::new(RwLock::new(None)),
         shutdown: tokio_util::sync::CancellationToken::new(),
         download_tasks: tokio_util::task::TaskTracker::new(),
+        server_tasks: tokio_util::task::TaskTracker::new(),
         source_cancellations: Arc::new(Mutex::new(HashMap::new())),
         running_sources: Arc::new(Mutex::new(HashSet::new())),
         downloads_paused: Arc::new(AtomicBool::new(false)),
@@ -233,6 +268,9 @@ pub async fn initialize() -> Result<AppState> {
         paused_source_ids: Arc::new(Mutex::new(HashSet::new())),
         download_semaphore: Arc::new(Mutex::new(Arc::new(Semaphore::new(max_concurrent)))),
         placeholder_semaphore: Arc::new(Semaphore::new(3)),
+        download_cooldowns: Arc::new(Mutex::new(HashMap::new())),
+        remote_server: Arc::new(remote::ServerStatus::new(remote::DEFAULT_SERVER_PORT)),
+        playback_history: Arc::new(Mutex::new(VecDeque::with_capacity(24))),
         settings: Arc::new(RwLock::new(settings)),
         data_dir: data_dir.clone(),
         library_dir: library_dir.clone(),
@@ -307,7 +345,25 @@ pub async fn shutdown(state: &AppState) {
         worker.shutdown().await;
     }
     state.download_tasks.close();
+    state.server_tasks.close();
     state.download_tasks.wait().await;
+    state.server_tasks.wait().await;
+}
+
+impl AppState {
+    /// Remember only a bounded recent window. Callers use the last entry to
+    /// avoid an immediate duplicate while retaining enough variety for feeds.
+    pub async fn remember_playback(&self, media_id: i64) {
+        const HISTORY_LIMIT: usize = 24;
+        let mut history = self.playback_history.lock().await;
+        if history.back().copied() == Some(media_id) {
+            return;
+        }
+        history.push_back(media_id);
+        while history.len() > HISTORY_LIMIT {
+            history.pop_front();
+        }
+    }
 }
 
 pub async fn library_summary(state: &AppState) -> Result<serde_json::Value> {

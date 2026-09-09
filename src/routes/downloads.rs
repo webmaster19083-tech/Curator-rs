@@ -18,10 +18,30 @@ pub async fn status(State(state): State<Arc<AppState>>) -> Json<Value> {
         .iter()
         .cloned()
         .collect();
+    let (queued_count, retrying_count) = state
+        .pool
+        .get()
+        .ok()
+        .and_then(|conn| {
+            conn.query_row(
+                "SELECT SUM(status='pending'), SUM(status='retrying') FROM sources",
+                [],
+                |row| {
+                    Ok((
+                        row.get::<_, Option<i64>>(0)?.unwrap_or(0),
+                        row.get::<_, Option<i64>>(1)?.unwrap_or(0),
+                    ))
+                },
+            )
+            .ok()
+        })
+        .unwrap_or((0, 0));
 
     Json(json!({
         "paused":       paused,
         "active_count": active,
+        "queued_count": queued_count,
+        "retrying_count": retrying_count,
         "paused_source_ids": paused_ids,
     }))
 }
@@ -31,6 +51,16 @@ pub async fn status(State(state): State<Arc<AppState>>) -> Json<Value> {
 pub async fn pause(State(state): State<Arc<AppState>>) -> Json<Value> {
     let _control = state.download_control.lock().await;
     state.downloads_paused.store(true, Ordering::SeqCst);
+
+    // Delayed retry timers have no child PID to kill.  Persist their paused
+    // state now so a later Resume picks them up immediately rather than
+    // waiting for a stale timer (or losing them across a restart).
+    if let Ok(conn) = state.pool.get() {
+        let _ = conn.execute(
+            "UPDATE sources SET status='paused' WHERE status IN ('pending','retrying')",
+            [],
+        );
+    }
 
     // Kill all running gallery-dl processes and mark their sources as paused
     let procs: Vec<(i64, u32)> = {
@@ -151,5 +181,27 @@ mod tests {
         let (a, b) = tokio::join!(resume(State(state.clone())), resume(State(state.clone())));
         let total = a.0["requeued"].as_u64().unwrap_or(0) + b.0["requeued"].as_u64().unwrap_or(0);
         assert_eq!(total, 1);
+    }
+
+    #[tokio::test]
+    async fn pause_converts_delayed_retries_to_resumable_work() {
+        let dir = tempfile::tempdir().unwrap();
+        let state = crate::test_support::state(dir.path());
+        crate::test_support::source(&state);
+        let conn = state.pool.get().unwrap();
+        conn.execute(
+            "UPDATE sources SET status='retrying',retry_attempts=2,retry_at=unixepoch()+600 WHERE id=1",
+            [],
+        )
+        .unwrap();
+
+        let response = pause(State(state.clone())).await.0;
+        assert_eq!(response["paused"], true);
+        let status: String = conn
+            .query_row("SELECT status FROM sources WHERE id=1", [], |row| {
+                row.get(0)
+            })
+            .unwrap();
+        assert_eq!(status, "paused");
     }
 }

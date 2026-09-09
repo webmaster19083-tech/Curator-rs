@@ -1,13 +1,16 @@
-pub mod ch;
 pub mod clips;
 pub mod downloads;
 pub mod export;
+pub mod goon;
 pub mod groups;
 pub mod library;
 pub mod media;
 pub mod misc;
 pub mod oobe;
+pub mod remote;
+pub mod search;
 pub mod settings;
+pub mod source_tags;
 pub mod sources;
 pub mod tags;
 pub mod thumb;
@@ -37,6 +40,7 @@ pub fn build_router(state: Arc<AppState>) -> Router {
         .route("/api/oobe/reset", post(oobe::reset))
         // ── Media ──────────────────────────────────────────────────────────
         .route("/api/media", get(media::list))
+        .route("/api/media/bulk", post(media::bulk))
         .route("/api/media/:id/clips", post(clips::create))
         .route("/api/clip-jobs/:id", get(clips::status))
         .route("/api/media/:id/rating", put(media::set_rating))
@@ -49,7 +53,20 @@ pub fn build_router(state: Arc<AppState>) -> Router {
         .route("/api/thumb/:id", get(thumb::get_thumbnail))
         // ── Tags ───────────────────────────────────────────────────────────
         .route("/api/tags", get(tags::list))
+        .route("/api/tags/quick", get(tags::quick))
         .route("/api/tags/:id", delete(tags::delete_tag))
+        .route(
+            "/api/source-tags/review",
+            get(source_tags::review_list).post(source_tags::review),
+        )
+        .route(
+            "/api/source-tag-rules",
+            get(source_tags::list_rules).post(source_tags::save_rule),
+        )
+        .route(
+            "/api/source-tag-rules/:id",
+            delete(source_tags::delete_rule),
+        )
         // ── Sources ────────────────────────────────────────────────────────
         .route("/api/sources", get(sources::list).post(sources::add))
         .route("/api/sources/resync-all", post(sources::resync_all))
@@ -62,6 +79,9 @@ pub fn build_router(state: Arc<AppState>) -> Router {
         .route("/api/sources/:id/group", patch(sources::set_group))
         .route("/api/sources/:id/resync", post(sources::resync))
         .route("/api/sources/:id/log", get(misc::source_log))
+        // ── Unified discovery ───────────────────────────────────────────────
+        .route("/api/search", get(search::search))
+        .route("/api/search/download", post(search::download_selected))
         // ── Groups ─────────────────────────────────────────────────────────
         .route("/api/groups", get(groups::list).post(groups::create))
         .route(
@@ -76,16 +96,15 @@ pub fn build_router(state: Arc<AppState>) -> Router {
         .route("/api/downloads/resume", post(downloads::resume))
         // ── Settings ───────────────────────────────────────────────────────
         .route("/api/settings", get(settings::get).patch(settings::patch))
+        .route("/api/remote-access", get(remote::status))
         // ── Export / Import ────────────────────────────────────────────────
         .route("/api/export", get(export::export_sources))
-        .route("/api/export/chpack", post(export::export_chpack))
         .route("/api/import", post(export::import_sources))
         // ── Stats / Log ────────────────────────────────────────────────────
         .route("/api/stats", get(misc::stats))
         .route("/api/log", get(misc::get_log))
-        // ── Cock Hero (Tier 3) ─────────────────────────────────────────────
-        .route("/api/ch/playlist", get(ch::get_playlist))
-        .route("/api/ch/session", post(ch::log_session))
-        .route("/api/ch/sessions", get(ch::get_sessions))
+        // ── Curator interactive sessions ────────────────────────────────────
+        .route("/api/goon/session", post(goon::start))
+        .route("/api/goon/session/complete", post(goon::complete))
         .with_state(state)
 }

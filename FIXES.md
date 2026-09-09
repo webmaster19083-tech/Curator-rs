@@ -50,7 +50,6 @@ Filters: `tag` is one exact normalized tag; `tags` is a comma-separated AND list
 - `src/routes/export.rs`: release DB connection before async invalidation; Clippy cleanup.
 - `src/routes/mod.rs`: library/wizard module routing.
 - `src/routes/settings.rs`: supplied setup-wizard settings and Clippy cleanup.
-- `src/chpack.rs`: derive the unchanged default implementation to keep Clippy clean.
 - `src/config.rs`: supplied shared setup configuration; Clippy cleanup.
 - `src/oobe.rs`: supplied setup-wizard checks and compatibility tests.
 - `src/routes/oobe.rs`: supplied setup-wizard routes.

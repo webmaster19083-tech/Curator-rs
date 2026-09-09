@@ -1,4 +1,5 @@
 use crate::*;
+use std::collections::VecDeque;
 
 pub fn state(root: &std::path::Path) -> Arc<AppState> {
     for dir in ["library", "archives", "thumbnails"] {
@@ -9,6 +10,7 @@ pub fn state(root: &std::path::Path) -> Arc<AppState> {
         group_tag_cache: Arc::new(RwLock::new(None)),
         shutdown: tokio_util::sync::CancellationToken::new(),
         download_tasks: tokio_util::task::TaskTracker::new(),
+        server_tasks: tokio_util::task::TaskTracker::new(),
         source_cancellations: Arc::new(Mutex::new(HashMap::new())),
         running_sources: Arc::new(Mutex::new(HashSet::new())),
         downloads_paused: Arc::new(AtomicBool::new(false)),
@@ -17,6 +19,9 @@ pub fn state(root: &std::path::Path) -> Arc<AppState> {
         paused_source_ids: Arc::new(Mutex::new(HashSet::new())),
         download_semaphore: Arc::new(Mutex::new(Arc::new(Semaphore::new(2)))),
         placeholder_semaphore: Arc::new(Semaphore::new(1)),
+        download_cooldowns: Arc::new(Mutex::new(HashMap::new())),
+        remote_server: Arc::new(remote::ServerStatus::new(remote::DEFAULT_SERVER_PORT)),
+        playback_history: Arc::new(Mutex::new(VecDeque::with_capacity(24))),
         settings: Arc::new(RwLock::new(db::Settings::default())),
         data_dir: root.into(),
         library_dir: root.join("library"),

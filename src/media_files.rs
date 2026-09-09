@@ -18,6 +18,14 @@ pub fn stamp(path: &Path) -> Option<String> {
     Some(format!("{}:{:?}", m.len(), m.modified().ok()))
 }
 
+/// ISO-8601 filesystem modification time for sorting and display. Failure to
+/// read the timestamp is non-fatal; the previous value remains useful.
+pub fn modified_at(path: &Path) -> Option<String> {
+    let metadata = path.metadata().ok()?;
+    let modified = metadata.modified().ok()?;
+    Some(chrono::DateTime::<chrono::Utc>::from(modified).to_rfc3339())
+}
+
 pub fn mark_missing(conn: &Connection, id: i64) -> Result<()> {
     conn.execute("UPDATE media SET missing=1, downloaded=0, file_size_bytes=NULL, nsfw_state='missing' WHERE id=?1 AND downloaded=1", [id])?;
     Ok(())
@@ -72,8 +80,10 @@ pub fn reconcile_cancellable(
                 )?;
                 if old_stamp.as_ref() != Some(&current) || was_missing {
                     tx.execute("UPDATE media SET downloaded=1, missing=0, file_stamp=?1,
+                        modified_at=COALESCE(?2,modified_at),downloaded_at=COALESCE(downloaded_at,?3),
                         nsfw_state='pending', nsfw_attempts=0, nsfw_retry_at=0, duration_attempted=0,
-                        duration_secs=CASE WHEN file_stamp IS NULL THEN duration_secs ELSE NULL END WHERE id=?2", params![current, id])?;
+                        duration_secs=CASE WHEN file_stamp IS NULL THEN duration_secs ELSE NULL END WHERE id=?4",
+                        params![current,modified_at(&path),crate::db::now_iso(),id])?;
                 }
             } else if !was_missing && !path.is_file() {
                 // Permission failures are not evidence that a file was deleted.

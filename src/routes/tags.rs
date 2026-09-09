@@ -130,6 +130,57 @@ pub async fn list(
     Ok(Json(json!({ "tags": result })))
 }
 
+/// Compact tag suggestions for the library toolbar. The full tag endpoint is
+/// intentionally more expensive because it calculates inherited-group usage;
+/// quick buttons should remain responsive on a large collection.
+pub async fn quick(
+    State(state): State<Arc<AppState>>,
+) -> Result<Json<Value>, (StatusCode, Json<Value>)> {
+    let conn = state.pool.get().map_err(db_err)?;
+    let mut statement = conn
+        .prepare(
+            "SELECT t.id,t.name,COUNT(DISTINCT mt.media_id) AS media_count,t.last_used_at,
+                    COALESCE(MAX(CASE p.provenance
+                        WHEN 'human' THEN 4 WHEN 'human_edited' THEN 4
+                        WHEN 'source_approved' THEN 3 WHEN 'automatic' THEN 2
+                        ELSE 1 END),1) AS provenance_priority
+             FROM tags t LEFT JOIN media_tags mt ON mt.tag_id=t.id
+             LEFT JOIN media_tag_provenance p ON p.media_id=mt.media_id AND p.tag_id=mt.tag_id
+             GROUP BY t.id,t.name,t.last_used_at",
+        )
+        .map_err(db_err)?;
+    let rows: Vec<Value> = statement
+        .query_map([], |row| {
+            Ok(json!({
+                "id":row.get::<_,i64>(0)?,"name":row.get::<_,String>(1)?,
+                "media_count":row.get::<_,i64>(2)?,"last_used_at":row.get::<_,Option<String>>(3)?,
+                "provenance_priority":row.get::<_,i64>(4)?,
+            }))
+        })
+        .map_err(db_err)?
+        .filter_map(Result::ok)
+        .collect();
+    let mut common = rows.clone();
+    common.sort_by(|a, b| {
+        b["provenance_priority"]
+            .as_i64()
+            .cmp(&a["provenance_priority"].as_i64())
+            .then_with(|| b["media_count"].as_i64().cmp(&a["media_count"].as_i64()))
+            .then_with(|| a["name"].as_str().cmp(&b["name"].as_str()))
+    });
+    common.truncate(12);
+    let mut recent = rows;
+    recent.sort_by(|a, b| {
+        b["provenance_priority"]
+            .as_i64()
+            .cmp(&a["provenance_priority"].as_i64())
+            .then_with(|| b["last_used_at"].as_str().cmp(&a["last_used_at"].as_str()))
+            .then_with(|| a["name"].as_str().cmp(&b["name"].as_str()))
+    });
+    recent.truncate(12);
+    Ok(Json(json!({"common":common,"recent":recent})))
+}
+
 // ─── DELETE /api/tags/:id ────────────────────────────────────────────────────
 
 pub async fn delete_tag(

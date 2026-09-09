@@ -180,11 +180,14 @@ fn create_main_window(app: &tauri::AppHandle, completed: bool) -> tauri::Result<
 }
 
 fn open_curator(app: &tauri::AppHandle) {
+    tracing::info!("Curator desktop: opening main window");
     if let Some(window) = app.get_webview_window("main") {
+        tracing::info!("Curator desktop: restoring existing main window");
         let _ = window.show();
         let _ = window.set_focus();
         return;
     }
+    tracing::info!("Curator desktop: creating first main window");
     let completed = app
         .state::<Backend>()
         .state
@@ -251,18 +254,25 @@ async fn refresh_tray_controls(state: &curator::AppState, controls: &TrayControl
     }
 }
 
-fn spawn_tray_status_poller(state: curator::AppState, controls: TrayControls) {
+fn spawn_tray_status_poller(
+    state: curator::AppState,
+    controls: TrayControls,
+    runtime: tokio::runtime::Handle,
+) {
     let cancellation = state.shutdown.clone();
     let server_tasks = state.server_tasks.clone();
-    server_tasks.spawn(async move {
-        loop {
-            refresh_tray_controls(&state, &controls).await;
-            tokio::select! {
-                _ = cancellation.cancelled() => break,
-                _ = tokio::time::sleep(Duration::from_secs(2)) => {}
+    server_tasks.spawn_on(
+        async move {
+            loop {
+                refresh_tray_controls(&state, &controls).await;
+                tokio::select! {
+                    _ = cancellation.cancelled() => break,
+                    _ = tokio::time::sleep(Duration::from_secs(2)) => {}
+                }
             }
-        }
-    });
+        },
+        &runtime,
+    );
 }
 
 fn toggle_downloads(app: &tauri::AppHandle) {
@@ -502,8 +512,14 @@ fn main() {
                 true,
                 None::<&str>,
             )?;
-            let start_with_windows =
-                handle.block_on(async { state.settings.read().await.start_with_windows });
+            // Do not block the native setup thread on an async lock. The
+            // tray poller refreshes this shortly after startup if a settings
+            // write is in progress.
+            let start_with_windows = state
+                .settings
+                .try_read()
+                .map(|settings| settings.start_with_windows)
+                .unwrap_or(false);
             let tray_startup = tauri::menu::CheckMenuItem::with_id(
                 app,
                 "start-with-windows",
@@ -536,6 +552,7 @@ fn main() {
                 startup: tray_startup,
             };
             app.manage(tray_controls.clone());
+            tracing::info!("Curator desktop setup: creating tray icon");
             let mut tray_builder = tauri::tray::TrayIconBuilder::with_id("curator-tray")
                 .menu(&tray_menu)
                 .tooltip("Curator")
@@ -558,6 +575,7 @@ fn main() {
             // Tauri retains a registered clone for the process lifetime; the
             // local value can drop after build without making the icon vanish.
             let _tray = tray_builder.build(app)?;
+            tracing::info!("Curator desktop setup: tray icon ready");
 
             let menu = tauri::menu::Menu::with_items(
                 app,
@@ -598,7 +616,11 @@ fn main() {
                 ],
             )?;
             app.set_menu(menu)?;
-            spawn_tray_status_poller(state.clone(), tray_controls);
+            tracing::info!("Curator desktop setup: application menu ready");
+            // Native menu mutations must wait until the Windows event loop is
+            // accepting messages. Starting the poller here can race the first
+            // `Ready` event on WebView2/Windows combinations and strand the
+            // shell before the UI callback is reached.
             Ok(())
         })
         .on_menu_event(|app, event| match event.id().as_ref() {
@@ -679,9 +701,20 @@ fn main() {
             return;
         }
     };
+    tracing::info!(background_launch, "Curator desktop: Tauri app built");
     instance.listen_for_activation(app.handle().clone());
+    tracing::info!("Curator desktop: entering native event loop");
     app.run(move |app_handle, event| match event {
-        tauri::RunEvent::Ready if !background_launch => open_curator(app_handle),
+        tauri::RunEvent::Ready => {
+            tracing::info!(background_launch, "Curator desktop: received Ready event");
+            let backend = app_handle.state::<Backend>().inner().clone();
+            let controls = app_handle.state::<TrayControls>().inner().clone();
+            let runtime = app_handle.state::<DesktopRuntime>().handle.clone();
+            spawn_tray_status_poller(backend.state, controls, runtime);
+            if !background_launch {
+                open_curator(app_handle);
+            }
+        }
         tauri::RunEvent::ExitRequested { api, .. } => {
             if !app_handle
                 .state::<DesktopLifecycle>()
@@ -716,7 +749,10 @@ fn main() {
                 }
             }
         }
-        tauri::RunEvent::Exit => runtime.block_on(curator::shutdown(&shutdown_state)),
+        tauri::RunEvent::Exit => {
+            tracing::info!("Curator desktop: native event loop is exiting");
+            runtime.block_on(curator::shutdown(&shutdown_state))
+        }
         _ => {}
     });
 }

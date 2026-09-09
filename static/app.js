@@ -34,7 +34,34 @@ function pad4(n) { return String(n).padStart(4, '0'); }
 // vanish from every category — so: clip = anything up to 90s, video =
 // anything over. Tighten CLIP_MIN_SECONDS below if a hard 15s floor turns
 // out to matter more than that in practice.
-const CLIP_MAX_SECONDS = 90;
+// One server-persisted boundary defines Clip versus Video everywhere. The
+// fallback only covers a UI paint before settings have loaded.
+function clipMaxSeconds() {
+  const value = Number(appSettings?.max_clip_length_secs);
+  return Number.isFinite(value) && value >= 5 ? value : 60;
+}
+
+// Playback modes share this small history. It prevents an obvious immediate
+// repeat at mode/session boundaries while allowing reuse once a collection has
+// been exhausted. A one-item queue is deliberately the only exception.
+const playbackHistory = [];
+function preparePlaybackItems(items, shuffle = false) {
+  const unique = [];
+  const ids = new Set();
+  for (const item of items || []) {
+    if (!item || ids.has(item.id)) continue;
+    ids.add(item.id); unique.push(item);
+  }
+  if (shuffle && unique.length > 1) shuffleArray(unique);
+  const last = playbackHistory.at(-1);
+  if (unique.length > 1 && unique[0]?.id === last) [unique[0], unique[1]] = [unique[1], unique[0]];
+  return unique;
+}
+function rememberPlaybackItem(item) {
+  if (!item?.id || playbackHistory.at(-1) === item.id) return;
+  playbackHistory.push(item.id);
+  if (playbackHistory.length > 24) playbackHistory.splice(0, playbackHistory.length - 24);
+}
 
 function mediaMatchesTypeFilter(item, typeFilter) {
   if (typeFilter === 'all') return true;
@@ -43,8 +70,8 @@ function mediaMatchesTypeFilter(item, typeFilter) {
   // Unknown durations stay visible under Videos until metadata is available.
   if (item.duration_secs == null) return typeFilter === 'video';
   return typeFilter === 'clip'
-    ? item.duration_secs <= CLIP_MAX_SECONDS
-    : item.duration_secs > CLIP_MAX_SECONDS;
+    ? item.duration_secs <= clipMaxSeconds()
+    : item.duration_secs > clipMaxSeconds();
 }
 
 function reportVideoDuration(video, item) {
@@ -150,9 +177,12 @@ const ss = {
 
 let appSettings = {
   max_concurrent: 6,
+  max_clip_length_secs: 60,
   default_slideshow_speed: 3000,
   default_slideshow_loop: true,
   default_slideshow_shuffle: false,
+  start_with_windows: false,
+  keep_running_in_tray: true,
   theme: 'system',
 };
 
@@ -188,6 +218,7 @@ async function loadAppSettings() {
   }
   appSettings.theme = normalizeTheme(appSettings.theme);
   applyTheme(appSettings.theme);
+  configureClipLengthControls();
 
   // Seed both the live slideshow state (used directly by the portrait
   // wall, which may never touch the slideshow's own controls) and the
@@ -201,6 +232,18 @@ async function loadAppSettings() {
   el('#ss-speed').value = String(appSettings.default_slideshow_speed);
   el('#ss-loop').checked = appSettings.default_slideshow_loop;
   el('#ss-shuffle').checked = appSettings.default_slideshow_shuffle;
+}
+
+function configureClipLengthControls() {
+  const select = el('#clip-seconds');
+  if (!select) return;
+  const maximum = clipMaxSeconds();
+  const values = [...new Set([5, 15, 30, 45, 60, maximum].filter((value) => value >= 5 && value <= maximum))]
+    .sort((a, b) => a - b);
+  const previous = Number(select.value);
+  select.replaceChildren(...values.map((value) => new Option(`${value}s`, String(value), false, value === Math.min(previous || maximum, maximum))));
+  const clipsButton = el('#create-clips-btn');
+  if (clipsButton) clipsButton.title = `Create virtual clips up to ${maximum} seconds. The original video is preserved.`;
 }
 
 // "system" isn't a real palette — it resolves to the OS's own light/dark
@@ -273,7 +316,6 @@ function bindGlobalUI() {
   el('#settings-run-setup-again').addEventListener('click', runSetupAgain);
 
   el('#export-btn').addEventListener('click', exportSources);
-  el('#chpack-export-btn').addEventListener('click', exportChpack);
   el('#import-trigger-btn').addEventListener('click', triggerImportPicker);
   el('#import-file-input').addEventListener('change', handleImportFile);
   el('#export-reminder-export-btn').addEventListener('click', exportSources);
@@ -916,12 +958,16 @@ async function openSettingsModal() {
     toast('Could not load current settings: ' + e.message, true);
   }
   el('#settings-max-concurrent').value = appSettings.max_concurrent;
+  el('#settings-max-clip-length').value = appSettings.max_clip_length_secs || 60;
   el('#settings-theme').value = appSettings.theme;
   el('#settings-default-speed').value = appSettings.default_slideshow_speed;
   el('#settings-default-loop').checked = !!appSettings.default_slideshow_loop;
   el('#settings-default-shuffle').checked = !!appSettings.default_slideshow_shuffle;
   el('#settings-export-reminder-days').value = appSettings.export_reminder_days;
   el('#settings-nsfw-filter-enabled').checked = !!appSettings.nsfw_filter_enabled;
+  el('#settings-start-with-windows').checked = !!appSettings.start_with_windows;
+  el('#settings-keep-running-in-tray').checked = appSettings.keep_running_in_tray !== false;
+  renderRemoteAccessStatus();
   el('#settings-modal').hidden = false;
 }
 function closeSettingsModal() { el('#settings-modal').hidden = true; }
@@ -935,22 +981,60 @@ async function saveSettings() {
   const nsfwFilterChanged = !!appSettings.nsfw_filter_enabled !== nsfwFilterEnabled;
   const body = {
     max_concurrent: maxConcurrent,
+    max_clip_length_secs: Math.max(5, Math.min(3600, parseInt(el('#settings-max-clip-length').value, 10) || 60)),
     theme: el('#settings-theme').value,
     default_slideshow_speed: parseInt(el('#settings-default-speed').value, 10),
     default_slideshow_loop: el('#settings-default-loop').checked,
     default_slideshow_shuffle: el('#settings-default-shuffle').checked,
     export_reminder_days: reminderDays,
     nsfw_filter_enabled: nsfwFilterEnabled,
+    start_with_windows: el('#settings-start-with-windows').checked,
+    keep_running_in_tray: el('#settings-keep-running-in-tray').checked,
   };
   try {
     const data = await api('/api/settings', { method: 'PATCH', body: JSON.stringify(body) });
     appSettings = { ...appSettings, ...data };
     applyTheme(appSettings.theme);
+    configureClipLengthControls();
     closeSettingsModal();
     toast(nsfwFilterChanged ? 'Settings saved — restart Curator for NSFW auto-rating to take effect' : 'Settings saved');
     renderExportReminderBanner();
   } catch (e) {
     toast('Could not save settings: ' + e.message, true);
+  }
+}
+
+async function renderRemoteAccessStatus() {
+  const node = el('#settings-remote-access');
+  if (!node) return;
+  node.textContent = 'Checking server status…';
+  try {
+    const info = await api('/api/remote-access');
+    const urls = [
+      ...(info.local_urls || []),
+      ...(info.lan_urls || []),
+      ...(info.tailscale_urls || []),
+    ];
+    node.replaceChildren();
+    const heading = document.createElement('div');
+    heading.textContent = `Server: ${info.server || (info.running ? 'Running' : 'Stopped')}  ·  Port: ${info.port ?? '—'}`;
+    node.append(heading);
+    const groups = [
+      ['Local', info.local_urls],
+      ['LAN', info.lan_urls],
+      ['Tailscale', info.tailscale_urls],
+    ];
+    for (const [label, entries] of groups) {
+      if (!entries?.length) continue;
+      const row = document.createElement('div');
+      row.textContent = `${label}  ${entries.join('  ')}`;
+      node.append(row);
+    }
+    if (!urls.length && info.running) {
+      const row = document.createElement('div'); row.textContent = 'No currently reachable interface addresses were detected.'; node.append(row);
+    }
+  } catch (error) {
+    node.textContent = `Remote access status unavailable: ${error.message}`;
   }
 }
 
@@ -992,65 +1076,6 @@ async function exportSources() {
     renderExportReminderBanner();
   } catch (e) {
     toast('Could not export sources: ' + e.message, true);
-  }
-}
-
-// ---------------------------------------------------------------------
-// CockHero .chpack export
-// ---------------------------------------------------------------------
-
-async function exportChpack() {
-  // Build payload — scope to current source if one is selected, else whole library.
-  const sourceId = state.view.type === 'creator' ? state.view.id : null;
-  const sourceName = sourceId != null ? (state.sourcesById[sourceId]?.name || '') : '';
-
-  // Prompt for pack name — pre-fill with source name or a default.
-  const defaultName = sourceName || 'Curator Pack';
-  const packName = window.prompt('Pack name for CockHero:', defaultName);
-  if (packName === null) return; // cancelled
-
-  const author = window.prompt('Author name:', 'Curator') ?? 'Curator';
-  const description = window.prompt('Description (optional):', '') ?? '';
-
-  const body = {
-    name: packName.trim() || defaultName,
-    author: author.trim() || 'Curator',
-    description: description.trim(),
-    unlock_cost: 0,
-  };
-  if (sourceId != null) body.source_id = sourceId;
-
-  const scope = sourceId != null
-    ? `source "${state.sourcesById[sourceId]?.name || sourceId}"`
-    : 'entire library';
-  toast(`Building .chpack for ${scope}…`);
-
-  try {
-    const resp = await fetch('/api/export/chpack', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify(body),
-    });
-    if (!resp.ok) {
-      const err = await resp.json().catch(() => ({ detail: resp.statusText }));
-      throw new Error(err.detail || resp.statusText);
-    }
-    const blob = await resp.blob();
-    // Derive filename from Content-Disposition or fall back.
-    const cd = resp.headers.get('Content-Disposition') || '';
-    const match = cd.match(/filename="([^"]+)"/);
-    const filename = match ? match[1] : `${body.name.replace(/[^\w\-. ]/g, '_')}.chpack`;
-    const url = URL.createObjectURL(blob);
-    const a = document.createElement('a');
-    a.href = url;
-    a.download = filename;
-    document.body.appendChild(a);
-    a.click();
-    a.remove();
-    URL.revokeObjectURL(url);
-    toast(`Downloaded ${filename}`);
-  } catch (e) {
-    toast('chpack export failed: ' + e.message, true);
   }
 }
 
@@ -1530,7 +1555,7 @@ async function stepLightbox(delta) {
 function renderLightboxItem() {
   const item = state.currentItems[state.lightboxIndex];
   if (!item) return;
-  el('#lightbox-clip-tools').hidden = item.type !== 'video' || item.downloaded === 0 || item.clip_parent_id != null || (item.duration_secs != null && item.duration_secs <= CLIP_MAX_SECONDS);
+  el('#lightbox-clip-tools').hidden = item.type !== 'video' || item.downloaded === 0 || item.clip_parent_id != null || (item.duration_secs != null && item.duration_secs <= clipMaxSeconds());
   const stage = el('#lightbox-stage');
   stage.innerHTML = '';
   const src = mediaFullSrc(item);
@@ -1751,8 +1776,9 @@ async function startSlideshow(startIndex) {
   closeLightbox();
   closeSourceMenu();
 
-  ss.items = state.currentItems.slice();
-  ss.index = Math.max(0, startIndex || 0);
+  const requested = state.currentItems[Math.max(0, startIndex || 0)];
+  ss.items = preparePlaybackItems(state.currentItems, false);
+  ss.index = Math.max(0, ss.items.indexOf(requested));
   ss.playing = true;
   ss.speed = parseInt(el('#ss-speed').value, 10);
   ss.loop = el('#ss-loop').checked;
@@ -1760,7 +1786,7 @@ async function startSlideshow(startIndex) {
 
   if (ss.shuffleMode) {
     const current = ss.items[ss.index];
-    ss.items = shuffleArray(ss.items.slice());
+    ss.items = preparePlaybackItems(ss.items, true);
     ss.index = Math.max(0, ss.items.indexOf(current));
   }
 
@@ -1791,15 +1817,25 @@ const PW_PREFETCH_DEPTH = 2; // verified-portrait items to keep queued up per pa
 const pw = {
   active: false,
   queueIndex: 0,
+  items: [],
   timers: [null, null, null],
   ready: [[], [], []],             // per-pane queues of already-checked {item, el}
   filling: [false, false, false],  // guards against two overlapping fill loops on one pane
 };
 
 async function pwNextCandidate() {
-  if (pw.queueIndex >= state.currentItems.length && mediaPage.more) await loadMoreMedia();
-  if (pw.queueIndex >= state.currentItems.length) return null;
-  return state.currentItems[pw.queueIndex++];
+  if (pw.queueIndex >= pw.items.length && mediaPage.more) {
+    await loadMoreMedia();
+    pw.items = preparePlaybackItems(state.currentItems, true);
+    pw.queueIndex = 0;
+  }
+  if (pw.queueIndex >= pw.items.length) {
+    // The already-seen collection can recycle after exhaustion, but its next
+    // choice is rearranged to avoid the most recently displayed item.
+    pw.items = preparePlaybackItems(pw.items, true);
+    pw.queueIndex = 0;
+  }
+  return pw.items[pw.queueIndex++] || null;
 }
 
 // Orientation isn't stored anywhere, so this checks it the cheap way:
@@ -1821,7 +1857,7 @@ function pwCheckAndPrepare(item) {
         // server-backfilled duration_secs, which may not be known yet for
         // this file) so the exclusion is correct immediately, not only
         // once the background backfill has caught up to it.
-        if ((item.clip_start_secs != null ? item.duration_secs : v.duration) > CLIP_MAX_SECONDS) { resolve(null); return; }
+        if ((item.clip_start_secs != null ? item.duration_secs : v.duration) > clipMaxSeconds()) { resolve(null); return; }
         resolve(v.videoHeight > v.videoWidth ? { item, el: v } : null);
       };
       v.onerror = () => resolve(null);
@@ -1884,6 +1920,7 @@ function pwMountPane(i, item, mediaEl) {
 
   const media = el(`#pw-pane-media-${i}`);
   media.innerHTML = '';
+  rememberPlaybackItem(item);
   mediaEl.className = 'pw-media';
   media.appendChild(mediaEl);
 
@@ -1922,6 +1959,7 @@ function startPortraitWall() {
   if (!state.currentItems.length) { toast('Nothing to show here.', true); return; }
   pw.active = true;
   pw.queueIndex = 0;
+  pw.items = preparePlaybackItems(state.currentItems, true);
   pw.ready = [[], [], []];
   pw.filling = [false, false, false];
   el('#portrait-wall').hidden = false;
@@ -1939,6 +1977,7 @@ function exitPortraitWall() {
     if (media) media.innerHTML = '';
   }
   pw.ready = [[], [], []];
+  pw.items = [];
   if (isFullscreen() && document.fullscreenElement === el('#portrait-wall')) exitBrowserFullscreen();
   el('#portrait-wall').hidden = true;
 }
@@ -2064,7 +2103,7 @@ function feedBuildItem(item) {
       // duration_secs, which may not be known yet for this file) so the
       // exclusion is correct immediately, not only once the backfill has
       // caught up to it.
-      return ok && !feed.review && (item.clip_start_secs != null ? item.duration_secs : mediaEl.duration) > CLIP_MAX_SECONDS ? false : ok;
+      return ok && !feed.review && (item.clip_start_secs != null ? item.duration_secs : mediaEl.duration) > clipMaxSeconds() ? false : ok;
     });
     mediaEl.onloadedmetadata = () => {
       if (mediaEl.videoWidth > mediaEl.videoHeight) wrap.classList.add('rotated');
@@ -2775,6 +2814,7 @@ function renderSlide() {
   const stage = el('#slideshow-stage');
   stage.innerHTML = '';
   const item = ss.items[ss.index];
+  rememberPlaybackItem(item);
   const src = mediaFullSrc(item);
 
   if (item.type === 'video') {

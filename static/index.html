@@ -78,8 +78,6 @@
         <input id="import-file-input" type="file" accept="application/json" hidden>
         <span class="muted">·</span>
         <a id="view-log-link" class="link-btn" href="/api/log" target="_blank" rel="noopener noreferrer">⚠ view log</a>
-        <span class="muted">·</span>
-        <button id="chpack-export-btn" class="link-btn" title="Export selected source as CockHero .chpack">🎮 export .chpack</button>
       </div>
     </footer>
   </aside>
@@ -97,8 +95,8 @@
         <div class="type-filter" role="group" aria-label="Filter by media type">
           <button class="type-filter-btn active" data-type-filter="all">all</button>
           <button class="type-filter-btn" data-type-filter="image">photos</button>
-          <button class="type-filter-btn" data-type-filter="clip" title="Videos up to 90 seconds">clips</button>
-          <button class="type-filter-btn" data-type-filter="video" title="Videos over 90 seconds, plus files whose duration is not known yet">videos</button>
+          <button class="type-filter-btn" data-type-filter="clip" title="Videos up to the configured maximum clip length">clips</button>
+          <button class="type-filter-btn" data-type-filter="video" title="Videos over the configured maximum clip length, plus files whose duration is not known yet">videos</button>
         </div>
         <select id="sort-select" class="btn btn-ghost" title="Sort order">
           <option value="default">sort: default</option>
@@ -173,6 +171,13 @@
       <input id="settings-max-concurrent" type="number" min="1" max="20" step="1">
     </label>
 
+    <h2 class="settings-subhead">Media</h2>
+    <p class="muted">Videos at or below this duration are Clips. Changing it only reclassifies views; it never edits source files.</p>
+    <label class="settings-field mono small">
+      maximum clip length
+      <input id="settings-max-clip-length" type="number" min="5" max="3600" step="1"> seconds
+    </label>
+
     <h2 class="settings-subhead">Appearance</h2>
     <label class="settings-field mono small">
       theme
@@ -234,6 +239,18 @@
       <input id="settings-nsfw-filter-enabled" type="checkbox"> enable NSFW auto-rating (restart required)
     </label>
 
+    <h2 class="settings-subhead">Startup</h2>
+    <label class="settings-checkbox mono small">
+      <input id="settings-start-with-windows" type="checkbox"> Start Curator when Windows starts
+    </label>
+    <label class="settings-checkbox mono small">
+      <input id="settings-keep-running-in-tray" type="checkbox"> Keep Curator running in the system tray when the window is closed
+    </label>
+
+    <h2 class="settings-subhead">Remote Access</h2>
+    <p class="muted">The same Curator server serves the desktop app, LAN clients, and Tailscale. Addresses refresh while Curator is running.</p>
+    <div id="settings-remote-access" class="mono small muted" aria-live="polite">Checking server status…</div>
+
     <h2 class="settings-subhead">Setup</h2>
     <p class="muted">
       Reopens the first-run setup wizard so you can re-check dependencies or change
@@ -259,7 +276,7 @@
       <div class="lightbox-meta mono small" id="lightbox-meta"></div>
       <div id="lightbox-clip-tools" hidden>
         <label>Clip length <select id="clip-seconds"><option value="15">15s</option><option value="30">30s</option><option value="60" selected>60s</option></select></label>
-        <button id="create-clips-btn" class="btn btn-ghost" title="Save time ranges that play from the original video. No copied video files.">Create virtual clips</button>
+        <button id="create-clips-btn" class="btn btn-ghost" title="Create virtual clips from the original video; the original is preserved.">Create clips…</button>
       </div>
       <span id="clip-job-status" role="status" class="mono small"></span>
       <button class="btn btn-accent" id="lightbox-start-slideshow">▶ slideshow from here</button>

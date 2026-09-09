@@ -140,6 +140,9 @@ async function loadStatus() {
 
   // Step 5
   el('#max-concurrent-input').value = status.settings.max_concurrent;
+  el('#max-clip-length-input').value = status.settings.max_clip_length_secs || 60;
+  el('#start-with-windows-input').checked = !!status.settings.start_with_windows;
+  el('#keep-running-in-tray-input').checked = status.settings.keep_running_in_tray !== false;
 
   // Step 6
   el('#nsfw-enabled-input').checked = !!status.settings.nsfw_filter_enabled;
@@ -198,6 +201,9 @@ function goBack() {
 async function saveDraft() {
   const body = {
     max_concurrent: Number(el('#max-concurrent-input').value) || undefined,
+    max_clip_length_secs: Number(el('#max-clip-length-input').value) || 60,
+    start_with_windows: el('#start-with-windows-input').checked,
+    keep_running_in_tray: el('#keep-running-in-tray-input').checked,
     theme: el('#theme-input').value,
     default_slideshow_speed: Number(el('#slideshow-speed-input').value),
     default_slideshow_loop: el('#slideshow-loop-input').checked,

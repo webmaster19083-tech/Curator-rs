@@ -678,6 +678,13 @@ function installExplorerUi() {
   if (!sidebar || !main || !legacyToolbar || explorer.installed) return;
   explorer.installed = true;
 
+  // Keep the compatibility markup available for app.js, but make the
+  // Explorer shell authoritative before moving any of the legacy controls.
+  // This prevents the old gallery from flashing or sitting underneath the
+  // new layout during startup.
+  explorerEl('.app-shell')?.classList.add('explorer-shell');
+  document.body.classList.add('explorer-ready');
+
   // Preserve old controls and their event listeners as compatibility hooks.
   const legacySidebar = document.createElement('div'); legacySidebar.className = 'legacy-sidebar'; legacySidebar.hidden = true;
   while (sidebar.firstChild) legacySidebar.append(sidebar.firstChild); sidebar.append(legacySidebar); sidebar.classList.add('explorer-sidebar');
@@ -723,4 +730,7 @@ function installExplorerUi() {
   setPlayMode(explorer.playMode, false); void restorePlayMode(); updateNavigation(); updateBulkUI();
 }
 
-document.addEventListener('DOMContentLoaded', installExplorerUi);
+// This script is loaded after the library markup and app.js.  Installing
+// synchronously leaves the old controls in place for existing bindings while
+// ensuring they are never rendered as a competing surface.
+installExplorerUi();

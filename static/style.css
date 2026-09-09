@@ -1338,8 +1338,9 @@ button {
    Explorer library shell — installed by library.js while retaining the
    established grid/media viewer nodes underneath it.
    ------------------------------------------------------------------- */
-.explorer-sidebar .legacy-sidebar,
-.legacy-toolbar { display: none !important; }
+body.explorer-ready .legacy-sidebar,
+body.explorer-ready .legacy-toolbar { display: none !important; }
+.app-shell.explorer-shell,
 .app-shell:has(.explorer-sidebar-content) { grid-template-columns: 264px minmax(0, 1fr); }
 .explorer-sidebar { padding: 0; background: color-mix(in srgb, var(--bg-panel) 94%, #000); }
 .explorer-sidebar-content { min-height: 100%; display: flex; flex-direction: column; }

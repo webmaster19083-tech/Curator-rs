@@ -148,12 +148,17 @@ fn background_launch_requested() -> bool {
     std::env::args().any(|argument| argument == "--background")
 }
 
-fn create_main_window(app: &tauri::AppHandle, completed: bool, visible: bool) -> tauri::Result<()> {
-    // Keep WebView2 state with Curator's own data rather than its implicit
-    // system profile. Besides keeping the cache scoped to the app, this lets
-    // a fresh build recover from an abandoned profile left by an older build.
-    let webview_data_dir = app.state::<Backend>().state.data_dir.join("webview");
-    tauri::WebviewWindowBuilder::new(
+fn create_main_window(app: &tauri::AppHandle, completed: bool) -> tauri::Result<()> {
+    // Do not put the WebView2 profile beside the library. Curator's library
+    // can live on an external drive which should stay independent of browser
+    // cache/lock state. The versioned local profile also leaves the abandoned
+    // profile from an older desktop build untouched.
+    let webview_data_dir = app.path().app_local_data_dir()?.join("webview-v2");
+    tracing::info!(
+        webview_data_dir = %webview_data_dir.display(),
+        "Creating Curator desktop WebView"
+    );
+    let result = tauri::WebviewWindowBuilder::new(
         app,
         "main",
         tauri::WebviewUrl::App(if completed { "index.html" } else { "oobe.html" }.into()),
@@ -161,11 +166,17 @@ fn create_main_window(app: &tauri::AppHandle, completed: bool, visible: bool) ->
     .title("Curator")
     .inner_size(1440.0, 900.0)
     .min_inner_size(960.0, 600.0)
-    .visible(visible)
+    .visible(true)
     .data_directory(webview_data_dir)
     .disable_drag_drop_handler()
     .build()
-    .map(|_| ())
+    .map(|_| ());
+    if let Err(error) = &result {
+        tracing::error!(error = %error, "Could not create Curator desktop WebView");
+    } else {
+        tracing::info!("Curator desktop WebView is ready");
+    }
+    result
 }
 
 fn open_curator(app: &tauri::AppHandle) {
@@ -181,7 +192,9 @@ fn open_curator(app: &tauri::AppHandle) {
         .try_read()
         .map(|settings| settings.oobe_completed)
         .unwrap_or(true);
-    let _ = create_main_window(app, completed, true);
+    if let Err(error) = create_main_window(app, completed) {
+        tracing::error!(error = %error, "Could not open Curator desktop window");
+    }
 }
 
 fn request_explicit_quit(app: &tauri::AppHandle) {
@@ -461,10 +474,12 @@ fn main() {
                 handle: handle.clone(),
             });
             app.manage(DesktopLifecycle::default());
-            let completed = handle.block_on(async { state.settings.read().await.oobe_completed });
-            // Windows startup starts in the tray without briefly flashing a
-            // webview. Users can always restore it from the tray menu.
-            create_main_window(app.handle(), completed, !background_launch)?;
+            // The WebView is deliberately not created from `setup`: on some
+            // Windows/WebView2 combinations that happens before the native
+            // message loop is running and leaves a blank, non-responsive
+            // shell. `RunEvent::Ready` below creates foreground UI after the
+            // loop is live. Background launches stay WebView-free until the
+            // user opens Curator from its tray icon.
 
             let tray_open = tauri::menu::MenuItem::with_id(
                 app,
@@ -666,6 +681,7 @@ fn main() {
     };
     instance.listen_for_activation(app.handle().clone());
     app.run(move |app_handle, event| match event {
+        tauri::RunEvent::Ready if !background_launch => open_curator(app_handle),
         tauri::RunEvent::ExitRequested { api, .. } => {
             if !app_handle
                 .state::<DesktopLifecycle>()

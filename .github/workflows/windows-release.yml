@@ -1,63 +1,88 @@
-name: Windows Headless Release Build
+name: Slave Windows Release Build
 
 on:
   push:
-    branches: [ main, master ]
-    tags: [ "v*" ]
+    branches: [slave]
+    tags: ["slave-v*"]
   workflow_dispatch: {}
+
+permissions:
+  contents: read
 
 jobs:
   build-windows:
+    permissions:
+      contents: write
+
     runs-on: windows-latest
+
     steps:
-      - uses: actions/checkout@v4
+      - name: Checkout slave
+        uses: actions/checkout@v4
 
       - name: Install Rust
         uses: dtolnay/rust-toolchain@stable
         with:
           targets: x86_64-pc-windows-msvc
+          components: rustfmt,clippy
 
       - name: Cache cargo
         uses: Swatinem/rust-cache@v2
 
-      - uses: actions/setup-node@v4
+      - name: Install Node.js
+        uses: actions/setup-node@v4
         with:
           node-version: 22
 
       - name: Rust format
         run: cargo fmt --all -- --check
+
       - name: Rust check
         run: cargo check --all-targets
+
       - name: Rust clippy
         run: cargo clippy --all-targets --all-features -- -D warnings
+
       - name: Core tests
         run: cargo test --locked
+
       - name: Frontend tests
         run: node --test tests/*.test.js
 
       - name: Build release
         run: cargo build --release --target x86_64-pc-windows-msvc
 
-      # curator.exe loads static/ from disk next to it at runtime (it's served
-      # via tower_http::ServeDir, not embedded like DOCS.txt is) — ship the exe
-      # alone and the app opens to a 404. Package both together.
       - name: Package release
         shell: pwsh
         run: |
-          $dest = "dist/curator-headless-windows-x86_64"
+          $dest = "dist/curator-slave-windows-x86_64"
+
           New-Item -ItemType Directory -Force -Path $dest | Out-Null
-          Copy-Item "target/x86_64-pc-windows-msvc/release/curator.exe" -Destination $dest
-          Copy-Item -Recurse "static" -Destination "$dest/static"
-          Compress-Archive -Path "$dest/*" -DestinationPath "curator-headless-windows-x86_64.zip" -Force
+
+          Copy-Item `
+            "target/x86_64-pc-windows-msvc/release/curator.exe" `
+            -Destination $dest
+
+          Copy-Item `
+            -Recurse `
+            "static" `
+            -Destination "$dest/static"
+
+          Compress-Archive `
+            -Path "$dest/*" `
+            -DestinationPath "curator-slave-windows-x86_64.zip" `
+            -Force
 
       - name: Upload artifact
         uses: actions/upload-artifact@v4
         with:
-          name: curator-headless-windows-x86_64
-          path: curator-headless-windows-x86_64.zip
+          name: curator-slave-windows-x86_64
+          path: curator-slave-windows-x86_64.zip
+          if-no-files-found: error
 
-      - name: Attach to GitHub Release
-        if: startsWith(github.ref, 'refs/tags/v')
+      - name: Attach to Slave GitHub Release
+        if: startsWith(github.ref, 'refs/tags/slave-v')
         uses: softprops/action-gh-release@v2
         with:
-          files: curator-headless-windows-x86_64.zip
+          draft: true
+          files: curator-slave-windows-x86_64.zip

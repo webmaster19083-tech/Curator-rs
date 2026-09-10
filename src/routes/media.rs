@@ -661,8 +661,20 @@ pub async fn bulk(
         "add_group" | "move" => bulk_groups(&state, &ids, &body).await?,
         "add_tag" => bulk_add_tag(&state, &ids, body.tag.as_deref())?,
         "set_rating" => bulk_set_rating(&state, &ids, body.rating)?,
-        "refresh_metadata" => bulk_refresh_metadata(&state, &ids)?,
-        "delete" => bulk_delete_files(&state, &ids)?,
+        "refresh_metadata" => {
+            let worker_state = Arc::clone(&state);
+            let worker_ids = ids.clone();
+            tokio::task::spawn_blocking(move || bulk_refresh_metadata(&worker_state, &worker_ids))
+                .await
+                .map_err(db_err)??
+        }
+        "delete" => {
+            let worker_state = Arc::clone(&state);
+            let worker_ids = ids.clone();
+            tokio::task::spawn_blocking(move || bulk_delete_files(&worker_state, &worker_ids))
+                .await
+                .map_err(db_err)??
+        }
         _ => {
             return Err((
                 StatusCode::BAD_REQUEST,
@@ -738,10 +750,12 @@ fn bulk_add_tag(
         )
     })?;
     let conn = state.pool.get().map_err(db_err)?;
+    let tx = conn.unchecked_transaction().map_err(db_err)?;
+    let tx_conn = &*tx;
     let mut updated = 0;
     let mut failed = Vec::new();
     for id in ids {
-        let exists: bool = conn
+        let exists: bool = tx_conn
             .query_row(
                 "SELECT EXISTS(SELECT 1 FROM media WHERE id=?1)",
                 [id],
@@ -749,12 +763,13 @@ fn bulk_add_tag(
             )
             .map_err(db_err)?;
         if exists {
-            provenance::attach_tag(&conn, *id, &name, provenance::HUMAN, None).map_err(db_err)?;
+            provenance::attach_tag(tx_conn, *id, &name, provenance::HUMAN, None).map_err(db_err)?;
             updated += 1;
         } else {
             failed.push(json!({"id":id,"error":"Media not found"}));
         }
     }
+    tx.commit().map_err(db_err)?;
     Ok((updated, failed))
 }
 
@@ -795,10 +810,12 @@ fn bulk_refresh_metadata(
 ) -> Result<(usize, Vec<Value>), (StatusCode, Json<Value>)> {
     let conn = state.pool.get().map_err(db_err)?;
     let root = dunce::canonicalize(&state.library_dir).map_err(db_err)?;
+    let tx = conn.unchecked_transaction().map_err(db_err)?;
+    let tx_conn = &*tx;
     let mut updated = 0;
     let mut failed = Vec::new();
     for id in ids {
-        let row: Option<(String, Option<String>)> = conn
+        let row: Option<(String, Option<String>)> = tx_conn
             .query_row(
                 "SELECT filepath,origin_url FROM media WHERE id=?1",
                 [id],
@@ -821,13 +838,13 @@ fn bulk_refresh_metadata(
             .and_then(|raw| serde_json::from_str::<Value>(&raw).ok())
         {
             Some(metadata) => match provenance::capture_source_metadata(
-                &conn,
+                tx_conn,
                 *id,
                 origin_url.as_deref(),
                 &metadata,
             ) {
                 Ok(()) => {
-                    conn.execute("UPDATE media SET nsfw_state='pending',nsfw_attempts=0,nsfw_retry_at=0 WHERE id=?1", [id]).map_err(db_err)?;
+                    tx_conn.execute("UPDATE media SET nsfw_state='pending',nsfw_attempts=0,nsfw_retry_at=0 WHERE id=?1", [id]).map_err(db_err)?;
                     updated += 1;
                 }
                 Err(error) => failed.push(json!({"id":id,"error":error.to_string()})),
@@ -835,6 +852,7 @@ fn bulk_refresh_metadata(
             None => failed.push(json!({"id":id,"error":"No valid gallery-dl metadata sidecar"})),
         }
     }
+    tx.commit().map_err(db_err)?;
     Ok((updated, failed))
 }
 
@@ -844,10 +862,12 @@ fn bulk_delete_files(
 ) -> Result<(usize, Vec<Value>), (StatusCode, Json<Value>)> {
     let conn = state.pool.get().map_err(db_err)?;
     let root = dunce::canonicalize(&state.library_dir).map_err(db_err)?;
+    let tx = conn.unchecked_transaction().map_err(db_err)?;
+    let tx_conn = &*tx;
     let mut updated = 0;
     let mut failed = Vec::new();
     for id in ids {
-        let row: Option<(String, bool)> = conn
+        let row: Option<(String, bool)> = tx_conn
             .query_row(
                 "SELECT filepath,clip_start_secs IS NOT NULL FROM media WHERE id=?1",
                 [id],
@@ -859,7 +879,8 @@ fn bulk_delete_files(
             continue;
         };
         if virtual_clip {
-            conn.execute("UPDATE media SET downloaded=0,missing=1 WHERE id=?1", [id])
+            tx_conn
+                .execute("UPDATE media SET downloaded=0,missing=1 WHERE id=?1", [id])
                 .map_err(db_err)?;
             updated += 1;
             continue;
@@ -876,16 +897,18 @@ fn bulk_delete_files(
         }
         match std::fs::remove_file(&path) {
             Ok(()) => {
-                conn.execute(
-                    "UPDATE media SET downloaded=0,missing=1,file_size_bytes=NULL WHERE id=?1",
-                    [id],
-                )
-                .map_err(db_err)?;
+                tx_conn
+                    .execute(
+                        "UPDATE media SET downloaded=0,missing=1,file_size_bytes=NULL WHERE id=?1",
+                        [id],
+                    )
+                    .map_err(db_err)?;
                 updated += 1;
             }
             Err(error) => failed.push(json!({"id":id,"error":error.to_string()})),
         }
     }
+    tx.commit().map_err(db_err)?;
     Ok((updated, failed))
 }
 
@@ -912,7 +935,7 @@ pub async fn effective_tags(
     }
     let rebuilt = {
         let conn = state.pool.get().map_err(db_err)?;
-        Arc::new(crate::db::build_group_effective_tags_map(&conn))
+        Arc::new(crate::db::build_group_effective_tags_map(&conn).map_err(db_err)?)
     };
     *cache = Some(rebuilt.clone());
     Ok(rebuilt)

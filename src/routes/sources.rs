@@ -302,14 +302,17 @@ pub async fn delete(
 
     if q.delete_files {
         let dest = state.library_dir.join(&slug);
-        if dest.exists() {
-            let dest_long = dunce::simplified(&dest).to_path_buf();
-            let _ = std::fs::remove_dir_all(&dest_long);
-        }
         let archive = state.archives_dir.join(format!("{}.sqlite3", slug));
-        if archive.exists() {
-            let _ = std::fs::remove_file(dunce::simplified(&archive));
-        }
+        let _ = tokio::task::spawn_blocking(move || {
+            if dest.exists() {
+                let dest_long = dunce::simplified(&dest).to_path_buf();
+                let _ = std::fs::remove_dir_all(&dest_long);
+            }
+            if archive.exists() {
+                let _ = std::fs::remove_file(dunce::simplified(&archive));
+            }
+        })
+        .await;
     }
 
     Ok(Json(json!({ "status": "deleted" })))

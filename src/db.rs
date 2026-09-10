@@ -787,27 +787,27 @@ pub fn now_iso() -> String {
 // ─── Group tag cache helpers ──────────────────────────────────────────────────
 
 /// group_id → [itself, parent, grandparent, ...] up to root
-pub fn build_group_ancestry_map(conn: &Connection) -> HashMap<i64, Vec<i64>> {
+pub fn build_group_ancestry_map(conn: &Connection) -> rusqlite::Result<HashMap<i64, Vec<i64>>> {
     struct G {
         id: i64,
         parent_id: Option<i64>,
     }
     let rows: Vec<G> = {
-        let mut stmt = conn.prepare("SELECT id, parent_id FROM groups").unwrap();
-        stmt.query_map([], |r| {
-            Ok(G {
-                id: r.get(0)?,
-                parent_id: r.get(1)?,
-            })
-        })
-        .unwrap()
-        .filter_map(|r| r.ok())
-        .collect()
+        let mut stmt = conn.prepare("SELECT id, parent_id FROM groups")?;
+        let rows = stmt
+            .query_map([], |r| {
+                Ok(G {
+                    id: r.get(0)?,
+                    parent_id: r.get(1)?,
+                })
+            })?
+            .collect::<rusqlite::Result<Vec<_>>>()?;
+        rows
     };
 
     let parents: HashMap<i64, Option<i64>> = rows.iter().map(|g| (g.id, g.parent_id)).collect();
 
-    parents
+    Ok(parents
         .keys()
         .map(|&gid| {
             let mut chain = vec![gid];
@@ -823,38 +823,39 @@ pub fn build_group_ancestry_map(conn: &Connection) -> HashMap<i64, Vec<i64>> {
             }
             (gid, chain)
         })
-        .collect()
+        .collect())
 }
 
 /// group_id → set of tag names (group's own name + explicit tags + all ancestors' names+tags)
-pub fn build_group_effective_tags_map(conn: &Connection) -> HashMap<i64, HashSet<String>> {
-    let ancestry = build_group_ancestry_map(conn);
+pub fn build_group_effective_tags_map(
+    conn: &Connection,
+) -> rusqlite::Result<HashMap<i64, HashSet<String>>> {
+    let ancestry = build_group_ancestry_map(conn)?;
 
     let names: HashMap<i64, String> = {
-        let mut stmt = conn.prepare("SELECT id, name FROM groups").unwrap();
-        stmt.query_map([], |r| Ok((r.get::<_, i64>(0)?, r.get::<_, String>(1)?)))
-            .unwrap()
-            .filter_map(|r| r.ok())
+        let mut stmt = conn.prepare("SELECT id, name FROM groups")?;
+        let rows = stmt
+            .query_map([], |r| Ok((r.get::<_, i64>(0)?, r.get::<_, String>(1)?)))?
+            .collect::<rusqlite::Result<Vec<_>>>()?;
+        rows.into_iter()
             .map(|(id, name)| (id, name.trim().to_lowercase()))
             .collect()
     };
 
     let mut own_tags: HashMap<i64, HashSet<String>> = HashMap::new();
     {
-        let mut stmt = conn
-            .prepare(
-                "SELECT gt.group_id, t.name FROM group_tags gt JOIN tags t ON t.id = gt.tag_id",
-            )
-            .unwrap();
-        stmt.query_map([], |r| Ok((r.get::<_, i64>(0)?, r.get::<_, String>(1)?)))
-            .unwrap()
-            .filter_map(|r| r.ok())
-            .for_each(|(gid, tag)| {
-                own_tags.entry(gid).or_default().insert(tag);
-            });
+        let mut stmt = conn.prepare(
+            "SELECT gt.group_id, t.name FROM group_tags gt JOIN tags t ON t.id = gt.tag_id",
+        )?;
+        let rows = stmt
+            .query_map([], |r| Ok((r.get::<_, i64>(0)?, r.get::<_, String>(1)?)))?
+            .collect::<rusqlite::Result<Vec<_>>>()?;
+        for (gid, tag) in rows {
+            own_tags.entry(gid).or_default().insert(tag);
+        }
     }
 
-    ancestry
+    Ok(ancestry
         .into_iter()
         .map(|(gid, chain)| {
             let mut tags = HashSet::new();
@@ -870,7 +871,7 @@ pub fn build_group_effective_tags_map(conn: &Connection) -> HashMap<i64, HashSet
             }
             (gid, tags)
         })
-        .collect()
+        .collect())
 }
 
 #[cfg(test)]

@@ -910,12 +910,24 @@ pub async fn populate_placeholders(state: Arc<AppState>, source_id: i64) {
     };
     let now = now_iso();
 
-    let _ = conn.execute("BEGIN", []);
+    let tx = match conn.unchecked_transaction() {
+        Ok(tx) => tx,
+        Err(error) => {
+            warn!("Placeholder pre-scan for source {source_id} could not begin a database transaction: {error}");
+            return;
+        }
+    };
     {
-        let mut stmt = match conn.prepare(
+        let mut stmt = match tx.prepare(
             "INSERT OR IGNORE INTO media (source_id, filepath, filename, type, added_at, origin_url, downloaded)
              VALUES (?1, ?2, ?3, ?4, ?5, ?6, 0)"
-        ) { Ok(s) => s, Err(_) => { let _ = conn.execute("ROLLBACK", []); return; } };
+        ) {
+            Ok(stmt) => stmt,
+            Err(error) => {
+                warn!("Placeholder pre-scan for source {source_id} could not prepare its insert: {error}");
+                return;
+            }
+        };
 
         for item in &items {
             let fname = item
@@ -933,12 +945,19 @@ pub async fn populate_placeholders(state: Arc<AppState>, source_id: i64) {
                 fname
             };
             let fp = pending_filepath(source_id, &item.url);
-            let _ = stmt.execute(rusqlite::params![
+            if let Err(error) = stmt.execute(rusqlite::params![
                 source_id, fp, fname, item.kind, now, item.url
-            ]);
+            ]) {
+                warn!(
+                    "Placeholder pre-scan failed to insert an item for source {source_id}: {error}"
+                );
+            }
         }
     }
-    let _ = conn.execute("COMMIT", []);
+    if let Err(error) = tx.commit() {
+        warn!("Placeholder pre-scan for source {source_id} could not commit: {error}");
+        return;
+    }
 
     info!(
         "Placeholder pre-scan for source {}: {} candidate item(s)",

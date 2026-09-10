@@ -1,0 +1,1 @@
+cargo:rustc-env=MIME_TYPES_GENERATED_PATH=C:\Users\webma\Downloads\curator_rs_fixed\target\release\build\mime_guess-9a1206a0fcc78db5\out\mime_types_generated.rs

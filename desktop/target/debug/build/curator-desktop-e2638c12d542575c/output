@@ -1,0 +1,26 @@
+cargo:rerun-if-env-changed=TAURI_CONFIG
+cargo:rustc-check-cfg=cfg(desktop)
+cargo:rustc-cfg=desktop
+cargo:rustc-check-cfg=cfg(mobile)
+cargo:rerun-if-changed=C:\Users\webma\Downloads\curator_rs_fixed\desktop\tauri.conf.json
+cargo:rustc-env=TAURI_ANDROID_PACKAGE_NAME_APP_NAME=curator
+cargo:rustc-env=TAURI_ANDROID_PACKAGE_NAME_PREFIX=tech_webmaster19083
+cargo:rustc-check-cfg=cfg(dev)
+cargo:PERMISSION_FILES_PATH=C:\Users\webma\Downloads\curator_rs_fixed\desktop\target\debug\build\curator-desktop-e2638c12d542575c\out\app-manifest\__app__-permission-files
+cargo:rerun-if-changed=capabilities
+cargo:rerun-if-env-changed=REMOVE_UNUSED_COMMANDS
+cargo:rustc-env=TAURI_ENV_TARGET_TRIPLE=x86_64-pc-windows-msvc
+cargo:rerun-if-changed=..\static\app.js
+cargo:rerun-if-changed=..\static\desktop.js
+cargo:rerun-if-changed=..\static\index.html
+cargo:rerun-if-changed=..\static\library.js
+cargo:rerun-if-changed=..\static\oobe.css
+cargo:rerun-if-changed=..\static\oobe.html
+cargo:rerun-if-changed=..\static\oobe.js
+cargo:rerun-if-changed=..\static\style.css
+cargo:rerun-if-changed=..\static\virtual-clips.js
+package.metadata does not exist
+Microsoft (R) Windows (R) Resource Compiler Version 10.0.10011.16384
+Copyright (C) Microsoft Corporation.  All rights reserved.
+
+cargo:rustc-link-arg-bins=C:\Users\webma\Downloads\curator_rs_fixed\desktop\target\debug\build\curator-desktop-e2638c12d542575c\out\resource.lib

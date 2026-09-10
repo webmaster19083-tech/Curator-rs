@@ -43,6 +43,51 @@ fn default_ch_default_shuffle() -> bool {
 fn default_ch_default_media_type() -> String {
     "image".into()
 }
+<<<<<<< Updated upstream
+=======
+fn default_max_clip_length_secs() -> u32 {
+    60
+}
+fn default_last_play_mode() -> String {
+    "slideshow".into()
+}
+fn default_keep_running_in_tray() -> bool {
+    true
+}
+fn default_library_layout() -> String {
+    "grid".into()
+}
+fn default_search_providers() -> Vec<String> {
+    // Search is intentionally opt-in per provider.  "local" does not make
+    // a network request; the other five are the useful discovery defaults.
+    vec![
+        "local".into(),
+        "balbums".into(),
+        "kemono".into(),
+        "erome".into(),
+        "redgifs".into(),
+        "deviantart".into(),
+    ]
+}
+fn default_goon_persona() -> String {
+    "neutral".into()
+}
+fn default_tts_rate() -> f64 {
+    1.0
+}
+fn default_tts_pitch() -> f64 {
+    1.0
+}
+fn default_tts_volume() -> f64 {
+    1.0
+}
+fn default_metronome_volume() -> f64 {
+    0.55
+}
+fn default_soundtrack_provider() -> String {
+    "local".into()
+}
+>>>>>>> Stashed changes
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Settings {
@@ -91,6 +136,35 @@ pub struct Settings {
     #[serde(default)]
     pub nsfw_filter_enabled: bool,
 
+    /// Library presentation is a preference, not a capability.  Grid is the
+    /// default while Table remains useful for large collections and keyboard
+    /// selection.
+    #[serde(default = "default_library_layout")]
+    pub library_layout: String,
+
+    /// Explicit discovery providers.  An empty list means "local only";
+    /// Curator never silently fans out to every extractor installed by
+    /// gallery-dl.
+    #[serde(default = "default_search_providers")]
+    pub search_providers: Vec<String>,
+
+    #[serde(default)]
+    pub metronome_enabled: bool,
+    #[serde(default = "default_metronome_volume")]
+    pub metronome_volume: f64,
+    #[serde(default = "default_goon_persona")]
+    pub goon_persona: String,
+    #[serde(default)]
+    pub tts_voice: Option<String>,
+    #[serde(default = "default_tts_rate")]
+    pub tts_rate: f64,
+    #[serde(default = "default_tts_pitch")]
+    pub tts_pitch: f64,
+    #[serde(default = "default_tts_volume")]
+    pub tts_volume: f64,
+    #[serde(default = "default_soundtrack_provider")]
+    pub soundtrack_provider: String,
+
     // First-run OOBE (out-of-box setup wizard — see oobe.rs). `false` here
     // means "show the wizard instead of the normal UI". This field alone is
     // NOT the whole story for whether an existing installation gets forced
@@ -117,6 +191,16 @@ impl Default for Settings {
             ch_default_shuffle: default_ch_default_shuffle(),
             ch_default_media_type: default_ch_default_media_type(),
             nsfw_filter_enabled: false,
+            library_layout: default_library_layout(),
+            search_providers: default_search_providers(),
+            metronome_enabled: false,
+            metronome_volume: default_metronome_volume(),
+            goon_persona: default_goon_persona(),
+            tts_voice: None,
+            tts_rate: default_tts_rate(),
+            tts_pitch: default_tts_pitch(),
+            tts_volume: default_tts_volume(),
+            soundtrack_provider: default_soundtrack_provider(),
             // A brand new Settings::default() (no settings.json on disk at
             // all) means a genuinely fresh install — OOBE should run. See
             // load_settings for how an *existing* settings.json that
@@ -229,6 +313,37 @@ pub fn run_migrations(conn: &Connection) -> Result<()> {
     if !src_cols.contains("group_id") {
         conn.execute_batch("ALTER TABLE sources ADD COLUMN group_id INTEGER REFERENCES groups(id) ON DELETE SET NULL;")?;
     }
+<<<<<<< Updated upstream
+=======
+    // Retry scheduling belongs to a source, rather than to an in-memory
+    // task, so a background process can safely recover its queue after a
+    // desktop-window or machine restart.
+    if !src_cols.contains("retry_attempts") {
+        conn.execute_batch(
+            "ALTER TABLE sources ADD COLUMN retry_attempts INTEGER NOT NULL DEFAULT 0;",
+        )?;
+    }
+    if !src_cols.contains("retry_at") {
+        conn.execute_batch("ALTER TABLE sources ADD COLUMN retry_at INTEGER NOT NULL DEFAULT 0;")?;
+    }
+    // Source-level activity survives process restarts.  `known_total` stays
+    // NULL until gallery-dl's placeholder listing can establish a count; a
+    // NULL is intentionally displayed as indeterminate rather than a made-up
+    // percentage.
+    for (name, definition) in [
+        ("known_total", "INTEGER CHECK(known_total >= 0)"),
+        ("completed_count", "INTEGER NOT NULL DEFAULT 0"),
+        ("current_filename", "TEXT"),
+        ("queued_at", "TEXT"),
+        ("started_at", "TEXT"),
+        ("completed_at", "TEXT"),
+        ("progress_updated_at", "TEXT"),
+    ] {
+        if !src_cols.contains(name) {
+            conn.execute_batch(&format!("ALTER TABLE sources ADD COLUMN {name} {definition};"))?;
+        }
+    }
+>>>>>>> Stashed changes
 
     // ── media ─────────────────────────────────────────────────────────────────
     conn.execute_batch(
@@ -278,6 +393,24 @@ pub fn run_migrations(conn: &Connection) -> Result<()> {
         ("rating_source", "TEXT NOT NULL DEFAULT 'none'"),
         ("rating_reviewed", "INTEGER NOT NULL DEFAULT 0"),
         ("rating_reviewed_at", "TEXT"),
+        // NudeNet provenance is kept separately from the compatibility
+        // `auto_rating_score` field so a reviewer can see exactly which model
+        // and anatomical evidence produced a 1-3 suggestion.
+        ("classifier_model", "TEXT"),
+        ("classifier_version", "TEXT"),
+        ("classifier_score", "REAL"),
+        ("classifier_evidence", "TEXT"),
+        // P-HAR is a separate, optional temporal model.  It can suggest
+        // Fast (4) only; Cum is never inferred automatically.
+        ("action_model", "TEXT"),
+        ("action_model_version", "TEXT"),
+        ("action_score", "REAL"),
+        ("action_evidence", "TEXT"),
+        ("action_rating", "INTEGER NOT NULL DEFAULT 0 CHECK(action_rating BETWEEN 0 AND 4)"),
+        ("classification_label", "TEXT NOT NULL DEFAULT 'unclassified'"),
+        ("manual_review_required", "INTEGER NOT NULL DEFAULT 0"),
+        ("manual_review_reason", "TEXT"),
+        ("classification_updated_at", "TEXT"),
     ] {
         if !media_cols.contains(name) {
             conn.execute_batch(&format!(
@@ -300,6 +433,8 @@ pub fn run_migrations(conn: &Connection) -> Result<()> {
         CREATE INDEX IF NOT EXISTS idx_media_probe ON media(duration_attempted, downloaded, type, id);
         CREATE INDEX IF NOT EXISTS idx_media_filename ON media(filename COLLATE NOCASE, id);
         CREATE INDEX IF NOT EXISTS idx_media_rating_id ON media(rating DESC, id ASC);
+        CREATE INDEX IF NOT EXISTS idx_media_manual_review ON media(manual_review_required, rating_reviewed, id);
+        CREATE INDEX IF NOT EXISTS idx_sources_activity ON sources(status, queued_at, retry_at, id);
         CREATE TRIGGER IF NOT EXISTS media_count_insert AFTER INSERT ON media WHEN NEW.downloaded=1 BEGIN
           UPDATE sources SET item_count=item_count+1 WHERE id=NEW.source_id;
         END;
@@ -345,6 +480,43 @@ pub fn run_migrations(conn: &Connection) -> Result<()> {
             notes       TEXT
         );
     ",
+    )?;
+    let session_cols: HashSet<String> = column_names(conn, "interactive_sessions");
+    for (name, definition) in [
+        ("soundtrack_provider", "TEXT"),
+        ("bpm", "REAL"),
+        ("beat_offset_secs", "REAL"),
+        ("timing_corrections", "TEXT"),
+        ("rating_phases", "TEXT"),
+    ] {
+        if !session_cols.contains(name) {
+            conn.execute_batch(&format!("ALTER TABLE interactive_sessions ADD COLUMN {name} {definition};"))?;
+        }
+    }
+    conn.execute_batch(
+        "CREATE TABLE IF NOT EXISTS goon_playlists (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            name TEXT NOT NULL,
+            provider TEXT NOT NULL,
+            source_url TEXT,
+            tracks TEXT NOT NULL DEFAULT '[]',
+            added_at TEXT NOT NULL,
+            updated_at TEXT NOT NULL
+         );
+         CREATE TABLE IF NOT EXISTS beat_maps (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            playlist_id INTEGER REFERENCES goon_playlists(id) ON DELETE CASCADE,
+            track_key TEXT NOT NULL,
+            bpm REAL NOT NULL,
+            beat_offset_secs REAL NOT NULL DEFAULT 0,
+            confidence REAL NOT NULL DEFAULT 0,
+            markers TEXT NOT NULL DEFAULT '[]',
+            confirmed INTEGER NOT NULL DEFAULT 0,
+            added_at TEXT NOT NULL,
+            updated_at TEXT NOT NULL,
+            UNIQUE(playlist_id,track_key)
+         );
+         CREATE INDEX IF NOT EXISTS idx_beat_maps_track ON beat_maps(track_key);",
     )?;
 
     // ── Indexes ───────────────────────────────────────────────────────────────
@@ -393,6 +565,94 @@ pub fn run_migrations(conn: &Connection) -> Result<()> {
         Ok(())
     })?;
 
+<<<<<<< Updated upstream
+=======
+    // Before `human_rating` existed, `rating` was an overloaded effective
+    // cache. The reviewed bit is the only reliable signal that an old value
+    // was a human decision. Preserve it exactly, including reviewed zero.
+    run_migration_once(
+        conn,
+        "0003_separate_human_ratings_and_tag_provenance",
+        |c| {
+            c.execute_batch(
+                "UPDATE media
+             SET human_rating=CASE WHEN rating BETWEEN 1 AND 5 THEN rating ELSE NULL END
+             WHERE rating_reviewed=1 AND human_rating IS NULL;
+             UPDATE media
+             SET rating=CASE
+                 WHEN human_rating IS NOT NULL THEN human_rating
+                 WHEN auto_rating BETWEEN 1 AND 5 THEN auto_rating
+                 ELSE 0
+             END,
+             rating_source=CASE
+                 WHEN human_rating IS NOT NULL THEN 'human'
+                 WHEN auto_rating BETWEEN 1 AND 5 THEN 'auto'
+                 ELSE 'none'
+             END,
+             rating_reviewed=CASE WHEN human_rating IS NULL THEN 0 ELSE 1 END;
+             INSERT OR IGNORE INTO media_tag_provenance(media_id,tag_id,provenance,added_at)
+             SELECT media_id,tag_id,'legacy',datetime('now') FROM media_tags;",
+            )?;
+            Ok(())
+        },
+    )?;
+
+    // Preserve optional history created by an early experimental session
+    // screen. It is deliberately copied rather than deleted so downgrading an
+    // installation cannot destroy the person's own activity records.
+    run_migration_once(conn, "0004_migrate_legacy_interactive_sessions", |c| {
+        let has_legacy: bool = c.query_row(
+            "SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE type='table' AND name='ch_sessions')",
+            [],
+            |row| row.get(0),
+        )?;
+        if has_legacy {
+            c.execute_batch(
+                "INSERT OR IGNORE INTO interactive_sessions(id,started_at,duration_s,item_count,plan,events,ended_state)
+                 SELECT id,started_at,duration_s,item_count,filters,notes,'completed' FROM ch_sessions;",
+            )?;
+        }
+        Ok(())
+    })?;
+
+    // The old five-star scale used 1 for merely-safe media.  In the current
+    // policy 1 is deliberately SFW and excluded from sexual playback, so
+    // promote every existing non-5 decision before any new classifier result
+    // is allowed to replace it.  Human values remain human values; automatic
+    // values are retained as a provisional fallback and requeued even when a
+    // human override sits above them.
+    run_migration_once(conn, "0005_media_scale_and_classifier_provenance", |c| {
+        c.execute_batch(
+            "UPDATE media
+                SET human_rating=CASE WHEN human_rating BETWEEN 1 AND 4 THEN human_rating+1 ELSE human_rating END,
+                    auto_rating=CASE WHEN auto_rating BETWEEN 1 AND 4 THEN auto_rating+1 ELSE auto_rating END;
+              UPDATE media
+                SET rating=CASE
+                    WHEN human_rating BETWEEN 1 AND 5 THEN human_rating
+                    WHEN auto_rating BETWEEN 1 AND 5 THEN auto_rating
+                    WHEN rating BETWEEN 1 AND 4 THEN rating+1
+                    ELSE rating
+                END,
+                rating_source=CASE
+                    WHEN human_rating BETWEEN 1 AND 5 THEN 'human'
+                    WHEN auto_rating BETWEEN 1 AND 5 THEN 'auto'
+                    ELSE 'none'
+                END,
+                rating_reviewed=CASE WHEN human_rating BETWEEN 1 AND 5 THEN 1 ELSE 0 END;
+              UPDATE media
+                SET nsfw_state='pending', nsfw_attempts=0, nsfw_retry_at=0,
+                    classifier_model=NULL, classifier_version=NULL, classifier_score=NULL,
+                    classifier_evidence=NULL, action_model=NULL, action_model_version=NULL,
+                    action_score=NULL, action_evidence=NULL, action_rating=0,
+                    classification_label='legacy_pending', manual_review_required=0,
+                    manual_review_reason=NULL
+                WHERE downloaded=1 AND missing=0
+                  AND (auto_rating BETWEEN 1 AND 5 OR rating_source='auto');",
+        )?;
+        Ok(())
+    })?;
+
+>>>>>>> Stashed changes
     tx.commit()?;
     Ok(())
 }
@@ -687,7 +947,14 @@ mod tests {
                 conn.query_row("SELECT COUNT(*) FROM _migrations", [], |r| r
                     .get::<_, i64>(0))
                     .unwrap(),
+<<<<<<< Updated upstream
                 2
+=======
+                // Current schema has five durable, one-time migrations. The
+                // important part of this regression test is that a second
+                // startup does not duplicate any of them.
+                5
+>>>>>>> Stashed changes
             );
         }
     }
@@ -812,7 +1079,9 @@ mod rating_migration_tests {
             INSERT INTO media VALUES(1,1,'a','a','image','2026',3),(2,1,'b','b','image','2026',0);").unwrap();
         super::run_migrations(&conn).unwrap();
         let row: (i64,String,bool,Option<String>) = conn.query_row("SELECT rating,rating_source,rating_reviewed,rating_reviewed_at FROM media WHERE id=1", [], |r| Ok((r.get(0)?,r.get(1)?,r.get(2)?,r.get(3)?))).unwrap();
-        assert_eq!(row, (3, "auto".into(), false, None));
+        // Legacy 3-star automatic content is promoted to 4 stars so it
+        // cannot silently become the new SFW 1-star class.
+        assert_eq!(row, (4, "auto".into(), false, None));
         conn.execute(
             "UPDATE media SET rating=4,auto_rating=3,rating_source='human',rating_reviewed=1,rating_reviewed_at='2026' WHERE id=2",
             [],
@@ -825,5 +1094,27 @@ mod rating_migration_tests {
                 0
             ))
             .unwrap());
+    }
+
+    #[test]
+    fn scale_migration_promotes_human_and_nested_automatic_values_without_loss() {
+        let conn = rusqlite::Connection::open_in_memory().unwrap();
+        super::run_migrations(&conn).unwrap();
+        conn.execute_batch("DELETE FROM _migrations WHERE name='0005_media_scale_and_classifier_provenance';
+            INSERT INTO sources(id,name,url,slug,added_at) VALUES(1,'test','test','test','2026');
+            INSERT INTO media(id,source_id,filepath,filename,type,added_at,downloaded,rating,auto_rating,human_rating,rating_source,rating_reviewed)
+            VALUES(1,1,'a','a','image','2026',1,1,1,1,'human',1),
+                   (2,1,'b','b','image','2026',1,5,5,NULL,'auto',0);").unwrap();
+        super::run_migrations(&conn).unwrap();
+        let human: (i64, i64, i64, String, bool, String) = conn.query_row(
+            "SELECT rating,auto_rating,human_rating,rating_source,rating_reviewed,nsfw_state FROM media WHERE id=1",
+            [], |row| Ok((row.get(0)?,row.get(1)?,row.get(2)?,row.get(3)?,row.get(4)?,row.get(5)?)),
+        ).unwrap();
+        assert_eq!(human, (2, 2, 2, "human".into(), true, "pending".into()));
+        let five: (i64, i64, Option<i64>) = conn.query_row(
+            "SELECT rating,auto_rating,human_rating FROM media WHERE id=2", [],
+            |row| Ok((row.get(0)?,row.get(1)?,row.get(2)?)),
+        ).unwrap();
+        assert_eq!(five, (5, 5, None));
     }
 }

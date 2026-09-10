@@ -171,6 +171,30 @@
       <input id="settings-max-concurrent" type="number" min="1" max="20" step="1">
     </label>
 
+<<<<<<< Updated upstream
+=======
+    <h2 class="settings-subhead">Media</h2>
+    <p class="muted">Videos at or below this duration are Clips. Changing it only reclassifies views; it never edits source files.</p>
+    <label class="settings-field mono small">
+      maximum clip length
+      <input id="settings-max-clip-length" type="number" min="5" max="3600" step="1"> seconds
+    </label>
+
+    <h2 class="settings-subhead">Library</h2>
+    <label class="settings-field mono small">
+      default library layout
+      <select id="settings-library-layout"><option value="grid">Grid</option><option value="table">Table</option></select>
+    </label>
+    <label class="settings-field mono small">
+      ffmpeg executable
+      <input id="settings-ffmpeg-bin" type="text" placeholder="ffmpeg">
+    </label>
+    <label class="settings-field mono small">
+      optional P-HAR action-model path
+      <input id="settings-action-model-path" type="text" placeholder="Leave blank for review-only Fast ratings">
+    </label>
+
+>>>>>>> Stashed changes
     <h2 class="settings-subhead">Appearance</h2>
     <label class="settings-field mono small">
       theme
@@ -220,18 +244,56 @@
 
     <h2 class="settings-subhead">NSFW auto-rating</h2>
     <p class="muted">
-      Runs newly-downloaded (and, in the background, existing) photos through a local
-      classifier and sets their star rating automatically — 1★ clothed/safe up to 5★
-      extremely explicit — for anything not already rated by hand. Use the
-      "all ratings" dropdown in the toolbar to hide content above a rating cutoff.
-      Requires Python plus the <code>opennsfw-standalone</code> package to be installed
-      separately (see <code>curator --docs</code>) — nothing else in Curator depends on
-      this, so it's fine to leave off. Toggling this needs a restart to take effect.
+      NudeNet classifies anatomy exposure locally: 1★ SFW, 2★ Slow, and 3★ Medium.
+      Detector confidence alone never creates Fast or Cum. An optional supervised P-HAR
+      temporal model can suggest 4★ Fast for qualifying clips; 5★ Cum is always confirmed
+      by a person or a reserved <code>pace:cum</code> tag. Long videos and unavailable
+      dependencies go to Review without blocking image classification. Toggling needs a restart.
     </p>
     <label class="settings-checkbox mono small">
       <input id="settings-nsfw-filter-enabled" type="checkbox"> enable NSFW auto-rating (restart required)
     </label>
 
+<<<<<<< Updated upstream
+=======
+    <h2 class="settings-subhead">GOON defaults</h2>
+    <label class="settings-checkbox mono small">
+      <input id="settings-metronome-enabled" type="checkbox"> metronome enabled
+    </label>
+    <label class="settings-field mono small">
+      metronome volume
+      <input id="settings-metronome-volume" type="number" min="0" max="1" step="0.05">
+    </label>
+    <label class="settings-field mono small">
+      persona
+      <select id="settings-goon-persona"><option value="neutral">Neutral</option><option value="mommy">Mommy</option><option value="dom">Dom</option><option value="brat">Brat</option></select>
+    </label>
+    <label class="settings-field mono small">
+      installed speech voice
+      <select id="settings-tts-voice"><option value="">System default</option></select>
+    </label>
+    <label class="settings-field mono small">
+      voice rate / pitch / volume
+      <input id="settings-tts-rate" type="number" min="0.1" max="3" step="0.1"> / <input id="settings-tts-pitch" type="number" min="0" max="2" step="0.1"> / <input id="settings-tts-volume" type="number" min="0" max="1" step="0.05">
+    </label>
+    <label class="settings-field mono small">
+      soundtrack provider
+      <select id="settings-soundtrack-provider"><option value="local">Local audio</option><option value="youtube">YouTube</option><option value="soundcloud">SoundCloud</option><option value="apple_music">Apple Music</option><option value="spotify">Spotify (independent only)</option></select>
+    </label>
+
+    <h2 class="settings-subhead">Startup</h2>
+    <label class="settings-checkbox mono small">
+      <input id="settings-start-with-windows" type="checkbox"> Start Curator when Windows starts
+    </label>
+    <label class="settings-checkbox mono small">
+      <input id="settings-keep-running-in-tray" type="checkbox"> Keep Curator running in the system tray when the window is closed
+    </label>
+
+    <h2 class="settings-subhead">Remote Access</h2>
+    <p class="muted">The same Curator server serves the desktop app, LAN clients, and Tailscale. Addresses refresh while Curator is running.</p>
+    <div id="settings-remote-access" class="mono small muted" aria-live="polite">Checking server status…</div>
+
+>>>>>>> Stashed changes
     <h2 class="settings-subhead">Setup</h2>
     <p class="muted">
       Reopens the first-run setup wizard so you can re-check dependencies or change

@@ -23,8 +23,21 @@ use serde::{Deserialize, Serialize};
 pub struct Config {
     pub data_dir:       Option<String>,
     pub gallery_dl_bin: Option<String>,
+<<<<<<< Updated upstream
     pub python_bin:     Option<String>,
     pub ffprobe_bin:    Option<String>,
+=======
+    pub python_bin: Option<String>,
+    pub ffprobe_bin: Option<String>,
+    /// ffmpeg is deliberately separate from ffprobe.  The latter is enough
+    /// for the ordinary clips/videos split; sampling video frames and
+    /// decoding a local soundtrack require the actual encoder binary.
+    pub ffmpeg_bin: Option<String>,
+    /// Optional path to a P-HAR-compatible temporal action model.  Leaving
+    /// this unset keeps NudeNet image classification available and routes
+    /// clips to manual review instead of repeatedly trying to load a model.
+    pub action_model_path: Option<String>,
+>>>>>>> Stashed changes
 }
 
 /// `config.json` always lives next to the running executable (not in

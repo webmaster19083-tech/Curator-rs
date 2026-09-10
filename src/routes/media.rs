@@ -12,12 +12,37 @@ use serde_json::{json, Value};
 use crate::db::now_iso;
 use crate::AppState;
 
+<<<<<<< Updated upstream
+=======
+/// Keep the operational rating definition in one SQL expression. `rating`
+/// remains a backwards-compatible cache for older clients, but every new
+/// decision path uses this precedence: human star, reserved human `pace:*`
+/// tag, temporal P-HAR Fast suggestion, then NudeNet 1-3 evidence.
+pub const EFFECTIVE_RATING_SQL: &str = "COALESCE(m.human_rating, NULLIF((SELECT MAX(CASE LOWER(t.name) WHEN 'pace:slow' THEN 2 WHEN 'pace:medium' THEN 3 WHEN 'pace:fast' THEN 4 WHEN 'pace:cum' THEN 5 ELSE 0 END) FROM media_tags pmt JOIN tags t ON t.id=pmt.tag_id WHERE pmt.media_id=m.id), 0), NULLIF(m.action_rating, 0), NULLIF(m.auto_rating, 0), 0)";
+
+fn pace_label_sql() -> String {
+    format!(
+        "CASE {EFFECTIVE_RATING_SQL} WHEN 1 THEN 'sfw' WHEN 2 THEN 'slow' WHEN 3 THEN 'medium' WHEN 4 THEN 'fast' WHEN 5 THEN 'cum' ELSE 'unrated' END"
+    )
+}
+
+>>>>>>> Stashed changes
 // ─── Sort orders ─────────────────────────────────────────────────────────────
 
 fn sort_order(sort: &str) -> &'static str {
     match sort {
+<<<<<<< Updated upstream
         "rating_desc" => "m.rating DESC, m.id ASC",
         "rating_asc" => "m.rating ASC, m.id ASC",
+=======
+        "size_desc" => "COALESCE(m.file_size_bytes,-1) DESC, m.id ASC",
+        "size_asc" => "COALESCE(m.file_size_bytes,9223372036854775807) ASC, m.id ASC",
+        // Rating order is expanded in `list` so the tag/action precedence in
+        // `EFFECTIVE_RATING_SQL` is retained. These arms remain for callers
+        // that only need a valid deterministic fallback.
+        "rating_desc" => "m.id DESC",
+        "rating_asc" => "m.id ASC",
+>>>>>>> Stashed changes
         "date_desc" => "m.added_at DESC, m.id DESC",
         "date_asc" => "m.added_at ASC, m.id ASC",
         "filename_asc" => "m.filename COLLATE NOCASE ASC, m.id ASC",
@@ -67,10 +92,21 @@ pub async fn list(
         "shuffle" => (format!("((m.id * {seed}) % 2147483647)"), false, false),
         _ => ("m.id".to_string(), false, false),
     };
-    let order = if sort == "shuffle" {
+    let base_order = if sort == "shuffle" {
         format!("{key}, m.id")
+    } else if sort == "rating_desc" {
+        format!("{EFFECTIVE_RATING_SQL} DESC, m.id ASC")
+    } else if sort == "rating_asc" {
+        format!("{EFFECTIVE_RATING_SQL} ASC, m.id ASC")
     } else {
         sort_order(sort).to_string()
+    };
+    // Manual-review clips (including intentionally skipped long videos) are
+    // always surfaced before ordinary automatic suggestions.
+    let order = if q.rating_status.as_deref() == Some("needs_review") {
+        format!("m.manual_review_required DESC, {base_order}")
+    } else {
+        base_order
     };
 
     // Get group effective tags — read from cache or rebuild
@@ -102,10 +138,17 @@ pub async fn list(
     let mut extra = String::from(" AND m.missing=0");
     extra.push_str(match q.rating_status.as_deref().unwrap_or("") {
         "" | "all" => "",
+<<<<<<< Updated upstream
         "unrated" => " AND m.rating=0 AND m.auto_rating=0",
         "auto" => " AND m.rating_source='auto'",
         "needs_review" => " AND m.auto_rating>0 AND m.rating_reviewed=0",
         "reviewed" => " AND m.rating_reviewed=1",
+=======
+        "unrated" => " AND m.human_rating IS NULL AND m.auto_rating=0",
+        "auto" => " AND m.human_rating IS NULL AND (m.auto_rating>0 OR m.action_rating>0)",
+        "needs_review" => " AND m.human_rating IS NULL AND (m.manual_review_required=1 OR m.auto_rating>0 OR m.action_rating>0)",
+        "reviewed" => " AND m.human_rating IS NOT NULL",
+>>>>>>> Stashed changes
         _ => {
             return Err((
                 StatusCode::BAD_REQUEST,
@@ -114,12 +157,40 @@ pub async fn list(
         }
     });
     if let Some(kind) = q.media_type.as_deref() {
+<<<<<<< Updated upstream
         extra.push_str(match kind {
             "image" => " AND m.type='image'",
             "clip" => " AND m.type='video' AND m.duration_secs IS NOT NULL AND m.duration_secs<=90",
             "video" => " AND m.type='video' AND (m.duration_secs IS NULL OR m.duration_secs>90)",
             _ => "",
         });
+=======
+        match kind {
+            "image" => extra.push_str(" AND m.type='image'"),
+            "clip" => {
+                params.push((max_clip_length_secs as i64).into());
+                extra.push_str(&format!(
+                    " AND m.type='video' AND m.duration_secs IS NOT NULL AND m.duration_secs<=?{}",
+                    params.len()
+                ));
+            }
+            "video" => {
+                params.push((max_clip_length_secs as i64).into());
+                extra.push_str(&format!(
+                    " AND m.type='video' AND (m.duration_secs IS NULL OR m.duration_secs>?{})",
+                    params.len()
+                ));
+            }
+            _ => {}
+        }
+    }
+    if q.rating_status.as_deref() == Some("needs_review") && q.include_long_videos != Some(true) {
+        params.push((max_clip_length_secs as i64).into());
+        extra.push_str(&format!(
+            " AND (m.manual_review_required=1 OR m.type<>'video' OR m.duration_secs IS NULL OR m.duration_secs<=?{})",
+            params.len()
+        ));
+>>>>>>> Stashed changes
     }
     if let Some(tag) = q.tag.as_deref() {
         extra.push_str(" AND ");
@@ -201,8 +272,13 @@ pub async fn list(
     }
     params.push(((limit + 1) as i64).into());
     let limit_param = params.len();
+    let pace_label = pace_label_sql();
     let query = format!(
+<<<<<<< Updated upstream
         "SELECT m.id,m.source_id,m.filepath,m.filename,m.type,m.added_at,m.rating,m.auto_rating,m.auto_rating_score,m.rating_source,m.rating_reviewed,m.rating_reviewed_at,m.origin_url,m.downloaded,m.duration_secs,m.clip_parent_id, {key} AS _cursor_key, s.group_id AS _source_group_id, \
+=======
+        "SELECT m.id,m.source_id,m.filepath,m.filename,m.type,m.added_at,m.downloaded_at,m.modified_at,{EFFECTIVE_RATING_SQL} AS rating,{pace_label} AS pace_label,m.human_rating,m.auto_rating,m.auto_rating_score,m.action_rating,m.rating_source,m.rating_reviewed,m.rating_reviewed_at,m.origin_url,m.downloaded,m.duration_secs,m.clip_parent_id,m.file_size_bytes,m.clip_start_secs,m.clip_end_secs,m.classifier_model,m.classifier_version,m.classifier_score,m.classifier_evidence,m.action_model,m.action_model_version,m.action_score,m.action_evidence,m.classification_label,m.manual_review_required,m.manual_review_reason,m.classification_updated_at,CASE WHEN m.clip_start_secs IS NOT NULL THEN (SELECT filepath FROM media parent WHERE parent.id=m.clip_parent_id) ELSE m.filepath END AS playback_filepath, {key} AS _cursor_key, s.group_id AS _source_group_id, (SELECT GROUP_CONCAT(mg.group_id, ',') FROM media_groups mg WHERE mg.media_id=m.id) AS _media_group_ids, s.name AS source, s.url AS source_url, (SELECT sm.creator FROM source_metadata sm WHERE sm.media_id=m.id ORDER BY sm.id DESC LIMIT 1) AS creator, \
+>>>>>>> Stashed changes
             (SELECT GROUP_CONCAT(t.name, ',') FROM media_tags mt \
              JOIN tags t ON t.id = mt.tag_id WHERE mt.media_id = m.id) AS tags_csv \
          FROM media m \
@@ -287,6 +363,10 @@ pub async fn list(
     for mut r in rows {
         r.remove("_cursor_key");
         r.insert("rating_reviewed".into(), json!(r["rating_reviewed"] == 1));
+        r.insert(
+            "manual_review_required".into(),
+            json!(r["manual_review_required"] == 1),
+        );
         let source_group_id: Option<i64> = r.remove("_source_group_id").and_then(|v| v.as_i64());
         let tags_csv = r
             .remove("tags_csv")
@@ -331,10 +411,10 @@ pub async fn set_rating(
     Path(id): Path<i64>,
     Json(body): Json<RatingBody>,
 ) -> Result<Json<Value>, (StatusCode, Json<Value>)> {
-    if !(0..=5).contains(&body.rating) {
+    if !(1..=5).contains(&body.rating) {
         return Err((
             StatusCode::BAD_REQUEST,
-            Json(json!({"error": "Rating must be between 0 and 5"})),
+            Json(json!({"error": "Rating must be between 1 and 5"})),
         ));
     }
     save_review(&state, id, Some(body.rating))
@@ -354,6 +434,7 @@ fn save_review(
 ) -> Result<Json<Value>, (StatusCode, Json<Value>)> {
     let conn = state.pool.get().map_err(db_err)?;
     let result = conn.query_row(
+<<<<<<< Updated upstream
         "UPDATE media SET rating=COALESCE(?1,auto_rating), rating_source='human',
          rating_reviewed=1, rating_reviewed_at=?2 WHERE id=?3 AND (?1 IS NOT NULL OR auto_rating BETWEEN 1 AND 5)
          RETURNING rating,auto_rating,auto_rating_score,rating_source,rating_reviewed,rating_reviewed_at",
@@ -361,6 +442,16 @@ fn save_review(
             "id":id, "rating":r.get::<_,i64>(0)?, "auto_rating":r.get::<_,i64>(1)?,
             "auto_rating_score":r.get::<_,Option<f64>>(2)?, "rating_source":r.get::<_,String>(3)?,
             "rating_reviewed":r.get::<_,bool>(4)?, "rating_reviewed_at":r.get::<_,Option<String>>(5)?
+=======
+        "UPDATE media SET human_rating=COALESCE(?1,NULLIF(action_rating,0),NULLIF(auto_rating,0)),
+         rating=COALESCE(?1,NULLIF(action_rating,0),NULLIF(auto_rating,0)), rating_source='human',
+         rating_reviewed=1, rating_reviewed_at=?2 WHERE id=?3 AND (?1 IS NOT NULL OR action_rating=4 OR auto_rating BETWEEN 1 AND 5)
+         RETURNING human_rating,auto_rating,auto_rating_score,action_rating,rating_source,rating_reviewed,rating_reviewed_at",
+        rusqlite::params![rating, now_iso(), id], |r| Ok(json!({
+            "id":id, "rating":r.get::<_,i64>(0)?, "pace_label":crate::nsfw::pace_label(r.get::<_,i64>(0)?), "human_rating":r.get::<_,Option<i64>>(0)?, "auto_rating":r.get::<_,i64>(1)?,
+            "auto_rating_score":r.get::<_,Option<f64>>(2)?, "action_rating":r.get::<_,i64>(3)?, "rating_source":r.get::<_,String>(4)?,
+            "rating_reviewed":r.get::<_,bool>(5)?, "rating_reviewed_at":r.get::<_,Option<String>>(6)?
+>>>>>>> Stashed changes
         })));
     match result {
         Ok(value) => Ok(Json(value)),
@@ -420,11 +511,20 @@ pub async fn undo_rating(
     Json(body): Json<UndoRatingBody>,
 ) -> Result<Json<Value>, (StatusCode, Json<Value>)> {
     let conn = state.pool.get().map_err(db_err)?;
+<<<<<<< Updated upstream
     let result = conn.query_row("UPDATE media SET rating=auto_rating,rating_source='auto',rating_reviewed=0,rating_reviewed_at=NULL
         WHERE id=?1 AND auto_rating>0 AND rating_reviewed=1 AND rating_reviewed_at=?2
         RETURNING rating,auto_rating,auto_rating_score", rusqlite::params![id,body.rating_reviewed_at], |r| Ok(json!({
             "id":id,"rating":r.get::<_,i64>(0)?,"auto_rating":r.get::<_,i64>(1)?,"auto_rating_score":r.get::<_,Option<f64>>(2)?,
             "rating_source":"auto","rating_reviewed":false,"rating_reviewed_at":null
+=======
+    let result = conn.query_row("UPDATE media SET human_rating=NULL,rating=COALESCE(NULLIF(action_rating,0),auto_rating),
+        rating_source=CASE WHEN action_rating=4 THEN 'auto_action' WHEN auto_rating>0 THEN 'auto' ELSE 'none' END,rating_reviewed=0,rating_reviewed_at=NULL
+        WHERE id=?1 AND human_rating IS NOT NULL AND rating_reviewed_at=?2
+        RETURNING rating,auto_rating,auto_rating_score,rating_source", rusqlite::params![id,body.rating_reviewed_at], |r| Ok(json!({
+            "id":id,"rating":r.get::<_,i64>(0)?,"pace_label":crate::nsfw::pace_label(r.get::<_,i64>(0)?),"auto_rating":r.get::<_,i64>(1)?,"auto_rating_score":r.get::<_,Option<f64>>(2)?,
+            "human_rating":null,"rating_source":r.get::<_,String>(3)?,"rating_reviewed":false,"rating_reviewed_at":null
+>>>>>>> Stashed changes
         })));
     match result {
         Ok(value) => Ok(Json(value)),
@@ -497,6 +597,286 @@ pub async fn remove_tag(
 
 // ─── Helpers ──────────────────────────────────────────────────────────────────
 
+<<<<<<< Updated upstream
+=======
+#[derive(Deserialize)]
+pub struct BulkMediaBody {
+    #[serde(default)]
+    pub ids: Vec<i64>,
+    pub action: String,
+    pub group_id: Option<i64>,
+    pub tag: Option<String>,
+    pub rating: Option<i64>,
+}
+
+/// Server-side bulk organization for Explorer multi-select. The action names
+/// intentionally mirror the UI and reuse the existing media/tag/metadata
+/// models instead of creating a separate library store.
+pub async fn bulk(
+    State(state): State<Arc<AppState>>,
+    Json(body): Json<BulkMediaBody>,
+) -> Result<Json<Value>, (StatusCode, Json<Value>)> {
+    let mut ids = body.ids.clone();
+    ids.sort_unstable();
+    ids.dedup();
+    if ids.is_empty() || ids.len() > 500 || ids.iter().any(|id| *id <= 0) {
+        return Err((
+            StatusCode::BAD_REQUEST,
+            Json(json!({"error":"Select between one and 500 valid media items"})),
+        ));
+    }
+    let (updated, failed) = match body.action.as_str() {
+        "add_group" | "move" => bulk_groups(&state, &ids, &body).await?,
+        "add_tag" => bulk_add_tag(&state, &ids, body.tag.as_deref())?,
+        "set_rating" => bulk_set_rating(&state, &ids, body.rating)?,
+        "refresh_metadata" => {
+            let worker_state = Arc::clone(&state);
+            let worker_ids = ids.clone();
+            tokio::task::spawn_blocking(move || bulk_refresh_metadata(&worker_state, &worker_ids))
+                .await
+                .map_err(db_err)??
+        }
+        "delete" => {
+            let worker_state = Arc::clone(&state);
+            let worker_ids = ids.clone();
+            tokio::task::spawn_blocking(move || bulk_delete_files(&worker_state, &worker_ids))
+                .await
+                .map_err(db_err)??
+        }
+        _ => {
+            return Err((
+                StatusCode::BAD_REQUEST,
+                Json(json!({"error":"Unknown bulk action"})),
+            ))
+        }
+    };
+    Ok(Json(
+        json!({"action":body.action,"updated":updated,"failed":failed}),
+    ))
+}
+
+async fn bulk_groups(
+    state: &AppState,
+    ids: &[i64],
+    body: &BulkMediaBody,
+) -> Result<(usize, Vec<Value>), (StatusCode, Json<Value>)> {
+    if body.action == "add_group" && body.group_id.is_none() {
+        return Err((
+            StatusCode::BAD_REQUEST,
+            Json(json!({"error":"A group is required"})),
+        ));
+    }
+    let updated = {
+        let conn = state.pool.get().map_err(db_err)?;
+        if let Some(group_id) = body.group_id {
+            let exists: bool = conn
+                .query_row(
+                    "SELECT EXISTS(SELECT 1 FROM groups WHERE id=?1)",
+                    [group_id],
+                    |row| row.get(0),
+                )
+                .map_err(db_err)?;
+            if !exists {
+                return Err((
+                    StatusCode::NOT_FOUND,
+                    Json(json!({"error":"Group not found"})),
+                ));
+            }
+        }
+        let tx = conn.unchecked_transaction().map_err(db_err)?;
+        let mut changed = 0;
+        for id in ids {
+            if body.action == "move" {
+                tx.execute("DELETE FROM media_groups WHERE media_id=?1", [id])
+                    .map_err(db_err)?;
+            }
+            if let Some(group_id) = body.group_id {
+                changed += tx.execute(
+                    "INSERT OR IGNORE INTO media_groups(media_id,group_id,added_at) VALUES(?1,?2,?3)",
+                    rusqlite::params![id, group_id, now_iso()],
+                ).map_err(db_err)?;
+            } else if body.action == "move" {
+                changed += 1;
+            }
+        }
+        tx.commit().map_err(db_err)?;
+        changed
+    };
+    *state.group_tag_cache.write().await = None;
+    Ok((updated, Vec::new()))
+}
+
+fn bulk_add_tag(
+    state: &AppState,
+    ids: &[i64],
+    name: Option<&str>,
+) -> Result<(usize, Vec<Value>), (StatusCode, Json<Value>)> {
+    let name = name.and_then(provenance::normalize_tag).ok_or_else(|| {
+        (
+            StatusCode::BAD_REQUEST,
+            Json(json!({"error":"A valid tag is required"})),
+        )
+    })?;
+    let conn = state.pool.get().map_err(db_err)?;
+    let tx = conn.unchecked_transaction().map_err(db_err)?;
+    let tx_conn = &*tx;
+    let mut updated = 0;
+    let mut failed = Vec::new();
+    for id in ids {
+        let exists: bool = tx_conn
+            .query_row(
+                "SELECT EXISTS(SELECT 1 FROM media WHERE id=?1)",
+                [id],
+                |row| row.get(0),
+            )
+            .map_err(db_err)?;
+        if exists {
+            provenance::attach_tag(tx_conn, *id, &name, provenance::HUMAN, None).map_err(db_err)?;
+            updated += 1;
+        } else {
+            failed.push(json!({"id":id,"error":"Media not found"}));
+        }
+    }
+    tx.commit().map_err(db_err)?;
+    Ok((updated, failed))
+}
+
+fn bulk_set_rating(
+    state: &AppState,
+    ids: &[i64],
+    rating: Option<i64>,
+) -> Result<(usize, Vec<Value>), (StatusCode, Json<Value>)> {
+    let rating = rating.ok_or_else(|| {
+        (
+            StatusCode::BAD_REQUEST,
+            Json(json!({"error":"A rating is required"})),
+        )
+    })?;
+    if !(1..=5).contains(&rating) {
+        return Err((
+            StatusCode::BAD_REQUEST,
+            Json(json!({"error":"Rating must be between 1 and 5"})),
+        ));
+    }
+    let conn = state.pool.get().map_err(db_err)?;
+    let tx = conn.unchecked_transaction().map_err(db_err)?;
+    let mut updated = 0;
+    for id in ids {
+        updated += tx.execute("UPDATE media SET human_rating=?1,rating=?1,rating_source='human',rating_reviewed=1,rating_reviewed_at=?2 WHERE id=?3", rusqlite::params![rating, now_iso(), id]).map_err(db_err)?;
+    }
+    tx.commit().map_err(db_err)?;
+    Ok((updated, Vec::new()))
+}
+
+fn bulk_refresh_metadata(
+    state: &AppState,
+    ids: &[i64],
+) -> Result<(usize, Vec<Value>), (StatusCode, Json<Value>)> {
+    let conn = state.pool.get().map_err(db_err)?;
+    let root = dunce::canonicalize(&state.library_dir).map_err(db_err)?;
+    let tx = conn.unchecked_transaction().map_err(db_err)?;
+    let tx_conn = &*tx;
+    let mut updated = 0;
+    let mut failed = Vec::new();
+    for id in ids {
+        let row: Option<(String, Option<String>)> = tx_conn
+            .query_row(
+                "SELECT filepath,origin_url FROM media WHERE id=?1",
+                [id],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .ok();
+        let Some((filepath, origin_url)) = row else {
+            failed.push(json!({"id":id,"error":"Media not found"}));
+            continue;
+        };
+        let file = root.join(filepath);
+        let sidecar = file.with_file_name(format!(
+            "{}.json",
+            file.file_name()
+                .and_then(|name| name.to_str())
+                .unwrap_or_default()
+        ));
+        match std::fs::read_to_string(sidecar)
+            .ok()
+            .and_then(|raw| serde_json::from_str::<Value>(&raw).ok())
+        {
+            Some(metadata) => match provenance::capture_source_metadata(
+                tx_conn,
+                *id,
+                origin_url.as_deref(),
+                &metadata,
+            ) {
+                Ok(()) => {
+                    tx_conn.execute("UPDATE media SET nsfw_state='pending',nsfw_attempts=0,nsfw_retry_at=0 WHERE id=?1", [id]).map_err(db_err)?;
+                    updated += 1;
+                }
+                Err(error) => failed.push(json!({"id":id,"error":error.to_string()})),
+            },
+            None => failed.push(json!({"id":id,"error":"No valid gallery-dl metadata sidecar"})),
+        }
+    }
+    tx.commit().map_err(db_err)?;
+    Ok((updated, failed))
+}
+
+fn bulk_delete_files(
+    state: &AppState,
+    ids: &[i64],
+) -> Result<(usize, Vec<Value>), (StatusCode, Json<Value>)> {
+    let conn = state.pool.get().map_err(db_err)?;
+    let root = dunce::canonicalize(&state.library_dir).map_err(db_err)?;
+    let tx = conn.unchecked_transaction().map_err(db_err)?;
+    let tx_conn = &*tx;
+    let mut updated = 0;
+    let mut failed = Vec::new();
+    for id in ids {
+        let row: Option<(String, bool)> = tx_conn
+            .query_row(
+                "SELECT filepath,clip_start_secs IS NOT NULL FROM media WHERE id=?1",
+                [id],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .ok();
+        let Some((filepath, virtual_clip)) = row else {
+            failed.push(json!({"id":id,"error":"Media not found"}));
+            continue;
+        };
+        if virtual_clip {
+            tx_conn
+                .execute("UPDATE media SET downloaded=0,missing=1 WHERE id=?1", [id])
+                .map_err(db_err)?;
+            updated += 1;
+            continue;
+        }
+        let Ok(path) = dunce::canonicalize(root.join(filepath)) else {
+            failed.push(json!({"id":id,"error":"Local file is already unavailable"}));
+            continue;
+        };
+        if !path.starts_with(&root) {
+            failed.push(
+                json!({"id":id,"error":"Refusing to delete a file outside Curator's library"}),
+            );
+            continue;
+        }
+        match std::fs::remove_file(&path) {
+            Ok(()) => {
+                tx_conn
+                    .execute(
+                        "UPDATE media SET downloaded=0,missing=1,file_size_bytes=NULL WHERE id=?1",
+                        [id],
+                    )
+                    .map_err(db_err)?;
+                updated += 1;
+            }
+            Err(error) => failed.push(json!({"id":id,"error":error.to_string()})),
+        }
+    }
+    tx.commit().map_err(db_err)?;
+    Ok((updated, failed))
+}
+
+>>>>>>> Stashed changes
 pub fn get_or_create_tag(conn: &rusqlite::Connection, name: &str) -> rusqlite::Result<i64> {
     let name = name.trim().to_lowercase();
     if name.is_empty() {
@@ -724,8 +1104,8 @@ mod tests {
         .await
         .unwrap()
         .0;
-        assert_eq!(queue["media"][0]["auto_rating"], 4);
-        assert_eq!(queue["media"][0]["rating"], 4);
+        assert_eq!(queue["media"][0]["auto_rating"], 3);
+        assert_eq!(queue["media"][0]["rating"], 3);
         assert_eq!(queue["media"][0]["rating_source"], "auto");
         assert_eq!(queue["media"][0]["rating_reviewed"], false);
         assert!((queue["media"][0]["auto_rating_score"].as_f64().unwrap() - 0.72).abs() < 0.00001);
@@ -749,7 +1129,13 @@ mod tests {
                 |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
             )
             .unwrap();
+<<<<<<< Updated upstream
         assert_eq!(row, (0, 5, "human".into()));
+=======
+        // A later automated score is retained, but never replaces the
+        // reviewer’s effective rating.
+        assert_eq!(row, (3, 3, "human".into()));
+>>>>>>> Stashed changes
         let next = list(
             State(state.clone()),
             Query(MediaQuery {
@@ -768,7 +1154,7 @@ mod tests {
             .unwrap()
             .0;
         assert_eq!(approved["rating"], approved["auto_rating"]);
-        assert_eq!(approved["auto_rating"], 3);
+        assert_eq!(approved["auto_rating"], 2);
         assert_eq!(approved["rating_source"], "human");
         assert_eq!(approved["rating_reviewed"], true);
         let queue = list(
@@ -782,6 +1168,34 @@ mod tests {
         .unwrap()
         .0;
         assert!(queue["media"].as_array().unwrap().is_empty());
+<<<<<<< Updated upstream
+=======
+        // Rating APIs intentionally accept only 1-5. Undo restores the
+        // independently stored automatic recommendation for review.
+        let cleared = undo_rating(
+            State(state.clone()),
+            Path(1),
+            Json(UndoRatingBody { rating_reviewed_at: manual["rating_reviewed_at"].as_str().unwrap().to_owned() }),
+        )
+        .await
+        .unwrap()
+        .0;
+        assert_eq!(cleared["rating"], 3);
+        assert!(cleared["human_rating"].is_null());
+        assert_eq!(cleared["rating_source"], "auto");
+        assert_eq!(cleared["rating_reviewed"], false);
+        let reopened = list(
+            State(state.clone()),
+            Query(MediaQuery {
+                rating_status: Some("needs_review".into()),
+                ..Default::default()
+            }),
+        )
+        .await
+        .unwrap()
+        .0;
+        assert_eq!(reopened["media"][0]["id"], 1);
+>>>>>>> Stashed changes
         assert_eq!(
             approve_rating(State(state.clone()), Path(3))
                 .await

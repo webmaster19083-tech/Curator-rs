@@ -1,0 +1,16 @@
+        Info Looking up installed tauri packages to check mismatched versions...
+    Blocking waiting for file lock on build directory
+   Compiling curator-desktop v0.1.4 (C:\Users\webma\Downloads\curator_rs_fixed\desktop)
+    Finished `release` profile [optimized] target(s) in 4m 02s
+       Built application at: C:\Users\webma\Downloads\curator_rs_fixed\desktop\target\release\Curator.exe
+        Info Patching C:\Users\webma\Downloads\curator_rs_fixed\desktop\target\release\Curator.exe with bundle type information: nsis
+        Info Target: x64
+     Running makensis to produce C:\Users\webma\Downloads\curator_rs_fixed\desktop\target\release\bundle\nsis\Curator_0.1.4_x64-setup.exe
+        Info Patching C:\Users\webma\Downloads\curator_rs_fixed\desktop\target\release\Curator.exe with bundle type information: msi
+        Info Target: x64
+     Running candle for "C:\\Users\\webma\\Downloads\\curator_rs_fixed\\desktop\\target\\release\\wix\\x64\\main.wxs"
+     Running light to produce C:\Users\webma\Downloads\curator_rs_fixed\desktop\target\release\bundle\msi\Curator_0.1.4_x64_en-US.msi
+    Finished 2 bundles at:
+        C:\Users\webma\Downloads\curator_rs_fixed\desktop\target\release\bundle\nsis\Curator_0.1.4_x64-setup.exe
+        C:\Users\webma\Downloads\curator_rs_fixed\desktop\target\release\bundle\msi\Curator_0.1.4_x64_en-US.msi
+

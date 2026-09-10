@@ -1,0 +1,225 @@
+<?if $(sys.BUILDARCH)="x86"?>
+    <?define Win64 = "no" ?>
+    <?define PlatformProgramFilesFolder = "ProgramFilesFolder" ?>
+<?elseif $(sys.BUILDARCH)="x64"?>
+    <?define Win64 = "yes" ?>
+    <?define PlatformProgramFilesFolder = "ProgramFiles64Folder" ?>
+<?elseif $(sys.BUILDARCH)="arm64"?>
+    <?define Win64 = "yes" ?>
+    <?define PlatformProgramFilesFolder = "ProgramFiles64Folder" ?>
+<?else?>
+    <?error Unsupported value of sys.BUILDARCH=$(sys.BUILDARCH)?>
+<?endif?>
+
+<Wix xmlns="http://schemas.microsoft.com/wix/2006/wi">
+    <Product
+            Id="*"
+            Name="Curator"
+            UpgradeCode="1a875dad-fce5-5a92-8b25-003b3c4663e0"
+            Language="!(loc.TauriLanguage)"
+            Manufacturer="webmaster19083"
+            Version="0.1.4">
+
+        <Package Id="*"
+                 Keywords="Installer"
+                 InstallerVersion="450"
+                 Languages="0"
+                 Compressed="yes"
+                 InstallScope="perMachine"
+                 SummaryCodepage="!(loc.TauriCodepage)"/>
+
+        <!-- https://docs.microsoft.com/en-us/windows/win32/msi/reinstallmode -->
+        <!-- reinstall all files; rewrite all registry entries; reinstall all shortcuts -->
+        <Property Id="REINSTALLMODE" Value="amus" />
+
+        <!-- Auto launch app after installation, useful for passive mode which usually used in updates -->
+        <Property Id="AUTOLAUNCHAPP" Secure="yes" />
+        <!-- Property to forward cli args to the launched app to not lose those of the pre-update instance -->
+        <Property Id="LAUNCHAPPARGS" Secure="yes" />
+
+            <MajorUpgrade Schedule="afterInstallInitialize" AllowDowngrades="yes" />
+
+        <InstallExecuteSequence>
+            <RemoveShortcuts>Installed AND NOT UPGRADINGPRODUCTCODE</RemoveShortcuts>
+        </InstallExecuteSequence>
+
+        <Media Id="1" Cabinet="app.cab" EmbedCab="yes" />
+
+
+        <Icon Id="ProductIcon" SourceFile="C:\Users\webma\Downloads\curator_rs_fixed\desktop\target\release\resources\icon.ico"/>
+        <Property Id="ARPPRODUCTICON" Value="ProductIcon" />
+        <Property Id="ARPNOREPAIR" Value="yes" Secure="yes" />      <!-- Remove repair -->
+        <SetProperty Id="ARPNOMODIFY" Value="1" After="InstallValidate" Sequence="execute"/>
+
+
+        <!-- NOTE: The order of RegistrySearch elements below matters. In WIX, when multiple
+             RegistrySearch elements are listed under a single Property, the LAST successful
+             match wins. We list the NSIS default-key search first and the MSI InstallDir
+             search second so that the MSI-specific path takes priority when both keys exist. -->
+        <Property Id="INSTALLDIR">
+          <!-- First attempt: Search for the default key value (this is how the nsis installer stores the path) -->
+          <RegistrySearch Id="PrevInstallDirNoName" Root="HKCU" Key="Software\webmaster19083\Curator" Type="raw" />
+
+          <!-- Second attempt: Search for "InstallDir" which takes priority if found (this is how the msi installer stores the path) -->
+          <RegistrySearch Id="PrevInstallDirWithName" Root="HKCU" Key="Software\webmaster19083\Curator" Name="InstallDir" Type="raw" />
+        </Property>
+
+        <!-- launch app checkbox -->
+        <Property Id="WIXUI_EXITDIALOGOPTIONALCHECKBOXTEXT" Value="!(loc.LaunchApp)" />
+        <Property Id="WIXUI_EXITDIALOGOPTIONALCHECKBOX" Value="1"/>
+        <CustomAction Id="LaunchApplication" Impersonate="yes" FileKey="Path" ExeCommand="[LAUNCHAPPARGS]" Return="asyncNoWait" />
+
+        <UI>
+            <!-- launch app checkbox -->
+            <Publish Dialog="ExitDialog" Control="Finish" Event="DoAction" Value="LaunchApplication">WIXUI_EXITDIALOGOPTIONALCHECKBOX = 1 and NOT Installed</Publish>
+
+            <Property Id="WIXUI_INSTALLDIR" Value="INSTALLDIR" />
+
+            <!-- Skip license dialog -->
+            <Publish Dialog="WelcomeDlg"
+                     Control="Next"
+                     Event="NewDialog"
+                     Value="InstallDirDlg"
+                     Order="2">1</Publish>
+            <Publish Dialog="InstallDirDlg"
+                     Control="Back"
+                     Event="NewDialog"
+                     Value="WelcomeDlg"
+                     Order="2">1</Publish>
+        </UI>
+
+        <UIRef Id="WixUI_InstallDir" />
+
+        <Directory Id="TARGETDIR" Name="SourceDir">
+            <Directory Id="DesktopFolder" Name="Desktop">
+                <Component Id="ApplicationShortcutDesktop" Guid="*">
+                    <Shortcut Id="ApplicationDesktopShortcut" Name="Curator" Description="Runs Curator" Target="[!Path]" WorkingDirectory="INSTALLDIR" />
+                    <RemoveFolder Id="DesktopFolder" On="uninstall" />
+                    <RegistryValue Root="HKCU" Key="Software\webmaster19083\Curator" Name="Desktop Shortcut" Type="integer" Value="1" KeyPath="yes" />
+                </Component>
+            </Directory>
+            <Directory Id="$(var.PlatformProgramFilesFolder)" Name="PFiles">
+                <Directory Id="INSTALLDIR" Name="Curator"/>
+            </Directory>
+            <Directory Id="ProgramMenuFolder">
+                <Directory Id="ApplicationProgramsFolder" Name="Curator"/>
+            </Directory>
+        </Directory>
+
+        <DirectoryRef Id="INSTALLDIR">
+            <Component Id="RegistryEntries" Guid="*">
+                <RegistryKey Root="HKCU" Key="Software\webmaster19083\Curator">
+                    <RegistryValue Name="InstallDir" Type="string" Value="[INSTALLDIR]" KeyPath="yes" />
+                </RegistryKey>
+                <!-- Change the Root to HKCU for perUser installations -->
+</Component>
+            <Component Id="Path" Guid="a55a4c51-1ffc-521b-8789-633cde55323b" Win64="$(var.Win64)">
+                <File Id="Path" Source="C:\Users\webma\Downloads\curator_rs_fixed\desktop\target\release\Curator.exe" KeyPath="yes" Checksum="yes"/>
+</Component>
+            <Directory Id="Id5749cef412b48e7b3003097c17331dc" Name="static"><Component Id="I21a62baf7cab454cb4aa192cdb979314" Guid="218485c7-686f-4a58-a53e-de288c97bf92" Win64="$(var.Win64)" KeyPath="yes"><File Id="PathFile_I21a62baf7cab454cb4aa192cdb979314" Source="C:\Users\webma\Downloads\curator_rs_fixed\desktop\..\static\app.js" /></Component><Component Id="I7800bb753cd74f39b078fc33e81235a2" Guid="f56b65ad-fc14-40e9-a29b-b8dc957f15b3" Win64="$(var.Win64)" KeyPath="yes"><File Id="PathFile_I7800bb753cd74f39b078fc33e81235a2" Source="C:\Users\webma\Downloads\curator_rs_fixed\desktop\..\static\desktop.js" /></Component><Component Id="I26a850ec2ee64a26acf2ca96dd181ae3" Guid="99c89c58-dda1-4fd2-b9ed-a44f70d9e339" Win64="$(var.Win64)" KeyPath="yes"><File Id="PathFile_I26a850ec2ee64a26acf2ca96dd181ae3" Source="C:\Users\webma\Downloads\curator_rs_fixed\desktop\..\static\index.html" /></Component><Component Id="I5a32d245b3874f268a26bfdffda4031c" Guid="20de8c8a-bfda-441a-a82d-cd8629de3225" Win64="$(var.Win64)" KeyPath="yes"><File Id="PathFile_I5a32d245b3874f268a26bfdffda4031c" Source="C:\Users\webma\Downloads\curator_rs_fixed\desktop\..\static\library.js" /></Component><Component Id="Icd7f686b2cae4f0eb68e9e16af8264dd" Guid="2360c4f0-1672-497f-bf3c-6e2e56286b16" Win64="$(var.Win64)" KeyPath="yes"><File Id="PathFile_Icd7f686b2cae4f0eb68e9e16af8264dd" Source="C:\Users\webma\Downloads\curator_rs_fixed\desktop\..\static\oobe.css" /></Component><Component Id="I9cc20519e8214c5ca3b1ba299d24dcd2" Guid="da48318b-2627-43aa-a195-63ccd8668c7f" Win64="$(var.Win64)" KeyPath="yes"><File Id="PathFile_I9cc20519e8214c5ca3b1ba299d24dcd2" Source="C:\Users\webma\Downloads\curator_rs_fixed\desktop\..\static\oobe.html" /></Component><Component Id="Ib6f888b5c86c41528c6b9b67f2c2a1cf" Guid="291c342a-e839-4e90-b02c-62f0f9bd6086" Win64="$(var.Win64)" KeyPath="yes"><File Id="PathFile_Ib6f888b5c86c41528c6b9b67f2c2a1cf" Source="C:\Users\webma\Downloads\curator_rs_fixed\desktop\..\static\oobe.js" /></Component><Component Id="I25c6d21d85ed46a4a9a488c265e81b83" Guid="04d72da0-9f86-43db-bf94-6b2f6950ddc7" Win64="$(var.Win64)" KeyPath="yes"><File Id="PathFile_I25c6d21d85ed46a4a9a488c265e81b83" Source="C:\Users\webma\Downloads\curator_rs_fixed\desktop\..\static\style.css" /></Component><Component Id="I0dde4bdd78a346088572b5c8be7c094c" Guid="17952f54-1931-4ceb-a299-8a03be065266" Win64="$(var.Win64)" KeyPath="yes"><File Id="PathFile_I0dde4bdd78a346088572b5c8be7c094c" Source="C:\Users\webma\Downloads\curator_rs_fixed\desktop\..\static\virtual-clips.js" /></Component></Directory>
+            <Component Id="CMP_UninstallShortcut" Guid="*">
+
+                <Shortcut Id="UninstallShortcut"
+						  Name="Uninstall Curator"
+						  Description="Uninstalls Curator"
+						  Target="[System64Folder]msiexec.exe"
+						  Arguments="/x [ProductCode]" />
+
+				<RemoveFolder Id="INSTALLDIR"
+							  On="uninstall" />
+
+				<RegistryValue Root="HKCU"
+							   Key="Software\webmaster19083\Curator"
+							   Name="Uninstaller Shortcut"
+							   Type="integer"
+							   Value="1"
+							   KeyPath="yes" />
+            </Component>
+        </DirectoryRef>
+
+        <DirectoryRef Id="ApplicationProgramsFolder">
+            <Component Id="ApplicationShortcut" Guid="*">
+                <Shortcut Id="ApplicationStartMenuShortcut"
+                    Name="Curator"
+                    Description="Runs Curator"
+                    Target="[!Path]"
+                    Icon="ProductIcon"
+                    WorkingDirectory="INSTALLDIR">
+                    <ShortcutProperty Key="System.AppUserModel.ID" Value="tech.webmaster19083.curator"/>
+                </Shortcut>
+                <RemoveFolder Id="ApplicationProgramsFolder" On="uninstall"/>
+                <RegistryValue Root="HKCU" Key="Software\webmaster19083\Curator" Name="Start Menu Shortcut" Type="integer" Value="1" KeyPath="yes"/>
+           </Component>
+        </DirectoryRef>
+
+<Feature
+                Id="MainProgram"
+                Title="Application"
+                Description="!(loc.InstallAppFeature)"
+                Level="1"
+                ConfigurableDirectory="INSTALLDIR"
+                AllowAdvertise="no"
+                Display="expand"
+                Absent="disallow">
+
+            <ComponentRef Id="RegistryEntries"/>
+
+<ComponentRef Id="I21a62baf7cab454cb4aa192cdb979314"/>
+<ComponentRef Id="I7800bb753cd74f39b078fc33e81235a2"/>
+<ComponentRef Id="I26a850ec2ee64a26acf2ca96dd181ae3"/>
+<ComponentRef Id="I5a32d245b3874f268a26bfdffda4031c"/>
+<ComponentRef Id="Icd7f686b2cae4f0eb68e9e16af8264dd"/>
+<ComponentRef Id="I9cc20519e8214c5ca3b1ba299d24dcd2"/>
+<ComponentRef Id="Ib6f888b5c86c41528c6b9b67f2c2a1cf"/>
+<ComponentRef Id="I25c6d21d85ed46a4a9a488c265e81b83"/>
+<ComponentRef Id="I0dde4bdd78a346088572b5c8be7c094c"/>
+
+            <Feature Id="ShortcutsFeature"
+                Title="Shortcuts"
+                Level="1">
+                <ComponentRef Id="Path"/>
+                <ComponentRef Id="CMP_UninstallShortcut" />
+                <ComponentRef Id="ApplicationShortcut" />
+                <ComponentRef Id="ApplicationShortcutDesktop" />
+            </Feature>
+
+            <Feature
+                Id="Environment"
+                Title="PATH Environment Variable"
+                Description="!(loc.PathEnvVarFeature)"
+                Level="1"
+                Absent="allow">
+            <ComponentRef Id="Path"/>
+</Feature>
+        </Feature>
+
+        <Feature Id="External" AllowAdvertise="no" Absent="disallow">
+</Feature>
+
+        <!-- WebView2 -->
+        <Property Id="INSTALLED_WEBVIEW2_VERSION">
+            <RegistrySearch Id="Webview2VersionSystemx64" Root="HKLM" Key="SOFTWARE\WOW6432Node\Microsoft\EdgeUpdate\Clients\{F3017226-FE2A-4295-8BDF-00C3A9A7E4C5}" Name="pv" Type="raw" />
+            <RegistrySearch Id="Webview2VersionSystemx86" Root="HKLM" Key="SOFTWARE\Microsoft\EdgeUpdate\Clients\{F3017226-FE2A-4295-8BDF-00C3A9A7E4C5}" Name="pv" Type="raw" />
+            <RegistrySearch Id="Webview2VersionUser" Root="HKCU" Key="SOFTWARE\Microsoft\EdgeUpdate\Clients\{F3017226-FE2A-4295-8BDF-00C3A9A7E4C5}" Name="pv" Type="raw"/>
+        </Property>
+
+        <!-- Download webview bootstrapper mode -->
+        <CustomAction Id='DownloadAndInvokeBootstrapper' Directory="INSTALLDIR" Execute="deferred" ExeCommand='powershell.exe -NoProfile -windowstyle hidden try [\{] [\[]Net.ServicePointManager[\]]::SecurityProtocol = [\[]Net.SecurityProtocolType[\]]::Tls12 [\}] catch [\{][\}]; Invoke-WebRequest -Uri "https://go.microsoft.com/fwlink/p/?LinkId=2124703" -OutFile "$env:TEMP\MicrosoftEdgeWebview2Setup.exe" ; Start-Process -FilePath "$env:TEMP\MicrosoftEdgeWebview2Setup.exe" -ArgumentList (&apos;/silent&apos;, &apos;/install&apos;) -Wait' Return='check'/>
+        <InstallExecuteSequence>
+            <Custom Action='DownloadAndInvokeBootstrapper' Before='InstallFinalize'>
+                <![CDATA[NOT(REMOVE OR INSTALLED_WEBVIEW2_VERSION)]]>
+            </Custom>
+        </InstallExecuteSequence>
+
+
+
+
+
+
+        <InstallExecuteSequence>
+          <Custom Action="LaunchApplication" After="InstallFinalize">AUTOLAUNCHAPP AND NOT Installed</Custom>
+        </InstallExecuteSequence>
+
+        <SetProperty Id="ARPINSTALLLOCATION" Value="[INSTALLDIR]" After="CostFinalize"/>
+    </Product>
+</Wix>

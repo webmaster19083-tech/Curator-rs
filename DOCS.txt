@@ -155,8 +155,9 @@ them by editing the group (or moving the file out of it), not the file.
 
 RATINGS & TAGS
 ---------------
-Click a star in the lightbox to rate a file 1-5; click the current rating
-again to clear it. Add tags via the lightbox's tag box (Enter or "+ tag");
+Click a star in the lightbox to rate a file 1-5; use the review undo action
+when a human decision should be cleared. The media scale is 1★ SFW, 2★ Slow,
+3★ Medium, 4★ Fast, and 5★ Cum. Add tags via the lightbox's tag box (Enter or "+ tag");
 remove one by clicking its x. Both are filterable/sortable from the
 toolbar, and both apply to groups too (see above) — tag a group from its
 sidebar tag button (🏷).
@@ -164,22 +165,18 @@ sidebar tag button (🏷).
 
 NSFW AUTO-RATING (OPTIONAL)
 ------------------------------
-Curator can run newly-downloaded photos through a local NSFW classifier and
-set their star rating automatically for anything not already rated by
-hand — 1★ clothed/safe up to 5★ extremely explicit, five even bands across
-the classifier's 0-1 score. It also works backward through your existing
-library in the background. A rating you (or a previous auto-rating pass)
-already set is never overwritten. This reuses the same rating system as
-manual ratings above — there's no separate "NSFW score" anywhere — so once
-it's run, the "all ratings" dropdown in the toolbar doubles as a content
-filter: "hide 3★+ (explicit)" hides anything auto-rated (or manually rated)
-explicit or worse, while leaving not-yet-rated files visible so your library
-doesn't appear to empty out while a big backlog is still being scored.
+Curator can run newly-downloaded media through NudeNet's bundled 320×320
+detector. NudeNet supplies anatomical evidence only: it may suggest 1★ SFW,
+2★ Slow, or 3★ Medium. Detector confidence can never create Fast or Cum. An
+optional supervised P-HAR worker analyzes short video windows and suggests 4★
+Fast only after the same explicit-action class is ≥0.70 in two consecutive
+windows. Cum remains human-confirmed (or a reserved human `pace:cum` tag).
+Existing automatic results are migrated and requeued; human ratings are kept.
 
 This is entirely optional and off by default. To use it:
 
   1. Install Python 3 if you don't already have it.
-  2. pip install opennsfw-onnx
+  2. pip install nudenet
   3. Turn on "enable NSFW auto-rating" in Settings, then restart Curator —
      enabling/disabling this needs a restart, since it decides whether the
      classifier process gets started at all.
@@ -190,7 +187,9 @@ by hand. If the Python dependencies aren't installed, or Python itself
 isn't on your PATH, this fails quietly — curator.log will show a warning,
 but nothing else in Curator depends on this or is affected by it.
 
-Video files aren't scored (photos only, for now).
+Images are classified directly. Short videos use six sampled frames plus the
+optional temporal action worker; long clips or unavailable dependencies go to
+manual review without retry storms.
 
 
 CLIPS VS VIDEOS
@@ -267,7 +266,7 @@ TROUBLESHOOTING
 - Port already in use -> another curator.exe is running, or change the port in source.
 - NSFW auto-rating stuck off / nothing getting rated -> check curator.log for
   "nsfw worker" warnings; usually means Python isn't on PATH or
-  opennsfw-onnx isn't installed for that Python. Run
+  nudenet isn't installed for that Python. Run
   tools/diagnose_nsfw.py (python tools/diagnose_nsfw.py) for a full
   diagnosis -- it specifically checks whether pip install put the package
   into a different Python than the one Curator actually launches, which is

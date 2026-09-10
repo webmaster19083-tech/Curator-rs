@@ -36,14 +36,40 @@ pub struct PatchSettingsBody {
     pub ch_default_shuffle:           Option<bool>,
     pub ch_default_media_type:        Option<String>,
     // NSFW auto-rating
+<<<<<<< Updated upstream
     pub nsfw_filter_enabled:          Option<bool>,
+=======
+    pub nsfw_filter_enabled: Option<bool>,
+    pub library_layout: Option<String>,
+    pub search_providers: Option<Vec<String>>,
+    pub metronome_enabled: Option<bool>,
+    pub metronome_volume: Option<f64>,
+    pub goon_persona: Option<String>,
+    pub tts_voice: Option<String>,
+    pub tts_rate: Option<f64>,
+    pub tts_pitch: Option<f64>,
+    pub tts_volume: Option<f64>,
+    pub soundtrack_provider: Option<String>,
+    /// Bootstrap settings live in config.json because they are consumed
+    /// before the database is opened. They are exposed here for the normal
+    /// Settings UI but intentionally take effect on the next launch.
+    pub ffmpeg_bin: Option<String>,
+    pub action_model_path: Option<String>,
+>>>>>>> Stashed changes
 }
 
 // ─── GET /api/settings ───────────────────────────────────────────────────────
 
 pub async fn get(State(state): State<Arc<AppState>>) -> Json<Value> {
     let s = state.settings.read().await;
-    Json(serde_json::to_value(&*s).unwrap_or_default())
+    let mut value = serde_json::to_value(&*s).unwrap_or_default();
+    let config = crate::config::load_config();
+    if let Some(object) = value.as_object_mut() {
+        object.insert("ffmpeg_bin".into(), json!(config.ffmpeg_bin.unwrap_or_else(|| "ffmpeg".into())));
+        object.insert("action_model_path".into(), json!(config.action_model_path));
+        object.insert("external_tool_settings_restart_required".into(), json!(true));
+    }
+    Json(value)
 }
 
 // ─── PATCH /api/settings ─────────────────────────────────────────────────────
@@ -52,6 +78,36 @@ pub async fn patch(
     State(state): State<Arc<AppState>>,
     Json(body):   Json<PatchSettingsBody>,
 ) -> Result<Json<Value>, (StatusCode, Json<Value>)> {
+<<<<<<< Updated upstream
+=======
+    if body.ffmpeg_bin.is_some() || body.action_model_path.is_some() {
+        let mut config = crate::config::load_config();
+        if let Some(value) = body.ffmpeg_bin.as_deref() {
+            let value = value.trim();
+            if value.is_empty() || value.len() > 4096 || value.contains('\0') {
+                return Err((StatusCode::BAD_REQUEST, Json(json!({"error":"Invalid ffmpeg executable"}))));
+            }
+            config.ffmpeg_bin = Some(value.to_string());
+        }
+        if let Some(value) = body.action_model_path.as_deref() {
+            let value = value.trim();
+            if value.len() > 4096 || value.contains('\0') {
+                return Err((StatusCode::BAD_REQUEST, Json(json!({"error":"Invalid action-model path"}))));
+            }
+            config.action_model_path = if value.is_empty() { None } else { Some(value.to_string()) };
+        }
+        crate::config::save_config(&config).map_err(|error| (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(json!({"error":format!("Could not save external tool settings: {error}")})),
+        ))?;
+    }
+    if let Some(enabled) = body.start_with_windows {
+        crate::set_start_with_windows_preference(&state, enabled)
+            .await
+            .map_err(|error| (StatusCode::BAD_REQUEST, Json(json!({"error": error}))))?;
+    }
+
+>>>>>>> Stashed changes
     let mut settings = state.settings.write().await;
 
     if let Some(v) = body.max_concurrent {
@@ -90,7 +146,93 @@ pub async fn patch(
     if let Some(v) = body.nsfw_filter_enabled {
         settings.nsfw_filter_enabled = v;
     }
+    if let Some(v) = body.library_layout {
+        if !["grid", "table"].contains(&v.as_str()) {
+            return Err((
+                StatusCode::BAD_REQUEST,
+                Json(json!({"error":"Library layout must be grid or table"})),
+            ));
+        }
+        settings.library_layout = v;
+    }
+    if let Some(values) = body.search_providers {
+        if values.len() > 64 {
+            return Err((
+                StatusCode::BAD_REQUEST,
+                Json(json!({"error":"Choose at most 64 search providers"})),
+            ));
+        }
+        let mut providers = Vec::new();
+        for raw in values {
+            let provider = raw.trim().to_ascii_lowercase();
+            if provider.is_empty()
+                || provider.len() > 80
+                || !provider
+                    .bytes()
+                    .all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'-' || b == b'_')
+            {
+                return Err((
+                    StatusCode::BAD_REQUEST,
+                    Json(json!({"error":"Invalid search provider id"})),
+                ));
+            }
+            if !providers.contains(&provider) {
+                providers.push(provider);
+            }
+        }
+        // A local catalog is always available.  Keeping it in the durable
+        // list makes the selection explicit while still avoiding an empty
+        // search experience after a user unticks every remote provider.
+        if !providers.iter().any(|id| id == "local") {
+            providers.insert(0, "local".to_string());
+        }
+        settings.search_providers = providers;
+    }
+    if let Some(v) = body.metronome_enabled {
+        settings.metronome_enabled = v;
+    }
+    if let Some(v) = body.metronome_volume {
+        if !v.is_finite() {
+            return Err((StatusCode::BAD_REQUEST, Json(json!({"error":"Invalid metronome volume"}))));
+        }
+        settings.metronome_volume = v.clamp(0.0, 1.0);
+    }
+    if let Some(v) = body.goon_persona {
+        if !["neutral", "mommy", "dom", "brat"].contains(&v.as_str()) {
+            return Err((StatusCode::BAD_REQUEST, Json(json!({"error":"Unknown GOON persona"}))));
+        }
+        settings.goon_persona = v;
+    }
+    if let Some(v) = body.tts_voice {
+        let voice = v.trim();
+        settings.tts_voice = if voice.is_empty() { None } else { Some(voice.chars().take(160).collect()) };
+    }
+    if let Some(value) = body.tts_rate {
+        if !value.is_finite() { return Err((StatusCode::BAD_REQUEST, Json(json!({"error":"Invalid TTS rate"})))); }
+        settings.tts_rate = value.clamp(0.5, 2.0);
+    }
+    if let Some(value) = body.tts_pitch {
+        if !value.is_finite() { return Err((StatusCode::BAD_REQUEST, Json(json!({"error":"Invalid TTS pitch"})))); }
+        settings.tts_pitch = value.clamp(0.5, 2.0);
+    }
+    if let Some(value) = body.tts_volume {
+        if !value.is_finite() { return Err((StatusCode::BAD_REQUEST, Json(json!({"error":"Invalid TTS volume"})))); }
+        settings.tts_volume = value.clamp(0.0, 1.0);
+    }
+    if let Some(v) = body.soundtrack_provider {
+        if !["local", "youtube", "soundcloud", "apple_music", "spotify"].contains(&v.as_str()) {
+            return Err((StatusCode::BAD_REQUEST, Json(json!({"error":"Unknown soundtrack provider"}))));
+        }
+        settings.soundtrack_provider = v;
+    }
 
     save_settings(&state.data_dir, &settings);
-    Ok(Json(serde_json::to_value(&*settings).unwrap_or_default()))
+    let mut value = serde_json::to_value(&*settings).unwrap_or_default();
+    let config = crate::config::load_config();
+    if let Some(object) = value.as_object_mut() {
+        object.insert("ffmpeg_bin".into(), json!(config.ffmpeg_bin.unwrap_or_else(|| "ffmpeg".into())));
+        object.insert("action_model_path".into(), json!(config.action_model_path));
+        object.insert("external_tool_settings_restart_required".into(), json!(true));
+    }
+    Ok(Json(value))
 }

@@ -7,10 +7,9 @@ Twitter/X, ArtStation, Instagram, Reddit, Imgur, hundreds more), Curator
 downloads their content locally and gives you a fast browser UI to view it —
 by creator, by group, or everything shuffled together — with ratings, tags,
 a slideshow, and a few other ways to browse (portrait wall, mobile feed).
-An optional local NSFW classifier can auto-rate photos 1-5★ (clothed to
-extremely explicit) as they come in, so the existing rating filter doubles
-as a content filter — see `--docs` for setup, it needs a small separate
-Python install.
+An optional local NudeNet classifier can suggest the 1-3 exposure scale; a
+separate P-HAR worker can suggest Fast for qualifying short videos. Cum stays
+human-confirmed. See `--docs` for setup if you want local auto-rating.
 "Live browse" streams a URL straight from gallery-dl's listing output
 without downloading anything, for previewing before you commit disk space —
 merged in from the separate Contact Sheet project, so it's all one server

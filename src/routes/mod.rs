@@ -61,6 +61,13 @@ pub fn build_router(state: Arc<AppState>) -> Router {
         .route("/api/sources/:id/group", patch(sources::set_group))
         .route("/api/sources/:id/resync", post(sources::resync))
         .route("/api/sources/:id/log", get(misc::source_log))
+<<<<<<< Updated upstream
+=======
+        // ── Unified discovery ───────────────────────────────────────────────
+        .route("/api/search/providers", get(search::providers))
+        .route("/api/search", get(search::search))
+        .route("/api/search/download", post(search::download_selected))
+>>>>>>> Stashed changes
         // ── Groups ─────────────────────────────────────────────────────────
         .route("/api/groups", get(groups::list).post(groups::create))
         .route(
@@ -73,6 +80,8 @@ pub fn build_router(state: Arc<AppState>) -> Router {
         .route("/api/downloads/status", get(downloads::status))
         .route("/api/downloads/pause", post(downloads::pause))
         .route("/api/downloads/resume", post(downloads::resume))
+        .route("/api/downloads/sources/:id/pause", post(downloads::pause_source))
+        .route("/api/downloads/sources/:id/resume", post(downloads::resume_source))
         // ── Settings ───────────────────────────────────────────────────────
         .route("/api/settings", get(settings::get).patch(settings::patch))
         // ── Export / Import ────────────────────────────────────────────────
@@ -82,9 +91,20 @@ pub fn build_router(state: Arc<AppState>) -> Router {
         // ── Stats / Log ────────────────────────────────────────────────────
         .route("/api/stats", get(misc::stats))
         .route("/api/log", get(misc::get_log))
+<<<<<<< Updated upstream
         // ── Cock Hero (Tier 3) ─────────────────────────────────────────────
         .route("/api/ch/playlist", get(ch::get_playlist))
         .route("/api/ch/session", post(ch::log_session))
         .route("/api/ch/sessions", get(ch::get_sessions))
+=======
+        // ── Curator interactive sessions ────────────────────────────────────
+        .route("/api/goon/session", post(goon::start))
+        .route("/api/goon/session/complete", post(goon::complete))
+        .route("/api/goon/connectors", get(goon::connector_status))
+        .route("/api/goon/playlists", get(goon::list_playlists).post(goon::save_playlist))
+        .route("/api/goon/beat-maps/analyze", post(goon::analyze_beat_map))
+        .route("/api/goon/beat-maps/:id", patch(goon::update_beat_map))
+        .route("/api/goon/oauth/callback", post(goon::oauth_callback))
+>>>>>>> Stashed changes
         .with_state(state)
 }

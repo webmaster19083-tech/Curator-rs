@@ -1,0 +1,10 @@
+C:\Users\webma\Downloads\curator_rs_fixed\desktop\target\debug\deps\tracing_appender-24262251635e7551.d: C:\Users\webma\.cargo\registry\src\index.crates.io-1949cf8c6b5b557f\tracing-appender-0.2.5\src\lib.rs C:\Users\webma\.cargo\registry\src\index.crates.io-1949cf8c6b5b557f\tracing-appender-0.2.5\src\non_blocking.rs C:\Users\webma\.cargo\registry\src\index.crates.io-1949cf8c6b5b557f\tracing-appender-0.2.5\src\rolling.rs C:\Users\webma\.cargo\registry\src\index.crates.io-1949cf8c6b5b557f\tracing-appender-0.2.5\src\rolling\builder.rs C:\Users\webma\.cargo\registry\src\index.crates.io-1949cf8c6b5b557f\tracing-appender-0.2.5\src\worker.rs C:\Users\webma\.cargo\registry\src\index.crates.io-1949cf8c6b5b557f\tracing-appender-0.2.5\src\sync.rs
+
+C:\Users\webma\Downloads\curator_rs_fixed\desktop\target\debug\deps\libtracing_appender-24262251635e7551.rmeta: C:\Users\webma\.cargo\registry\src\index.crates.io-1949cf8c6b5b557f\tracing-appender-0.2.5\src\lib.rs C:\Users\webma\.cargo\registry\src\index.crates.io-1949cf8c6b5b557f\tracing-appender-0.2.5\src\non_blocking.rs C:\Users\webma\.cargo\registry\src\index.crates.io-1949cf8c6b5b557f\tracing-appender-0.2.5\src\rolling.rs C:\Users\webma\.cargo\registry\src\index.crates.io-1949cf8c6b5b557f\tracing-appender-0.2.5\src\rolling\builder.rs C:\Users\webma\.cargo\registry\src\index.crates.io-1949cf8c6b5b557f\tracing-appender-0.2.5\src\worker.rs C:\Users\webma\.cargo\registry\src\index.crates.io-1949cf8c6b5b557f\tracing-appender-0.2.5\src\sync.rs
+
+C:\Users\webma\.cargo\registry\src\index.crates.io-1949cf8c6b5b557f\tracing-appender-0.2.5\src\lib.rs:
+C:\Users\webma\.cargo\registry\src\index.crates.io-1949cf8c6b5b557f\tracing-appender-0.2.5\src\non_blocking.rs:
+C:\Users\webma\.cargo\registry\src\index.crates.io-1949cf8c6b5b557f\tracing-appender-0.2.5\src\rolling.rs:
+C:\Users\webma\.cargo\registry\src\index.crates.io-1949cf8c6b5b557f\tracing-appender-0.2.5\src\rolling\builder.rs:
+C:\Users\webma\.cargo\registry\src\index.crates.io-1949cf8c6b5b557f\tracing-appender-0.2.5\src\worker.rs:
+C:\Users\webma\.cargo\registry\src\index.crates.io-1949cf8c6b5b557f\tracing-appender-0.2.5\src\sync.rs:

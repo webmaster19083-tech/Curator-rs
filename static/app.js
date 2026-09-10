@@ -34,7 +34,55 @@ function pad4(n) { return String(n).padStart(4, '0'); }
 // vanish from every category — so: clip = anything up to 90s, video =
 // anything over. Tighten CLIP_MIN_SECONDS below if a hard 15s floor turns
 // out to matter more than that in practice.
+<<<<<<< Updated upstream
 const CLIP_MAX_SECONDS = 90;
+=======
+// One server-persisted boundary defines Clip versus Video everywhere. The
+// fallback only covers a UI paint before settings have loaded.
+function clipMaxSeconds() {
+  const value = Number(appSettings?.max_clip_length_secs);
+  return Number.isFinite(value) && value >= 5 ? value : 60;
+}
+
+// Playback modes share this small history. It prevents an obvious immediate
+// repeat at mode/session boundaries while allowing reuse once a collection has
+// been exhausted. A one-item queue is deliberately the only exception.
+const playbackHistory = [];
+
+// The current scale reserves 1 star for SFW media.  Keep this guard close
+// to the shared playback helpers so every viewer gets the same behavior,
+// even when it is launched from a lightbox, keyboard shortcut, or a saved
+// Explorer selection rather than the visible toolbar.
+function playbackRating(item) {
+  const value = item?.effective_rating ?? item?.human_rating ?? item?.rating ?? item?.auto_rating ?? 0;
+  const rating = Number(value);
+  return Number.isFinite(rating) ? rating : 0;
+}
+function excludeSfwFromPlayback(items, mode, announce = true) {
+  const source = Array.isArray(items) ? items : [];
+  const allowed = source.filter((item) => playbackRating(item) !== 1);
+  const skipped = source.length - allowed.length;
+  if (announce && skipped) toast(`Skipped ${skipped} SFW item${skipped === 1 ? '' : 's'} before ${mode}.`);
+  return allowed;
+}
+function preparePlaybackItems(items, shuffle = false) {
+  const unique = [];
+  const ids = new Set();
+  for (const item of excludeSfwFromPlayback(items, 'playback', false)) {
+    if (!item || ids.has(item.id)) continue;
+    ids.add(item.id); unique.push(item);
+  }
+  if (shuffle && unique.length > 1) shuffleArray(unique);
+  const last = playbackHistory.at(-1);
+  if (unique.length > 1 && unique[0]?.id === last) [unique[0], unique[1]] = [unique[1], unique[0]];
+  return unique;
+}
+function rememberPlaybackItem(item) {
+  if (!item?.id || playbackHistory.at(-1) === item.id) return;
+  playbackHistory.push(item.id);
+  if (playbackHistory.length > 24) playbackHistory.splice(0, playbackHistory.length - 24);
+}
+>>>>>>> Stashed changes
 
 function mediaMatchesTypeFilter(item, typeFilter) {
   if (typeFilter === 'all') return true;
@@ -152,6 +200,17 @@ let appSettings = {
   default_slideshow_loop: true,
   default_slideshow_shuffle: false,
   theme: 'system',
+  library_layout: 'grid',
+  ffmpeg_bin: 'ffmpeg',
+  action_model_path: null,
+  metronome_enabled: false,
+  metronome_volume: 0.55,
+  goon_persona: 'neutral',
+  tts_voice: null,
+  tts_rate: 1,
+  tts_pitch: 1,
+  tts_volume: 1,
+  soundtrack_provider: 'local',
 };
 
 // ---------------------------------------------------------------------
@@ -906,6 +965,16 @@ function announceAddResult(data) {
 // settings (download concurrency)
 // ---------------------------------------------------------------------
 
+function populateTtsVoiceSelect(selected) {
+  const select = el('#settings-tts-voice');
+  if (!select) return;
+  const voices = 'speechSynthesis' in window ? window.speechSynthesis.getVoices() : [];
+  select.replaceChildren(new Option('System default', ''));
+  voices.forEach((voice) => select.add(new Option(`${voice.name} (${voice.lang})`, voice.name)));
+  if (selected && ![...select.options].some((option) => option.value === selected)) select.add(new Option(`${selected} (unavailable)`, selected));
+  select.value = selected || '';
+}
+
 async function openSettingsModal() {
   try {
     const data = await api('/api/settings');
@@ -914,12 +983,33 @@ async function openSettingsModal() {
     toast('Could not load current settings: ' + e.message, true);
   }
   el('#settings-max-concurrent').value = appSettings.max_concurrent;
+<<<<<<< Updated upstream
+=======
+  el('#settings-max-clip-length').value = appSettings.max_clip_length_secs || 60;
+  el('#settings-library-layout').value = appSettings.library_layout || 'grid';
+  el('#settings-ffmpeg-bin').value = appSettings.ffmpeg_bin || 'ffmpeg';
+  el('#settings-action-model-path').value = appSettings.action_model_path || '';
+>>>>>>> Stashed changes
   el('#settings-theme').value = appSettings.theme;
   el('#settings-default-speed').value = appSettings.default_slideshow_speed;
   el('#settings-default-loop').checked = !!appSettings.default_slideshow_loop;
   el('#settings-default-shuffle').checked = !!appSettings.default_slideshow_shuffle;
   el('#settings-export-reminder-days').value = appSettings.export_reminder_days;
   el('#settings-nsfw-filter-enabled').checked = !!appSettings.nsfw_filter_enabled;
+<<<<<<< Updated upstream
+=======
+  el('#settings-metronome-enabled').checked = !!appSettings.metronome_enabled;
+  el('#settings-metronome-volume').value = appSettings.metronome_volume ?? 0.55;
+  el('#settings-goon-persona').value = appSettings.goon_persona || 'neutral';
+  populateTtsVoiceSelect(appSettings.tts_voice);
+  el('#settings-tts-rate').value = appSettings.tts_rate ?? 1;
+  el('#settings-tts-pitch').value = appSettings.tts_pitch ?? 1;
+  el('#settings-tts-volume').value = appSettings.tts_volume ?? 1;
+  el('#settings-soundtrack-provider').value = appSettings.soundtrack_provider || 'local';
+  el('#settings-start-with-windows').checked = !!appSettings.start_with_windows;
+  el('#settings-keep-running-in-tray').checked = appSettings.keep_running_in_tray !== false;
+  renderRemoteAccessStatus();
+>>>>>>> Stashed changes
   el('#settings-modal').hidden = false;
 }
 function closeSettingsModal() { el('#settings-modal').hidden = true; }
@@ -931,22 +1021,50 @@ async function saveSettings() {
   const reminderDays = Number.isFinite(rawReminderDays) ? Math.max(1, Math.min(365, rawReminderDays)) : 30;
   const nsfwFilterEnabled = el('#settings-nsfw-filter-enabled').checked;
   const nsfwFilterChanged = !!appSettings.nsfw_filter_enabled !== nsfwFilterEnabled;
+  const externalToolsChanged = (appSettings.ffmpeg_bin || 'ffmpeg') !== el('#settings-ffmpeg-bin').value.trim()
+    || (appSettings.action_model_path || '') !== el('#settings-action-model-path').value.trim();
   const body = {
     max_concurrent: maxConcurrent,
+<<<<<<< Updated upstream
+=======
+    max_clip_length_secs: Math.max(5, Math.min(3600, parseInt(el('#settings-max-clip-length').value, 10) || 60)),
+    library_layout: el('#settings-library-layout').value,
+    ffmpeg_bin: el('#settings-ffmpeg-bin').value.trim() || 'ffmpeg',
+    action_model_path: el('#settings-action-model-path').value.trim(),
+>>>>>>> Stashed changes
     theme: el('#settings-theme').value,
     default_slideshow_speed: parseInt(el('#settings-default-speed').value, 10),
     default_slideshow_loop: el('#settings-default-loop').checked,
     default_slideshow_shuffle: el('#settings-default-shuffle').checked,
     export_reminder_days: reminderDays,
     nsfw_filter_enabled: nsfwFilterEnabled,
+<<<<<<< Updated upstream
+=======
+    metronome_enabled: el('#settings-metronome-enabled').checked,
+    metronome_volume: Math.max(0, Math.min(1, Number(el('#settings-metronome-volume').value) || 0)),
+    goon_persona: el('#settings-goon-persona').value,
+    tts_voice: el('#settings-tts-voice').value,
+    tts_rate: Math.max(0.5, Math.min(2, Number(el('#settings-tts-rate').value) || 1)),
+    tts_pitch: Math.max(0.5, Math.min(2, Number(el('#settings-tts-pitch').value) || 1)),
+    tts_volume: Math.max(0, Math.min(1, Number(el('#settings-tts-volume').value) || 0)),
+    soundtrack_provider: el('#settings-soundtrack-provider').value,
+    start_with_windows: el('#settings-start-with-windows').checked,
+    keep_running_in_tray: el('#settings-keep-running-in-tray').checked,
+>>>>>>> Stashed changes
   };
   try {
     const data = await api('/api/settings', { method: 'PATCH', body: JSON.stringify(body) });
     appSettings = { ...appSettings, ...data };
     applyTheme(appSettings.theme);
+<<<<<<< Updated upstream
+=======
+    configureClipLengthControls();
+    if (typeof setExplorerLayout === 'function') setExplorerLayout(appSettings.library_layout, false);
+>>>>>>> Stashed changes
     closeSettingsModal();
     toast(nsfwFilterChanged ? 'Settings saved — restart Curator for NSFW auto-rating to take effect' : 'Settings saved');
     renderExportReminderBanner();
+    if (externalToolsChanged) toast('Classifier/tool changes take effect after restarting Curator.');
   } catch (e) {
     toast('Could not save settings: ' + e.message, true);
   }
@@ -1600,9 +1718,9 @@ function renderStarRating(container, rating, onRate) {
     star.className = 'star' + (i <= rating ? ' filled' : '');
     star.textContent = '★';
     star.title = `${i} star${i === 1 ? '' : 's'}`;
-    // Clicking the star that's already the current rating clears it —
-    // otherwise there'd be no way to get back to "unrated" once rated.
-    star.addEventListener('click', () => onRate(i === rating ? 0 : i));
+    // Rating APIs intentionally accept only 1–5; use the review undo action
+    // when a human decision needs to be removed.
+    star.addEventListener('click', () => onRate(i));
     container.appendChild(star);
   }
 }
@@ -1742,12 +1860,19 @@ async function startSlideshow(startIndex) {
     await loadView();
     startIndex = 0;
   }
-  if (!state.currentItems.length) { toast('Nothing to show yet.', true); return; }
+  const playableItems = excludeSfwFromPlayback(state.currentItems, 'slideshow');
+  if (!playableItems.length) { toast('Nothing eligible to show yet.', true); return; }
   closeLightbox();
   closeSourceMenu();
 
+<<<<<<< Updated upstream
   ss.items = state.currentItems.slice();
   ss.index = Math.max(0, startIndex || 0);
+=======
+  const requested = state.currentItems[Math.max(0, startIndex || 0)];
+  ss.items = preparePlaybackItems(playableItems, false);
+  ss.index = Math.max(0, ss.items.indexOf(requested));
+>>>>>>> Stashed changes
   ss.playing = true;
   ss.speed = parseInt(el('#ss-speed').value, 10);
   ss.loop = el('#ss-loop').checked;
@@ -1913,9 +2038,14 @@ function pwMountPane(i, item, mediaEl) {
 }
 
 function startPortraitWall() {
-  if (!state.currentItems.length) { toast('Nothing to show here.', true); return; }
+  const playableItems = excludeSfwFromPlayback(state.currentItems, 'Portrait Wall');
+  if (!playableItems.length) { toast('Nothing eligible to show here.', true); return; }
   pw.active = true;
   pw.queueIndex = 0;
+<<<<<<< Updated upstream
+=======
+  pw.items = preparePlaybackItems(playableItems, true);
+>>>>>>> Stashed changes
   pw.ready = [[], [], []];
   pw.filling = [false, false, false];
   el('#portrait-wall').hidden = false;
@@ -1974,6 +2104,7 @@ const feed = {
   recyclePool: new Map(), recycleMode: false, failedIds: new Set(),
   loading: new Set(), wakeLock: null, wakePending: null, wakeEpoch: 0,
   waitingNext: null, retryTimer: null,
+  lastHumanRating: null, reviewRatings: [],
 };
 
 function feedFlashIcon(iconEl, symbol) {
@@ -2256,7 +2387,8 @@ async function feedFetchPage() {
   try {
     const data = await api(page.url + (page.cursor ? '&cursor=' + encodeURIComponent(page.cursor) : ''));
     if (!feed.active || session !== feed.session) return;
-    feed.items = feed.items.slice(feed.sourceIndex).concat(data.media);
+    const incoming = feed.review ? data.media : excludeSfwFromPlayback(data.media, 'Mobile Feed');
+    feed.items = feed.items.slice(feed.sourceIndex).concat(incoming);
     feed.sourceIndex = 0;
     page.cursor = data.next_cursor; page.more = data.has_more;
   } catch (e) {
@@ -2370,9 +2502,14 @@ function startFeed(review = false) {
   feed.sourceIndex = 0; feed.inFlight = 0; feed.activeSection = null;
   feed.seenIds.clear(); feed.recentIds = []; feed.queuedIds.clear();
   feed.recyclePool.clear(); feed.failedIds.clear(); feed.recycleMode = false;
+  // Swipe-left only repeats a rating made in this review run, never a
+  // rating carried over from a prior session.
+  feed.lastHumanRating = null; feed.reviewRatings = [];
   const params = new URLSearchParams(mediaPage.url.split('?')[1] || '');
   if (review) { params.set('rating_status', 'needs_review'); params.set('sort', 'default'); params.delete('shuffle_seed'); }
-  feed.items = review ? [] : state.currentItems.slice();
+  // Review intentionally retains 1-star items so a person can correct an
+  // automatic false positive. The ordinary media feed never plays them.
+  feed.items = review ? [] : excludeSfwFromPlayback(state.currentItems, 'Mobile Feed');
   feed.page = {url:'/api/media?' + params, cursor:review ? null : mediaPage.cursor, more:review || mediaPage.more, pending:false};
   const scrollEl = el('#feed-scroll');
   scrollEl.innerHTML = '';
@@ -2436,6 +2573,8 @@ function feedBuildReviewControls(section, item) {
         const original = state.currentItems.find(m => m.id === item.id);
         if (original) Object.assign(original, result);
         section._reviewToken = null;
+        feed.reviewRatings = feed.reviewRatings.filter((entry) => entry.id !== item.id);
+        feed.lastHumanRating = feed.reviewRatings.at(-1)?.rating ?? null;
         label.textContent = `AUTO ${item.auto_rating} - Review undone`;
         refreshStars(item.auto_rating);
         panel.querySelectorAll('button').forEach(b => b.disabled = false);
@@ -2472,6 +2611,12 @@ function feedBuildReviewControls(section, item) {
       });
       Object.assign(item, result);
       section._reviewToken = result.rating_reviewed_at;
+      const savedRating = Number(result.rating);
+      if (Number.isInteger(savedRating) && savedRating >= 1 && savedRating <= 5) {
+        feed.reviewRatings = feed.reviewRatings.filter((entry) => entry.id !== item.id);
+        feed.reviewRatings.push({ id: item.id, rating: savedRating });
+        feed.lastHumanRating = savedRating;
+      }
       const original = state.currentItems.find(m => m.id === item.id);
       if (original) Object.assign(original, result);
       if (!feed.active || session !== feed.session) return;
@@ -2517,7 +2662,7 @@ function feedBuildReviewControls(section, item) {
     if (feed.active && session === feed.session && feed.activeSection === section) feedGoNext(section);
     saving = false;
   });
-  const hint = document.createElement('small'); hint.textContent = 'Swipe right: approve / left: choose stars / up: skip / down: previous & undo';
+  const hint = document.createElement('small'); hint.textContent = 'Swipe right: approve / left: repeat latest rating (or choose stars) / up: skip / down: previous & undo';
   panel.appendChild(hint); card.appendChild(panel);
   section.addEventListener('click', e => {
     if (suppressClick) { e.preventDefault(); e.stopPropagation(); suppressClick = false; }
@@ -2535,7 +2680,7 @@ function feedBuildReviewControls(section, item) {
     suppressClick = true; card.classList.add('dragging');
     const shift = Math.max(-180, Math.min(180, dx));
     card.style.transform = `translateX(${shift}px) rotate(${shift / 22}deg)`;
-    stamp.textContent = dx > 0 ? 'APPROVE' : 'CHOOSE STARS';
+    stamp.textContent = dx > 0 ? 'APPROVE' : (feed.lastHumanRating ? `REPEAT ${feed.lastHumanRating}★` : 'CHOOSE STARS');
     stamp.classList.toggle('choose', dx < 0);
     stamp.style.opacity = String(Math.min(1, Math.abs(dx) / 90));
   });
@@ -2548,6 +2693,7 @@ function feedBuildReviewControls(section, item) {
     if (saving || Math.abs(dx) < 60 || Math.abs(dx) < Math.abs(dy) * 1.5) return;
     suppressClick = true;
     if (dx > 0) save(null);
+    else if (feed.lastHumanRating) save(feed.lastHumanRating);
     else {
       choices[0].focus(); label.textContent = `AUTO ${item.auto_rating} - Choose a human star rating`;
       animate('choose');
@@ -2585,7 +2731,11 @@ async function vrCheckSupport() {
   if (!('xr' in navigator)) return; // no WebXR in this browser at all
   try {
     const supported = await navigator.xr.isSessionSupported('immersive-vr');
-    if (supported) el('#vr-btn').hidden = false;
+    // The explorer shell also gates VR to wide/fine-pointer clients.  Keep
+    // that capability policy in force even when WebXR reports support.
+    if (supported && (typeof supportsPlayMode !== 'function' || supportsPlayMode('vr'))) {
+      el('#vr-btn').hidden = false;
+    }
   } catch (e) {
     // isSessionSupported can itself throw in some unsupported/non-secure
     // contexts — treat that the same as "not supported" and stay hidden
@@ -2597,7 +2747,7 @@ function startVRMode() {
     toast('Could not load the 3D library (offline, or a blocked CDN?) — VR view needs it.', true);
     return;
   }
-  vr.items = state.currentItems.filter((item) => item.type === 'image');
+  vr.items = excludeSfwFromPlayback(state.currentItems, 'VR').filter((item) => item.type === 'image');
   if (!vr.items.length) {
     toast("No photos in the current view for VR yet (video isn't supported in VR mode).", true);
     return;

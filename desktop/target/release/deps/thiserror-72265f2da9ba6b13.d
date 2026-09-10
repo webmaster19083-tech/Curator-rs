@@ -1,0 +1,14 @@
+C:\Users\webma\Downloads\curator_rs_fixed\desktop\target\release\deps\thiserror-72265f2da9ba6b13.d: C:\Users\webma\.cargo\registry\src\index.crates.io-1949cf8c6b5b557f\thiserror-2.0.20\src\lib.rs C:\Users\webma\.cargo\registry\src\index.crates.io-1949cf8c6b5b557f\thiserror-2.0.20\src\aserror.rs C:\Users\webma\.cargo\registry\src\index.crates.io-1949cf8c6b5b557f\thiserror-2.0.20\src\display.rs C:\Users\webma\.cargo\registry\src\index.crates.io-1949cf8c6b5b557f\thiserror-2.0.20\src\var.rs C:\Users\webma\.cargo\registry\src\index.crates.io-1949cf8c6b5b557f\thiserror-2.0.20\src\private.rs C:\Users\webma\Downloads\curator_rs_fixed\desktop\target\release\build\thiserror-326f1ddb0dc0863a\out/private.rs
+
+C:\Users\webma\Downloads\curator_rs_fixed\desktop\target\release\deps\libthiserror-72265f2da9ba6b13.rlib: C:\Users\webma\.cargo\registry\src\index.crates.io-1949cf8c6b5b557f\thiserror-2.0.20\src\lib.rs C:\Users\webma\.cargo\registry\src\index.crates.io-1949cf8c6b5b557f\thiserror-2.0.20\src\aserror.rs C:\Users\webma\.cargo\registry\src\index.crates.io-1949cf8c6b5b557f\thiserror-2.0.20\src\display.rs C:\Users\webma\.cargo\registry\src\index.crates.io-1949cf8c6b5b557f\thiserror-2.0.20\src\var.rs C:\Users\webma\.cargo\registry\src\index.crates.io-1949cf8c6b5b557f\thiserror-2.0.20\src\private.rs C:\Users\webma\Downloads\curator_rs_fixed\desktop\target\release\build\thiserror-326f1ddb0dc0863a\out/private.rs
+
+C:\Users\webma\Downloads\curator_rs_fixed\desktop\target\release\deps\libthiserror-72265f2da9ba6b13.rmeta: C:\Users\webma\.cargo\registry\src\index.crates.io-1949cf8c6b5b557f\thiserror-2.0.20\src\lib.rs C:\Users\webma\.cargo\registry\src\index.crates.io-1949cf8c6b5b557f\thiserror-2.0.20\src\aserror.rs C:\Users\webma\.cargo\registry\src\index.crates.io-1949cf8c6b5b557f\thiserror-2.0.20\src\display.rs C:\Users\webma\.cargo\registry\src\index.crates.io-1949cf8c6b5b557f\thiserror-2.0.20\src\var.rs C:\Users\webma\.cargo\registry\src\index.crates.io-1949cf8c6b5b557f\thiserror-2.0.20\src\private.rs C:\Users\webma\Downloads\curator_rs_fixed\desktop\target\release\build\thiserror-326f1ddb0dc0863a\out/private.rs
+
+C:\Users\webma\.cargo\registry\src\index.crates.io-1949cf8c6b5b557f\thiserror-2.0.20\src\lib.rs:
+C:\Users\webma\.cargo\registry\src\index.crates.io-1949cf8c6b5b557f\thiserror-2.0.20\src\aserror.rs:
+C:\Users\webma\.cargo\registry\src\index.crates.io-1949cf8c6b5b557f\thiserror-2.0.20\src\display.rs:
+C:\Users\webma\.cargo\registry\src\index.crates.io-1949cf8c6b5b557f\thiserror-2.0.20\src\var.rs:
+C:\Users\webma\.cargo\registry\src\index.crates.io-1949cf8c6b5b557f\thiserror-2.0.20\src\private.rs:
+C:\Users\webma\Downloads\curator_rs_fixed\desktop\target\release\build\thiserror-326f1ddb0dc0863a\out/private.rs:
+
+# env-dep:OUT_DIR=C:\\Users\\webma\\Downloads\\curator_rs_fixed\\desktop\\target\\release\\build\\thiserror-326f1ddb0dc0863a\\out

@@ -59,14 +59,16 @@ fn quick_writable_check(path: &Path) -> bool {
 async fn build_status(state: &Arc<AppState>) -> Value {
     let gallery_dl_bin = state.gallery_dl_bin.clone();
     let ffprobe_bin = state.ffprobe_bin.clone();
+    let ffmpeg_bin = state.ffmpeg_bin.clone();
     let python_bin = state.python_bin.clone();
 
     // Command::output() blocks the calling thread, so keep it off the async
     // runtime's worker threads — these three are independent, run them
     // concurrently rather than one after another.
-    let (gallery_dl, ffprobe, nsfw) = tokio::join!(
+    let (gallery_dl, ffprobe, ffmpeg, nsfw) = tokio::join!(
         tokio::task::spawn_blocking(move || logic::detect_gallery_dl(&gallery_dl_bin)),
         tokio::task::spawn_blocking(move || logic::detect_ffprobe(&ffprobe_bin)),
+        tokio::task::spawn_blocking(move || logic::detect_ffprobe(&ffmpeg_bin)),
         tokio::task::spawn_blocking(move || logic::detect_nsfw_env_with_timeout(
             &python_bin,
             std::time::Duration::from_secs(10)
@@ -91,6 +93,7 @@ async fn build_status(state: &Arc<AppState>) -> Value {
         "dependencies": {
             "gallery_dl": dep_json(gallery_dl.unwrap_or(missing_status("gallery-dl")), true),
             "ffmpeg":     dep_json(ffprobe.unwrap_or(missing_status("ffprobe")), false),
+            "ffmpeg_sampler": dep_json(ffmpeg.unwrap_or(missing_status("ffmpeg")), false),
             "nsfw":       dep_json(nsfw.unwrap_or(missing_status("python")), false),
         },
         "data_dir": {
@@ -102,7 +105,9 @@ async fn build_status(state: &Arc<AppState>) -> Value {
             // just saved to config.json until the next restart).
             "gallery_dl_bin": state.gallery_dl_bin,
             "ffprobe_bin": state.ffprobe_bin,
+            "ffmpeg_bin": state.ffmpeg_bin,
             "python_bin": state.python_bin,
+            "action_model_path": state.action_model_path,
             // What's on disk right now, for the frontend to detect
             // "you have unsaved / pending-restart changes".
             "pending_data_dir": cfg.data_dir,
@@ -152,7 +157,7 @@ pub async fn validate(
     Json(body): Json<ValidateBody>,
 ) -> Result<Json<Value>, (StatusCode, Json<Value>)> {
     match body.check.as_str() {
-        "gallery_dl" | "ffprobe" | "nsfw" => {
+        "gallery_dl" | "ffprobe" | "ffmpeg" | "nsfw" => {
             let bin = match body.path {
                 Some(p) => logic::sanitize_path_input(&p)
                     .map_err(|e| err(StatusCode::BAD_REQUEST, e))?
@@ -161,13 +166,14 @@ pub async fn validate(
                 None => match body.check.as_str() {
                     "gallery_dl" => state.gallery_dl_bin.clone(),
                     "ffprobe" => state.ffprobe_bin.clone(),
+                    "ffmpeg" => state.ffmpeg_bin.clone(),
                     _ => state.python_bin.clone(),
                 },
             };
             let check = body.check.clone();
             let status = tokio::task::spawn_blocking(move || match check.as_str() {
                 "gallery_dl" => logic::detect_gallery_dl(&bin),
-                "ffprobe" => logic::detect_ffprobe(&bin),
+                "ffprobe" | "ffmpeg" => logic::detect_ffprobe(&bin),
                 _ => logic::detect_nsfw_env_with_timeout(&bin, std::time::Duration::from_secs(10)),
             })
             .await
@@ -196,7 +202,13 @@ pub struct OobeSettingsBody {
     // config.json-backed — take effect on next restart.
     pub data_dir:       Option<String>,
     pub gallery_dl_bin: Option<String>,
+<<<<<<< Updated upstream
     pub ffprobe_bin:    Option<String>,
+=======
+    pub ffprobe_bin: Option<String>,
+    pub ffmpeg_bin: Option<String>,
+    pub action_model_path: Option<String>,
+>>>>>>> Stashed changes
     // settings.json-backed — take effect immediately, same fields the
     // normal Settings modal exposes (see routes/settings.rs).
     pub max_concurrent:            Option<u32>,
@@ -245,6 +257,19 @@ pub async fn save_settings(
     }
     if let Some(raw) = &body.ffprobe_bin {
         cfg.ffprobe_bin = Some(validate_executable_field(raw).map_err(|e| err(StatusCode::BAD_REQUEST, e))?);
+        cfg_dirty = true;
+    }
+    if let Some(raw) = &body.ffmpeg_bin {
+        cfg.ffmpeg_bin =
+            Some(validate_executable_field(raw).map_err(|e| err(StatusCode::BAD_REQUEST, e))?);
+        cfg_dirty = true;
+    }
+    if let Some(raw) = &body.action_model_path {
+        let path = logic::sanitize_path_input(raw).map_err(|e| err(StatusCode::BAD_REQUEST, e))?;
+        if !raw.trim().is_empty() && !path.is_file() {
+            return Err(err(StatusCode::BAD_REQUEST, format!("'{raw}' doesn't exist.")));
+        }
+        cfg.action_model_path = if raw.trim().is_empty() { None } else { Some(path.to_string_lossy().to_string()) };
         cfg_dirty = true;
     }
     if cfg_dirty {

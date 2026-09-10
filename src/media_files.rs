@@ -50,7 +50,15 @@ pub fn reconcile(pool: &crate::db::DbPool, library: &Path) -> Result<usize> {
                 if old_stamp.as_ref() != Some(&current) || was_missing {
                     tx.execute("UPDATE media SET downloaded=1, missing=0, file_stamp=?1,
                         nsfw_state='pending', nsfw_attempts=0, nsfw_retry_at=0, duration_attempted=0,
+<<<<<<< Updated upstream
                         duration_secs=CASE WHEN file_stamp IS NULL THEN duration_secs ELSE NULL END WHERE id=?2", params![current, id])?;
+=======
+                        action_rating=0,action_model=NULL,action_model_version=NULL,action_score=NULL,action_evidence=NULL,
+                        classifier_model=NULL,classifier_version=NULL,classifier_score=NULL,classifier_evidence=NULL,
+                        classification_label='unclassified',manual_review_required=0,manual_review_reason=NULL,
+                        duration_secs=CASE WHEN file_stamp IS NULL THEN duration_secs ELSE NULL END WHERE id=?4",
+                        params![current,modified_at(&path),crate::db::now_iso(),id])?;
+>>>>>>> Stashed changes
                 }
             } else if !was_missing && !path.is_file() {
                 // Permission failures are not evidence that a file was deleted.

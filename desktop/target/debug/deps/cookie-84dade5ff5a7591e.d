@@ -1,0 +1,12 @@
+C:\Users\webma\Downloads\curator_rs_fixed\desktop\target\debug\deps\cookie-84dade5ff5a7591e.d: C:\Users\webma\.cargo\registry\src\index.crates.io-1949cf8c6b5b557f\cookie-0.18.2\src\lib.rs C:\Users\webma\.cargo\registry\src\index.crates.io-1949cf8c6b5b557f\cookie-0.18.2\src\builder.rs C:\Users\webma\.cargo\registry\src\index.crates.io-1949cf8c6b5b557f\cookie-0.18.2\src\parse.rs C:\Users\webma\.cargo\registry\src\index.crates.io-1949cf8c6b5b557f\cookie-0.18.2\src\jar.rs C:\Users\webma\.cargo\registry\src\index.crates.io-1949cf8c6b5b557f\cookie-0.18.2\src\delta.rs C:\Users\webma\.cargo\registry\src\index.crates.io-1949cf8c6b5b557f\cookie-0.18.2\src\same_site.rs C:\Users\webma\.cargo\registry\src\index.crates.io-1949cf8c6b5b557f\cookie-0.18.2\src\expiration.rs C:\Users\webma\.cargo\registry\src\index.crates.io-1949cf8c6b5b557f\cookie-0.18.2\src\prefix.rs
+
+C:\Users\webma\Downloads\curator_rs_fixed\desktop\target\debug\deps\libcookie-84dade5ff5a7591e.rmeta: C:\Users\webma\.cargo\registry\src\index.crates.io-1949cf8c6b5b557f\cookie-0.18.2\src\lib.rs C:\Users\webma\.cargo\registry\src\index.crates.io-1949cf8c6b5b557f\cookie-0.18.2\src\builder.rs C:\Users\webma\.cargo\registry\src\index.crates.io-1949cf8c6b5b557f\cookie-0.18.2\src\parse.rs C:\Users\webma\.cargo\registry\src\index.crates.io-1949cf8c6b5b557f\cookie-0.18.2\src\jar.rs C:\Users\webma\.cargo\registry\src\index.crates.io-1949cf8c6b5b557f\cookie-0.18.2\src\delta.rs C:\Users\webma\.cargo\registry\src\index.crates.io-1949cf8c6b5b557f\cookie-0.18.2\src\same_site.rs C:\Users\webma\.cargo\registry\src\index.crates.io-1949cf8c6b5b557f\cookie-0.18.2\src\expiration.rs C:\Users\webma\.cargo\registry\src\index.crates.io-1949cf8c6b5b557f\cookie-0.18.2\src\prefix.rs
+
+C:\Users\webma\.cargo\registry\src\index.crates.io-1949cf8c6b5b557f\cookie-0.18.2\src\lib.rs:
+C:\Users\webma\.cargo\registry\src\index.crates.io-1949cf8c6b5b557f\cookie-0.18.2\src\builder.rs:
+C:\Users\webma\.cargo\registry\src\index.crates.io-1949cf8c6b5b557f\cookie-0.18.2\src\parse.rs:
+C:\Users\webma\.cargo\registry\src\index.crates.io-1949cf8c6b5b557f\cookie-0.18.2\src\jar.rs:
+C:\Users\webma\.cargo\registry\src\index.crates.io-1949cf8c6b5b557f\cookie-0.18.2\src\delta.rs:
+C:\Users\webma\.cargo\registry\src\index.crates.io-1949cf8c6b5b557f\cookie-0.18.2\src\same_site.rs:
+C:\Users\webma\.cargo\registry\src\index.crates.io-1949cf8c6b5b557f\cookie-0.18.2\src\expiration.rs:
+C:\Users\webma\.cargo\registry\src\index.crates.io-1949cf8c6b5b557f\cookie-0.18.2\src\prefix.rs:

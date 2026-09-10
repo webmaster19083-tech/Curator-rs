@@ -454,13 +454,48 @@ pub fn index_file(state: &AppState, source_id: i64, path: &Path) -> Result<bool>
         VALUES(?1,?2,?3,?4,?5,?6,1,?7)
         ON CONFLICT(source_id,origin_url) WHERE origin_url IS NOT NULL DO UPDATE SET
           filepath=excluded.filepath, filename=excluded.filename, downloaded=1, missing=0,
+<<<<<<< Updated upstream
           file_stamp=excluded.file_stamp, nsfw_state='pending', nsfw_attempts=0, nsfw_retry_at=0, duration_attempted=0,
+=======
+          file_stamp=excluded.file_stamp, modified_at=COALESCE(excluded.modified_at,media.modified_at),
+          downloaded_at=CASE WHEN media.downloaded=0 OR media.missing=1 THEN excluded.downloaded_at ELSE media.downloaded_at END,
+          nsfw_state='pending', nsfw_attempts=0, nsfw_retry_at=0, duration_attempted=0,
+          action_rating=0, action_model=NULL, action_model_version=NULL, action_score=NULL, action_evidence=NULL,
+          classifier_model=NULL, classifier_version=NULL, classifier_score=NULL, classifier_evidence=NULL,
+          classification_label='unclassified', manual_review_required=0, manual_review_reason=NULL,
+>>>>>>> Stashed changes
           duration_secs=CASE WHEN media.file_stamp=excluded.file_stamp THEN media.duration_secs ELSE NULL END
         ON CONFLICT(filepath) DO UPDATE SET downloaded=1, missing=0, file_stamp=excluded.file_stamp,
           origin_url=COALESCE(excluded.origin_url,media.origin_url), nsfw_state='pending', nsfw_attempts=0,
+          action_rating=0, action_model=NULL, action_model_version=NULL, action_score=NULL, action_evidence=NULL,
+          classifier_model=NULL, classifier_version=NULL, classifier_score=NULL, classifier_evidence=NULL,
+          classification_label='unclassified', manual_review_required=0, manual_review_reason=NULL,
           nsfw_retry_at=0, duration_attempted=0, duration_secs=CASE WHEN media.file_stamp=excluded.file_stamp THEN media.duration_secs ELSE NULL END",
         rusqlite::params![source_id,rel,path.file_name().unwrap_or_default().to_string_lossy(),kind,now_iso(),origin,stamp])?;
     tx.commit()?;
+<<<<<<< Updated upstream
+=======
+    if let Some(metadata) = sidecar_metadata.as_ref() {
+        let media_id: i64 =
+            conn.query_row("SELECT id FROM media WHERE filepath=?1", [&rel], |row| {
+                row.get(0)
+            })?;
+        if let Err(error) =
+            crate::provenance::capture_source_metadata(&conn, media_id, origin.as_deref(), metadata)
+        {
+            // Metadata is supplementary. A malformed sidecar must never turn
+            // a completed, otherwise valid file into a failed import.
+            warn!("Could not retain source metadata for media {media_id}: {error}");
+        }
+    }
+    // Completion derives from real indexed files, not parser/log guesses.
+    // A source with no successful placeholder listing keeps known_total NULL,
+    // which is intentionally rendered as indeterminate progress.
+    let _ = conn.execute(
+        "UPDATE sources SET completed_count=(SELECT COUNT(*) FROM media WHERE source_id=?1 AND downloaded=1 AND missing=0),current_filename=?2,progress_updated_at=?3 WHERE id=?1",
+        rusqlite::params![source_id, path.file_name().unwrap_or_default().to_string_lossy(), now_iso()],
+    );
+>>>>>>> Stashed changes
     // Keep sidecars: restart recovery and late metadata events need their URL.
     Ok(true)
 }
@@ -480,8 +515,8 @@ pub fn scan_and_index(state: &AppState, source_id: i64, dest: &Path) -> Result<(
         |r| r.get(0),
     )?;
     conn.execute(
-        "UPDATE sources SET item_count=?1 WHERE id=?2",
-        rusqlite::params![total, source_id],
+        "UPDATE sources SET item_count=?1,completed_count=?1,progress_updated_at=?3 WHERE id=?2",
+        rusqlite::params![total, source_id, now_iso()],
     )?;
     Ok((total, added))
 }
@@ -697,7 +732,20 @@ pub async fn populate_placeholders(state: Arc<AppState>, source_id: i64) {
             ]);
         }
     }
+<<<<<<< Updated upstream
     let _ = conn.execute("COMMIT", []);
+=======
+    if let Err(error) = tx.commit() {
+        warn!("Placeholder pre-scan for source {source_id} could not commit: {error}");
+        return;
+    }
+    if let Ok(conn) = state.pool.get() {
+        let _ = conn.execute(
+            "UPDATE sources SET known_total=?1,progress_updated_at=?2 WHERE id=?3",
+            rusqlite::params![items.len() as i64, now_iso(), source_id],
+        );
+    }
+>>>>>>> Stashed changes
 
     info!(
         "Placeholder pre-scan for source {}: {} candidate item(s)",
@@ -755,11 +803,23 @@ async fn run_download_impl(
 
     // Claim status NOW (before the semaphore wait) to avoid concurrent duplicate downloads
     {
+<<<<<<< Updated upstream
         let conn = state.pool.get().unwrap();
         let _ = conn.execute(
             "UPDATE sources SET status='downloading', error_message=NULL WHERE id=?1",
             [source_id],
         );
+=======
+        if let Ok(conn) = state.pool.get() {
+            let _ = conn.execute(
+                "UPDATE sources SET status='downloading', error_message=NULL,started_at=COALESCE(started_at,?1),progress_updated_at=?1,current_filename=NULL WHERE id=?2",
+                rusqlite::params![now_iso(), source_id],
+            );
+        } else {
+            warn!("Source {source_id} could not claim downloading status: database unavailable");
+            return;
+        }
+>>>>>>> Stashed changes
     }
 
     let sem = {
@@ -1022,11 +1082,44 @@ async fn run_download_inner(
             .collect()
     };
 
+<<<<<<< Updated upstream
     let conn = state.pool.get().unwrap();
     let _ = conn.execute(
         "UPDATE sources SET status=?1, item_count=?2, error_message=?3, log=?4, synced_at=?5 WHERE id=?6",
         rusqlite::params![status, total, error_msg, log_tail, now_iso(), source_id],
     );
+=======
+    if let Ok(conn) = state.pool.get() {
+        let saved = if status == "retrying" {
+            let delay_secs = delayed_retry.map_or(0_i64, |delay| delay.as_secs() as i64);
+            conn.execute(
+                "UPDATE sources SET status=?1, item_count=?2, completed_count=?2, error_message=?3, log=?4, synced_at=?5,
+                    progress_updated_at=?5,current_filename=NULL,retry_attempts=retry_attempts+1, retry_at=unixepoch()+?6 WHERE id=?7",
+                rusqlite::params![status, total, error_msg, log_tail, now_iso(), delay_secs, source_id],
+            )
+        } else {
+            // A completed run or a terminal failure starts a future manual
+            // retry with a fresh budget.  Paused work deliberately retains
+            // its state so Resume continues the same archive-backed job.
+            conn.execute(
+                "UPDATE sources SET status=?1, item_count=?2, completed_count=?2, error_message=?3, log=?4, synced_at=?5,
+                    progress_updated_at=?5,current_filename=NULL,completed_at=CASE WHEN ?1 IN ('done','error') THEN ?5 ELSE completed_at END,
+                    retry_attempts=CASE WHEN ?1 IN ('done','error') THEN 0 ELSE retry_attempts END,
+                    retry_at=CASE WHEN ?1 IN ('done','error') THEN 0 ELSE retry_at END WHERE id=?6",
+                rusqlite::params![status, total, error_msg, log_tail, now_iso(), source_id],
+            )
+        };
+        if saved.is_ok() {
+            if let Some(delay) = delayed_retry {
+                schedule_retry(Arc::clone(&state), source_id, delay);
+            }
+        } else {
+            warn!("Source {source_id} retry state could not be persisted");
+        }
+    } else {
+        warn!("Source {source_id} finished but final status could not be persisted: database unavailable");
+    }
+>>>>>>> Stashed changes
 }
 
 fn short_error_summary(log_text: &str) -> String {
@@ -1281,7 +1374,9 @@ mod tests {
                 |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
             )
             .unwrap();
-        assert_eq!(provenance, ("human".into(), true, 4));
+        // NudeNet compatibility results stop at Medium (3); only the
+        // temporal action model or a human can create Fast (4).
+        assert_eq!(provenance, ("human".into(), true, 3));
         assert_eq!(
             conn.query_row(
                 "SELECT COUNT(*) FROM media_tags WHERE media_id=10",

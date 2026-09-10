@@ -17,6 +17,7 @@ pub fn state(root: &std::path::Path) -> Arc<AppState> {
         download_semaphore: Arc::new(Mutex::new(Arc::new(Semaphore::new(2)))),
         placeholder_semaphore: Arc::new(Semaphore::new(1)),
         settings: Arc::new(RwLock::new(db::Settings::default())),
+        search_registry: Arc::new(routes::search::default_provider_registry()),
         data_dir: root.into(),
         library_dir: root.join("library"),
         archives_dir: root.join("archives"),
@@ -25,8 +26,11 @@ pub fn state(root: &std::path::Path) -> Arc<AppState> {
         static_dir: root.into(),
         gallery_dl_bin: "missing-gallery-dl-test".into(),
         ffprobe_bin: "missing-ffprobe-test".into(),
+        ffmpeg_bin: "missing-ffmpeg-test".into(),
         python_bin: "missing-python-test".into(),
         nsfw: None,
+        action_classifier: None,
+        action_model_path: None,
     })
 }
 

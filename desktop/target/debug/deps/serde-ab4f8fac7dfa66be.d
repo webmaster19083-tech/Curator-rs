@@ -1,0 +1,14 @@
+C:\Users\webma\Downloads\curator_rs_fixed\desktop\target\debug\deps\serde-ab4f8fac7dfa66be.d: C:\Users\webma\.cargo\registry\src\index.crates.io-1949cf8c6b5b557f\serde-1.0.229\src\lib.rs C:\Users\webma\.cargo\registry\src\index.crates.io-1949cf8c6b5b557f\serde-1.0.229\src\integer128.rs C:\Users\webma\.cargo\registry\src\index.crates.io-1949cf8c6b5b557f\serde-1.0.229\src\private\mod.rs C:\Users\webma\.cargo\registry\src\index.crates.io-1949cf8c6b5b557f\serde-1.0.229\src\private\de.rs C:\Users\webma\.cargo\registry\src\index.crates.io-1949cf8c6b5b557f\serde-1.0.229\src\private\ser.rs C:\Users\webma\Downloads\curator_rs_fixed\desktop\target\debug\build\serde-5824a091c53eb66f\out/private.rs
+
+C:\Users\webma\Downloads\curator_rs_fixed\desktop\target\debug\deps\libserde-ab4f8fac7dfa66be.rlib: C:\Users\webma\.cargo\registry\src\index.crates.io-1949cf8c6b5b557f\serde-1.0.229\src\lib.rs C:\Users\webma\.cargo\registry\src\index.crates.io-1949cf8c6b5b557f\serde-1.0.229\src\integer128.rs C:\Users\webma\.cargo\registry\src\index.crates.io-1949cf8c6b5b557f\serde-1.0.229\src\private\mod.rs C:\Users\webma\.cargo\registry\src\index.crates.io-1949cf8c6b5b557f\serde-1.0.229\src\private\de.rs C:\Users\webma\.cargo\registry\src\index.crates.io-1949cf8c6b5b557f\serde-1.0.229\src\private\ser.rs C:\Users\webma\Downloads\curator_rs_fixed\desktop\target\debug\build\serde-5824a091c53eb66f\out/private.rs
+
+C:\Users\webma\Downloads\curator_rs_fixed\desktop\target\debug\deps\libserde-ab4f8fac7dfa66be.rmeta: C:\Users\webma\.cargo\registry\src\index.crates.io-1949cf8c6b5b557f\serde-1.0.229\src\lib.rs C:\Users\webma\.cargo\registry\src\index.crates.io-1949cf8c6b5b557f\serde-1.0.229\src\integer128.rs C:\Users\webma\.cargo\registry\src\index.crates.io-1949cf8c6b5b557f\serde-1.0.229\src\private\mod.rs C:\Users\webma\.cargo\registry\src\index.crates.io-1949cf8c6b5b557f\serde-1.0.229\src\private\de.rs C:\Users\webma\.cargo\registry\src\index.crates.io-1949cf8c6b5b557f\serde-1.0.229\src\private\ser.rs C:\Users\webma\Downloads\curator_rs_fixed\desktop\target\debug\build\serde-5824a091c53eb66f\out/private.rs
+
+C:\Users\webma\.cargo\registry\src\index.crates.io-1949cf8c6b5b557f\serde-1.0.229\src\lib.rs:
+C:\Users\webma\.cargo\registry\src\index.crates.io-1949cf8c6b5b557f\serde-1.0.229\src\integer128.rs:
+C:\Users\webma\.cargo\registry\src\index.crates.io-1949cf8c6b5b557f\serde-1.0.229\src\private\mod.rs:
+C:\Users\webma\.cargo\registry\src\index.crates.io-1949cf8c6b5b557f\serde-1.0.229\src\private\de.rs:
+C:\Users\webma\.cargo\registry\src\index.crates.io-1949cf8c6b5b557f\serde-1.0.229\src\private\ser.rs:
+C:\Users\webma\Downloads\curator_rs_fixed\desktop\target\debug\build\serde-5824a091c53eb66f\out/private.rs:
+
+# env-dep:OUT_DIR=C:\\Users\\webma\\Downloads\\curator_rs_fixed\\desktop\\target\\debug\\build\\serde-5824a091c53eb66f\\out

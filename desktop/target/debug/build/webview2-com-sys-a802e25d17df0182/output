@@ -1,0 +1,2 @@
+cargo:rustc-link-search=native=C:\Users\webma\Downloads\curator_rs_fixed\desktop\target\debug\build\webview2-com-sys-a802e25d17df0182\out\x64
+cargo:rustc-link-lib=advapi32

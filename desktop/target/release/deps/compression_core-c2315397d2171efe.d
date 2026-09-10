@@ -1,0 +1,10 @@
+C:\Users\webma\Downloads\curator_rs_fixed\desktop\target\release\deps\compression_core-c2315397d2171efe.d: C:\Users\webma\.cargo\registry\src\index.crates.io-1949cf8c6b5b557f\compression-core-0.4.33\src\lib.rs C:\Users\webma\.cargo\registry\src\index.crates.io-1949cf8c6b5b557f\compression-core-0.4.33\src\level.rs C:\Users\webma\.cargo\registry\src\index.crates.io-1949cf8c6b5b557f\compression-core-0.4.33\src\unshared.rs C:\Users\webma\.cargo\registry\src\index.crates.io-1949cf8c6b5b557f\compression-core-0.4.33\src\util.rs
+
+C:\Users\webma\Downloads\curator_rs_fixed\desktop\target\release\deps\libcompression_core-c2315397d2171efe.rlib: C:\Users\webma\.cargo\registry\src\index.crates.io-1949cf8c6b5b557f\compression-core-0.4.33\src\lib.rs C:\Users\webma\.cargo\registry\src\index.crates.io-1949cf8c6b5b557f\compression-core-0.4.33\src\level.rs C:\Users\webma\.cargo\registry\src\index.crates.io-1949cf8c6b5b557f\compression-core-0.4.33\src\unshared.rs C:\Users\webma\.cargo\registry\src\index.crates.io-1949cf8c6b5b557f\compression-core-0.4.33\src\util.rs
+
+C:\Users\webma\Downloads\curator_rs_fixed\desktop\target\release\deps\libcompression_core-c2315397d2171efe.rmeta: C:\Users\webma\.cargo\registry\src\index.crates.io-1949cf8c6b5b557f\compression-core-0.4.33\src\lib.rs C:\Users\webma\.cargo\registry\src\index.crates.io-1949cf8c6b5b557f\compression-core-0.4.33\src\level.rs C:\Users\webma\.cargo\registry\src\index.crates.io-1949cf8c6b5b557f\compression-core-0.4.33\src\unshared.rs C:\Users\webma\.cargo\registry\src\index.crates.io-1949cf8c6b5b557f\compression-core-0.4.33\src\util.rs
+
+C:\Users\webma\.cargo\registry\src\index.crates.io-1949cf8c6b5b557f\compression-core-0.4.33\src\lib.rs:
+C:\Users\webma\.cargo\registry\src\index.crates.io-1949cf8c6b5b557f\compression-core-0.4.33\src\level.rs:
+C:\Users\webma\.cargo\registry\src\index.crates.io-1949cf8c6b5b557f\compression-core-0.4.33\src\unshared.rs:
+C:\Users\webma\.cargo\registry\src\index.crates.io-1949cf8c6b5b557f\compression-core-0.4.33\src\util.rs:

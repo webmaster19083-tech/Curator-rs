@@ -136,7 +136,7 @@ pub fn detect_ffprobe(bin: &str) -> DependencyStatus {
     check_executable(bin, "-version")
 }
 
-/// Best-effort check for the optional NSFW classifier's Python environment.
+/// Best-effort check for the optional NudeNet classifier's Python environment.
 /// Only checks that the interpreter and its packages *import* cleanly — it
 /// deliberately does not load the ONNX model itself (that happens lazily on
 /// first real use in nsfw_worker.py and can take a few seconds), so this
@@ -144,7 +144,7 @@ pub fn detect_ffprobe(bin: &str) -> DependencyStatus {
 /// this mirrors.
 pub fn detect_nsfw_env(python_bin: &str) -> DependencyStatus {
     let checked = python_bin.to_string();
-    let probe = "import numpy, PIL, onnxruntime, opennsfw_onnx";
+    let probe = "import nudenet";
     match Command::new(python_bin).args(["-c", probe]).output() {
         Ok(out) if out.status.success() => {
             DependencyStatus { found: true, version: None, detail: None, checked }
@@ -158,8 +158,13 @@ pub fn detect_nsfw_env(python_bin: &str) -> DependencyStatus {
             DependencyStatus {
                 found:   false,
                 version: None,
+<<<<<<< Updated upstream
                 detail:  Some(missing.unwrap_or_else(|| {
                     "Required Python packages for NSFW classification aren't installed.".into()
+=======
+                detail: Some(missing.unwrap_or_else(|| {
+                    "The optional NudeNet Python package isn't installed.".into()
+>>>>>>> Stashed changes
                 })),
                 checked,
             }

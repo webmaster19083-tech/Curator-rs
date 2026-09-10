@@ -178,6 +178,11 @@ pub async fn resync(
         return Ok(Json(json!({ "status": "paused" })));
     }
 
+    conn.execute(
+        "UPDATE sources SET status='pending',queued_at=?1,progress_updated_at=?1,current_filename=NULL,error_message=NULL WHERE id=?2",
+        rusqlite::params![now_iso(), id],
+    ).map_err(db_err)?;
+
     tokio::spawn(run_download(Arc::clone(&state), id));
     Ok(Json(json!({ "status": "queued" })))
 }
@@ -197,6 +202,12 @@ pub async fn resync_all(State(state): State<Arc<AppState>>) -> Json<Value> {
             .filter_map(|r| r.ok()).collect()
     };
     let count = ids.len();
+    if let Ok(conn) = state.pool.get() {
+        let now = now_iso();
+        for id in &ids {
+            let _ = conn.execute("UPDATE sources SET status='pending',queued_at=?1,progress_updated_at=?1,current_filename=NULL,error_message=NULL WHERE id=?2", rusqlite::params![now, id]);
+        }
+    }
     for id in ids {
         tokio::spawn(run_download(Arc::clone(&state), id));
     }
@@ -290,7 +301,7 @@ pub async fn create_sources_from_urls(
         let name = derive_name_from_url(url);
         let base_slug = slugify(&name);
         conn.execute(
-            "INSERT INTO sources (name, url, slug, status, added_at) VALUES (?1,?2,?3,'pending',?4)",
+            "INSERT INTO sources (name, url, slug, status, added_at, queued_at, progress_updated_at) VALUES (?1,?2,?3,'pending',?4,?4,?4)",
             rusqlite::params![name, url, base_slug, now_iso()],
         ).map_err(db_err)?;
         let source_id = conn.last_insert_rowid();

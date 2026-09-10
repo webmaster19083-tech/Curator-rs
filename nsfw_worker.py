@@ -1,79 +1,122 @@
 #!/usr/bin/env python3
-"""
-Curator NSFW-classification worker.
+"""Persistent NudeNet 320 detector worker for Curator.
 
-curator.exe writes this script out to <data_dir>/nsfw_worker.py on every
-startup (it's embedded in the binary via include_str!, so it always matches
-the version of Curator you're running) and launches it once as a long-lived
-subprocess — loading the model is the expensive part, so this avoids paying
-that cost per image the way spawning a fresh interpreter per file would.
+The wire protocol is JSON Lines.  Each request has an ``id`` and a bounded
+``paths`` list; each result carries compact NudeNet detections rather than a
+made-up sexual-activity score.  Curator's Rust side owns the 1/2/3 mapping,
+which makes it impossible for detector confidence alone to produce Fast or
+Cum.
 
-Protocol: one JSON object per line in each direction over stdin/stdout.
+Requires the optional local dependency:
 
-    Rust -> Python:  {"id": 123, "path": "/abs/path/to/file.jpg"}
-    Python -> Rust:  {"id": 123, "score": 0.0431}
-                   or {"id": 123, "error": "cannot identify image file"}
+    pip install nudenet
 
-On startup, once the model has finished loading, this prints a single
-{"ready": true} line — Curator waits for that before sending any requests,
-so the first real job isn't the one eating the model-load delay.
-
-A failure classifying one particular image (corrupt file, unsupported
-format, whatever) is reported back as an {"id": ..., "error": ...} line and
-the worker keeps running — the same lesson as Curator's thumbnail handling:
-one bad file shouldn't cost you the whole warmed-up process. Only a
-genuinely broken pipe (or this script exiting) makes the Rust side spawn a
-replacement.
-
-Requires: opennsfw-onnx (pulls in onnxruntime and Pillow itself, current
-NumPy — no version pin needed). Install with your Python's pip, e.g.:
-
-    pip install opennsfw-onnx
-
-This is entirely optional — if this script can't import its dependencies,
-it reports that once on stdout and exits; Curator just leaves media
-unscored and everything else keeps working normally.
+NudeNet ships/uses its own detector model.  Recent versions expose
+``detect_batch``; older compatible versions fall back to per-file ``detect``
+without changing the protocol.
 """
 import json
 import sys
 
 
+def emit(value):
+    print(json.dumps(value, separators=(",", ":")), flush=True)
+
+
+def compact_detection(raw):
+    label = raw.get("class") or raw.get("label") or raw.get("name") or "UNKNOWN"
+    try:
+        score = float(raw.get("score", raw.get("confidence", 0.0)))
+    except (TypeError, ValueError):
+        score = 0.0
+    output = {"label": str(label), "score": max(0.0, min(1.0, score))}
+    box = raw.get("box") or raw.get("bbox")
+    if isinstance(box, (list, tuple)) and len(box) >= 4:
+        try:
+            output["box"] = [int(round(float(value))) for value in box[:4]]
+        except (TypeError, ValueError):
+            pass
+    return output
+
+
+def normalize_batch(raw, count, paths):
+    # NudeNet 3 returns one list per path.  Be defensive about early package
+    # versions and a single-item list because optional ML dependencies vary.
+    if isinstance(raw, dict):
+        # Some releases return ``{path: detections}`` instead of a list. Keep
+        # request order stable so Rust can associate evidence with each frame.
+        return [raw.get(path) or raw.get(str(path)) or [] for path in paths]
+    if not isinstance(raw, list):
+        return [[] for _ in range(count)]
+    if count == 1 and (not raw or isinstance(raw[0], dict)):
+        return [raw]
+    if len(raw) == count and all(isinstance(item, list) for item in raw):
+        return raw
+    if len(raw) == count and all(isinstance(item, dict) and "detections" in item for item in raw):
+        return [item.get("detections") or [] for item in raw]
+    # Do not accidentally attach a flattened multi-file result to every file.
+    return [[] for _ in range(count)]
+
+
 def main() -> int:
+<<<<<<< Updated upstream
+=======
+    sys.stdin.reconfigure(encoding="utf-8", errors="strict")
+    sys.stdout.reconfigure(encoding="utf-8", errors="strict")
+>>>>>>> Stashed changes
     try:
-        from opennsfw_onnx import NSFWClassifier
-    except Exception as e:  # noqa: BLE001 - report anything, don't just crash silently
-        print(json.dumps({"ready": False, "error": f"missing dependency: {e}"}), flush=True)
+        import nudenet
+        from nudenet import NudeDetector
+    except Exception as error:  # optional dependency: fail soft and visibly
+        emit({"ready": False, "error": f"missing NudeNet dependency: {error}"})
         return 1
 
     try:
-        clf = NSFWClassifier()
-        clf.warmup()  # forces the onnxruntime session to load now, not on job 1
-    except Exception as e:  # noqa: BLE001
-        print(json.dumps({"ready": False, "error": f"model load failed: {e}"}), flush=True)
+        # NudeNet's bundled detector is the lightweight 320-ish inference
+        # path in supported releases.  Do not pass a downloaded arbitrary
+        # model path here; Curator deliberately records the bundled model.
+        detector = NudeDetector()
+        version = str(getattr(nudenet, "__version__", "unknown"))
+    except Exception as error:
+        emit({"ready": False, "error": f"NudeNet model load failed: {error}"})
         return 1
 
-    print(json.dumps({"ready": True}), flush=True)
-
+    emit({"ready": True, "model": "NudeNet-320", "version": version})
     for raw_line in sys.stdin:
         raw_line = raw_line.strip()
         if not raw_line:
             continue
-
-        req_id = None
+        request_id = None
         try:
-            req = json.loads(raw_line)
-            req_id = req.get("id")
-            path = req["path"]
-        except Exception as e:  # noqa: BLE001 - malformed request, not a worker crash
-            print(json.dumps({"id": req_id, "error": f"bad request: {e}"}), flush=True)
+            request = json.loads(raw_line)
+            request_id = request.get("id")
+            paths = request.get("paths")
+            if not isinstance(paths, list) or not paths or len(paths) > 12:
+                raise ValueError("paths must be a non-empty batch of at most 12 files")
+            if not all(isinstance(path, str) and path for path in paths):
+                raise ValueError("each path must be a string")
+        except Exception as error:
+            emit({"id": request_id, "error": f"bad request: {error}"})
             continue
-
         try:
-            pred = clf.classify(path)  # accepts a path directly, no manual read needed
-            print(json.dumps({"id": req_id, "score": pred.nsfw}), flush=True)
-        except Exception as e:  # noqa: BLE001 - this image failed, worker stays up
-            print(json.dumps({"id": req_id, "error": str(e)}), flush=True)
-
+            try:
+                raw_results = detector.detect_batch(paths)
+            except (AttributeError, TypeError):
+                raw_results = [detector.detect(path) for path in paths]
+            grouped = normalize_batch(raw_results, len(paths), paths)
+            results = []
+            for detections in grouped:
+                detections = [compact_detection(item) for item in detections if isinstance(item, dict)]
+                score = max((item["score"] for item in detections), default=0.0)
+                results.append({
+                    "model": "NudeNet-320",
+                    "version": version,
+                    "score": score,
+                    "detections": detections[:32],
+                })
+            emit({"id": request_id, "results": results})
+        except Exception as error:  # a corrupt image must not kill a warm worker
+            emit({"id": request_id, "error": str(error)})
     return 0
 
 

@@ -7,12 +7,33 @@ use url::Url;
 /// silently breaks slug generation and collapses sources.
 static SKIP_SEGMENTS: Lazy<HashSet<&'static str>> = Lazy::new(|| {
     [
-        "users", "user", "channel", "c", "artist", "profile", "gallery", "art",
-        "en", "en-us", "ja", "de", "fr", "es", "member",
-        "a",  // bunkr.cr /a/<code>
+        "users",
+        "user",
+        "channel",
+        "c",
+        "artist",
+        "profile",
+        "gallery",
+        "art",
+        "en",
+        "en-us",
+        "ja",
+        "de",
+        "fr",
+        "es",
+        "member",
+        "a", // bunkr.cr /a/<code>
         // kemono.su / coomer.su service names
-        "patreon", "fanbox", "fantia", "subscribestar", "gumroad", "boosty",
-        "dlsite", "discord", "onlyfans", "fansly",
+        "patreon",
+        "fanbox",
+        "fantia",
+        "subscribestar",
+        "gumroad",
+        "boosty",
+        "dlsite",
+        "discord",
+        "onlyfans",
+        "fansly",
     ]
     .iter()
     .copied()
@@ -38,7 +59,9 @@ pub fn derive_name_from_url(url: &str) -> String {
         .map(|s| s.trim_start_matches('@').to_string());
 
     let handle = handle.unwrap_or_else(|| {
-        segments.first().map(|s| s.trim_start_matches('@').to_string())
+        segments
+            .first()
+            .map(|s| s.trim_start_matches('@').to_string())
             .unwrap_or_else(|| host.to_string())
     });
 
@@ -60,13 +83,23 @@ pub fn slugify(text: &str) -> String {
     let s = RE_NONWORD.replace_all(&lower, "-");
     let s = RE_MULTI.replace_all(&s, "-");
     let s = s.trim_matches('-').to_string();
-    if s.is_empty() { "source".to_string() } else { s }
+    if s.is_empty() {
+        "source".to_string()
+    } else {
+        s
+    }
 }
 
 pub fn normalize_url(raw: &str) -> String {
     let raw = raw.trim();
-    if raw.is_empty() { return String::new(); }
-    let raw = if raw.contains("://") { raw.to_string() } else { format!("https://{raw}") };
+    if raw.is_empty() {
+        return String::new();
+    }
+    let raw = if raw.contains("://") {
+        raw.to_string()
+    } else {
+        format!("https://{raw}")
+    };
     raw.trim_end_matches('/').to_string()
 }
 

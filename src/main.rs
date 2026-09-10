@@ -1,15 +1,18 @@
+mod chpack;
 mod db;
 mod downloader;
-mod thumb;
-mod chpack;
-mod slug;
-mod settings;
-mod state;
 mod routes;
+mod settings;
+mod slug;
+mod state;
+mod thumb;
 
-use std::{net::SocketAddr, path::PathBuf, sync::Arc};
-use axum::{Router, routing::{delete, get, patch, post, put}};
+use axum::{
+    routing::{delete, get, patch, post, put},
+    Router,
+};
 use clap::Parser;
+use std::{net::SocketAddr, path::PathBuf, sync::Arc};
 use tower_http::{compression::CompressionLayer, services::ServeDir};
 use tracing::info;
 
@@ -69,12 +72,18 @@ async fn main() -> anyhow::Result<()> {
         .route("/api/groups/:id", patch(routes::groups::update))
         .route("/api/groups/:id", delete(routes::groups::delete))
         .route("/api/groups/:id/tags", post(routes::groups::add_tag))
-        .route("/api/groups/:id/tags/:tag_id", delete(routes::groups::remove_tag))
+        .route(
+            "/api/groups/:id/tags/:tag_id",
+            delete(routes::groups::remove_tag),
+        )
         // media
         .route("/api/media", get(routes::media::list))
         .route("/api/media/:id/rating", put(routes::media::set_rating))
         .route("/api/media/:id/tags", post(routes::media::add_tag))
-        .route("/api/media/:id/tags/:tag_id", delete(routes::media::remove_tag))
+        .route(
+            "/api/media/:id/tags/:tag_id",
+            delete(routes::media::remove_tag),
+        )
         // tags
         .route("/api/tags", get(routes::tags::list))
         .route("/api/tags/:id", delete(routes::tags::delete))
@@ -128,7 +137,9 @@ fn resolve_data_dir() -> PathBuf {
             }
         }
     }
-    dirs::home_dir().unwrap_or_else(|| PathBuf::from(".")).join("Curator")
+    dirs::home_dir()
+        .unwrap_or_else(|| PathBuf::from("."))
+        .join("Curator")
 }
 
 fn init_logging(log_path: &PathBuf) -> anyhow::Result<()> {

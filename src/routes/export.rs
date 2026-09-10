@@ -1,16 +1,15 @@
-use std::sync::Arc;
-use axum::{
-    extract::State,
-    http::header,
-    response::IntoResponse,
-    Json,
-};
+use axum::{extract::State, http::header, response::IntoResponse, Json};
 use rusqlite::params;
 use serde::Deserialize;
 use serde_json::json;
+use std::sync::Arc;
 
-use crate::{chpack, db, slug::{derive_name_from_url, normalize_for_compare, normalize_url, slugify}, state::AppState};
 use super::{bad_request, AppError};
+use crate::{
+    chpack, db,
+    slug::{derive_name_from_url, normalize_for_compare, normalize_url, slugify},
+    state::AppState,
+};
 
 // ── Source list export ───────────────────────────────────────────────────────
 
@@ -26,20 +25,23 @@ pub async fn export_sources(
              FROM sources s LEFT JOIN groups g ON g.id=s.group_id
              ORDER BY s.added_at",
         )?;
-        let sources: Vec<serde_json::Value> = stmt.query_map([], |r| {
-            Ok(json!({
-                "url": r.get::<_,String>(0)?,
-                "name": r.get::<_,String>(1)?,
-                "slug": r.get::<_,String>(2)?,
-                "added_at": r.get::<_,String>(3)?,
-                "synced_at": r.get::<_,Option<String>>(4)?,
-                "group": r.get::<_,Option<String>>(5)?,
-                "tags": r.get::<_,Option<String>>(6)?
-                    .as_deref().unwrap_or("")
-                    .split(',').filter(|s| !s.is_empty())
-                    .collect::<Vec<_>>(),
-            }))
-        })?.filter_map(|r| r.ok()).collect();
+        let sources: Vec<serde_json::Value> = stmt
+            .query_map([], |r| {
+                Ok(json!({
+                    "url": r.get::<_,String>(0)?,
+                    "name": r.get::<_,String>(1)?,
+                    "slug": r.get::<_,String>(2)?,
+                    "added_at": r.get::<_,String>(3)?,
+                    "synced_at": r.get::<_,Option<String>>(4)?,
+                    "group": r.get::<_,Option<String>>(5)?,
+                    "tags": r.get::<_,Option<String>>(6)?
+                        .as_deref().unwrap_or("")
+                        .split(',').filter(|s| !s.is_empty())
+                        .collect::<Vec<_>>(),
+                }))
+            })?
+            .filter_map(|r| r.ok())
+            .collect();
         sources
     };
 
@@ -62,10 +64,14 @@ pub async fn export_sources(
     Ok((
         [
             (header::CONTENT_TYPE, "application/json"),
-            (header::CONTENT_DISPOSITION, "attachment; filename=\"curator-sources.json\""),
+            (
+                header::CONTENT_DISPOSITION,
+                "attachment; filename=\"curator-sources.json\"",
+            ),
         ],
         json_bytes,
-    ).into_response())
+    )
+        .into_response())
 }
 
 // ── Source list import ───────────────────────────────────────────────────────
@@ -74,13 +80,15 @@ pub async fn import_sources(
     State(state): State<Arc<AppState>>,
     Json(body): Json<serde_json::Value>,
 ) -> Result<impl IntoResponse, AppError> {
-    let sources = body["sources"].as_array()
+    let sources = body["sources"]
+        .as_array()
         .ok_or_else(|| bad_request("Expected {\"sources\": [...]}"))?;
 
     let conn = state.pool.get().map_err(anyhow::Error::from)?;
     let existing: std::collections::HashMap<String, ()> = {
         let mut stmt = conn.prepare("SELECT url FROM sources")?;
-        let existing: std::collections::HashMap<String, ()> = stmt.query_map([], |r| r.get::<_,String>(0))?
+        let existing: std::collections::HashMap<String, ()> = stmt
+            .query_map([], |r| r.get::<_, String>(0))?
             .filter_map(|r| r.ok())
             .map(|url| (normalize_for_compare(&url), ()))
             .collect();
@@ -92,13 +100,22 @@ pub async fn import_sources(
 
     for entry in sources {
         let url = entry["url"].as_str().unwrap_or("").trim().to_string();
-        if url.is_empty() { skipped += 1; continue; }
+        if url.is_empty() {
+            skipped += 1;
+            continue;
+        }
         let url = normalize_url(&url);
-        if existing.contains_key(&normalize_for_compare(&url)) { skipped += 1; continue; }
+        if existing.contains_key(&normalize_for_compare(&url)) {
+            skipped += 1;
+            continue;
+        }
 
-        let name = entry["name"].as_str().unwrap_or("")
-            .trim().to_string();
-        let name = if name.is_empty() { derive_name_from_url(&url) } else { name };
+        let name = entry["name"].as_str().unwrap_or("").trim().to_string();
+        let name = if name.is_empty() {
+            derive_name_from_url(&url)
+        } else {
+            name
+        };
         let ts = db::now_iso();
         let id: i64 = conn.query_row(
             "INSERT INTO sources (name, url, slug, status, added_at) VALUES (?,?,?,'pending',?) RETURNING id",
@@ -128,7 +145,9 @@ pub struct ChpackRequest {
     pub unlock_cost: i64,
 }
 
-fn default_author() -> String { "Curator".into() }
+fn default_author() -> String {
+    "Curator".into()
+}
 
 pub async fn export_chpack(
     State(state): State<Arc<AppState>>,
@@ -138,7 +157,11 @@ pub async fn export_chpack(
 
     // Resolve pack name
     let pack_name = if let Some(ref n) = body.name {
-        if !n.trim().is_empty() { n.trim().to_string() } else { default_pack_name(&conn, body.source_id) }
+        if !n.trim().is_empty() {
+            n.trim().to_string()
+        } else {
+            default_pack_name(&conn, body.source_id)
+        }
     } else {
         default_pack_name(&conn, body.source_id)
     };
@@ -160,12 +183,17 @@ pub async fn export_chpack(
             Some(sid) => vec![sid],
             None => vec![],
         };
-        let out: Vec<_> = stmt.query_map(params_vec.as_slice(), |r| Ok(chpack::MediaRow {
-            filepath: r.get(0)?,
-            rating: r.get(1)?,
-            media_type: r.get(2)?,
-            tags_csv: r.get(3)?,
-        }))?.filter_map(|r| r.ok()).collect();
+        let out: Vec<_> = stmt
+            .query_map(params_vec.as_slice(), |r| {
+                Ok(chpack::MediaRow {
+                    filepath: r.get(0)?,
+                    rating: r.get(1)?,
+                    media_type: r.get(2)?,
+                    tags_csv: r.get(3)?,
+                })
+            })?
+            .filter_map(|r| r.ok())
+            .collect();
         out
     };
 
@@ -181,20 +209,31 @@ pub async fn export_chpack(
         unlock_cost: body.unlock_cost,
     };
 
-    let tmp = tokio::task::spawn_blocking(move || {
-        chpack::build_chpack(&rows, &library_dir, &opts)
-    }).await.map_err(anyhow::Error::from)??;
+    let tmp = tokio::task::spawn_blocking(move || chpack::build_chpack(&rows, &library_dir, &opts))
+        .await
+        .map_err(anyhow::Error::from)??;
 
-    let bytes = tokio::fs::read(tmp.path()).await.map_err(anyhow::Error::from)?;
+    let bytes = tokio::fs::read(tmp.path())
+        .await
+        .map_err(anyhow::Error::from)?;
     let safe_name = pack_name
         .chars()
-        .map(|c| if c.is_alphanumeric() || c == '-' || c == '_' || c == '.' { c } else { '_' })
+        .map(|c| {
+            if c.is_alphanumeric() || c == '-' || c == '_' || c == '.' {
+                c
+            } else {
+                '_'
+            }
+        })
         .collect::<String>();
     let filename = format!("{safe_name}.chpack");
 
     use axum::http::{HeaderMap, HeaderValue};
     let mut headers = HeaderMap::new();
-    headers.insert(header::CONTENT_TYPE, HeaderValue::from_static("application/zip"));
+    headers.insert(
+        header::CONTENT_TYPE,
+        HeaderValue::from_static("application/zip"),
+    );
     headers.insert(
         header::CONTENT_DISPOSITION,
         HeaderValue::from_str(&format!("attachment; filename=\"{filename}\""))

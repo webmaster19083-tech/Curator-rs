@@ -1,9 +1,9 @@
-use std::sync::Arc;
 use axum::{extract::State, response::IntoResponse, Json};
 use serde_json::json;
+use std::sync::Arc;
 
-use crate::{settings::Settings, state::AppState};
 use super::AppError;
+use crate::{settings::Settings, state::AppState};
 
 pub async fn get(State(state): State<Arc<AppState>>) -> Result<impl IntoResponse, AppError> {
     let s = state.settings.read().await.clone();
@@ -25,7 +25,10 @@ pub async fn patch(
     if let Some(v) = body.get("default_slideshow_loop").and_then(|v| v.as_bool()) {
         s.default_slideshow_loop = v;
     }
-    if let Some(v) = body.get("default_slideshow_shuffle").and_then(|v| v.as_bool()) {
+    if let Some(v) = body
+        .get("default_slideshow_shuffle")
+        .and_then(|v| v.as_bool())
+    {
         s.default_slideshow_shuffle = v;
     }
     if let Some(v) = body.get("theme").and_then(|v| v.as_str()) {
@@ -37,13 +40,24 @@ pub async fn patch(
     if let Some(v) = body.get("last_export_at").and_then(|v| v.as_str()) {
         s.last_export_at = Some(v.to_string());
     }
-    if body.get("last_export_at").map(|v| v.is_null()).unwrap_or(false) {
+    if body
+        .get("last_export_at")
+        .map(|v| v.is_null())
+        .unwrap_or(false)
+    {
         s.last_export_at = None;
     }
-    if let Some(v) = body.get("export_reminder_snoozed_until").and_then(|v| v.as_str()) {
+    if let Some(v) = body
+        .get("export_reminder_snoozed_until")
+        .and_then(|v| v.as_str())
+    {
         s.export_reminder_snoozed_until = Some(v.to_string());
     }
-    if body.get("export_reminder_snoozed_until").map(|v| v.is_null()).unwrap_or(false) {
+    if body
+        .get("export_reminder_snoozed_until")
+        .map(|v| v.is_null())
+        .unwrap_or(false)
+    {
         s.export_reminder_snoozed_until = None;
     }
     // CH settings

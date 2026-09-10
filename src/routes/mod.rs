@@ -9,7 +9,11 @@ pub mod sources;
 pub mod tags;
 pub mod thumb;
 
-use axum::{http::StatusCode, response::{IntoResponse, Response}, Json};
+use axum::{
+    http::StatusCode,
+    response::{IntoResponse, Response},
+    Json,
+};
 use serde_json::json;
 
 /// Unified error type for route handlers

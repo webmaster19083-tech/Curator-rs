@@ -1,4 +1,3 @@
-use std::sync::Arc;
 use axum::{
     extract::{Path, Query, State},
     http::StatusCode,
@@ -9,14 +8,15 @@ use rusqlite::params;
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use std::sync::atomic::Ordering;
+use std::sync::Arc;
 
+use super::{bad_request, not_found, AppError};
 use crate::{
     db,
     downloader::run_download,
     slug::{derive_name_from_url, normalize_for_compare, normalize_url, slugify},
     state::AppState,
 };
-use super::{bad_request, not_found, AppError};
 
 #[derive(Deserialize)]
 pub struct AddSourcesRequest {
@@ -99,8 +99,14 @@ pub async fn add(
         return Err(bad_request("No valid URLs provided"));
     }
     let result = create_sources_from_urls(Arc::clone(&state), candidates).await?;
-    if result["sources"].as_array().map(|a| a.is_empty()).unwrap_or(true)
-        && result["duplicates"].as_array().map(|a| a.is_empty()).unwrap_or(true)
+    if result["sources"]
+        .as_array()
+        .map(|a| a.is_empty())
+        .unwrap_or(true)
+        && result["duplicates"]
+            .as_array()
+            .map(|a| a.is_empty())
+            .unwrap_or(true)
     {
         return Err(bad_request("No valid URLs provided"));
     }
@@ -130,7 +136,9 @@ pub async fn patch(
     values.push(Box::new(id));
     let params: Vec<&dyn rusqlite::ToSql> = values.iter().map(|v| v.as_ref()).collect();
     let n = conn.execute(&sql, params.as_slice())?;
-    if n == 0 { return Err(not_found("Source not found")); }
+    if n == 0 {
+        return Err(not_found("Source not found"));
+    }
     let row = conn.query_row("SELECT * FROM sources WHERE id=?", [id], |r| {
         Ok(source_row_to_json(r))
     })??;
@@ -146,12 +154,16 @@ pub async fn set_group(
     let exists: bool = conn
         .query_row("SELECT id FROM sources WHERE id=?", [id], |_| Ok(()))
         .is_ok();
-    if !exists { return Err(not_found("Source not found")); }
+    if !exists {
+        return Err(not_found("Source not found"));
+    }
     if let Some(gid) = body.group_id {
         let g_exists: bool = conn
             .query_row("SELECT id FROM groups WHERE id=?", [gid], |_| Ok(()))
             .is_ok();
-        if !g_exists { return Err(bad_request("Group not found")); }
+        if !g_exists {
+            return Err(bad_request("Group not found"));
+        }
     }
     conn.execute(
         "UPDATE sources SET group_id=? WHERE id=?",
@@ -169,11 +181,9 @@ pub async fn delete(
     State(state): State<Arc<AppState>>,
 ) -> Result<impl IntoResponse, AppError> {
     let conn = state.pool.get().map_err(anyhow::Error::from)?;
-    let row = conn.query_row(
-        "SELECT slug FROM sources WHERE id=?",
-        [id],
-        |r| r.get::<_, String>(0),
-    );
+    let row = conn.query_row("SELECT slug FROM sources WHERE id=?", [id], |r| {
+        r.get::<_, String>(0)
+    });
     let slug = match row {
         Ok(s) => s,
         Err(_) => return Err(not_found("Source not found")),
@@ -193,8 +203,12 @@ pub async fn delete(
             let _ = std::fs::remove_dir_all(&dest);
         }
         let archive = dunce::simplified(
-            &state.data_dir.join("archives").join(format!("{slug}.sqlite3"))
-        ).to_path_buf();
+            &state
+                .data_dir
+                .join("archives")
+                .join(format!("{slug}.sqlite3")),
+        )
+        .to_path_buf();
         let _ = std::fs::remove_file(&archive);
     }
 
@@ -206,11 +220,9 @@ pub async fn resync(
     State(state): State<Arc<AppState>>,
 ) -> Result<impl IntoResponse, AppError> {
     let conn = state.pool.get().map_err(anyhow::Error::from)?;
-    let row = conn.query_row(
-        "SELECT status FROM sources WHERE id=?",
-        [id],
-        |r| r.get::<_, String>(0),
-    );
+    let row = conn.query_row("SELECT status FROM sources WHERE id=?", [id], |r| {
+        r.get::<_, String>(0)
+    });
     let status = match row {
         Ok(s) => s,
         Err(_) => return Err(not_found("Source not found")),
@@ -225,18 +237,16 @@ pub async fn resync(
     Ok(Json(json!({"status": "queued"})))
 }
 
-pub async fn resync_all(
-    State(state): State<Arc<AppState>>,
-) -> Result<impl IntoResponse, AppError> {
+pub async fn resync_all(State(state): State<Arc<AppState>>) -> Result<impl IntoResponse, AppError> {
     if state.downloads_paused.load(Ordering::SeqCst) {
         return Ok(Json(json!({"queued": 0, "paused": true})));
     }
     let conn = state.pool.get().map_err(anyhow::Error::from)?;
     let ids: Vec<i64> = {
-        let mut stmt = conn.prepare(
-            "SELECT id FROM sources WHERE status NOT IN ('pending','downloading')",
-        )?;
-        let ids: Vec<i64> = stmt.query_map([], |r| r.get(0))?
+        let mut stmt =
+            conn.prepare("SELECT id FROM sources WHERE status NOT IN ('pending','downloading')")?;
+        let ids: Vec<i64> = stmt
+            .query_map([], |r| r.get(0))?
             .filter_map(|r| r.ok())
             .collect();
         ids
@@ -279,7 +289,10 @@ fn source_row_to_json(r: &rusqlite::Row) -> rusqlite::Result<Value> {
     }))
 }
 
-async fn create_sources_from_urls(state: Arc<AppState>, candidates: Vec<String>) -> Result<Value, AppError> {
+async fn create_sources_from_urls(
+    state: Arc<AppState>,
+    candidates: Vec<String>,
+) -> Result<Value, AppError> {
     let mut normalized: Vec<String> = Vec::new();
     let mut seen = std::collections::HashSet::new();
     for c in candidates {
@@ -295,7 +308,8 @@ async fn create_sources_from_urls(state: Arc<AppState>, candidates: Vec<String>)
     let conn = state.pool.get().map_err(anyhow::Error::from)?;
     let existing: std::collections::HashMap<String, String> = {
         let mut stmt = conn.prepare("SELECT url, name FROM sources")?;
-        let existing: std::collections::HashMap<String, String> = stmt.query_map([], |r| Ok((r.get::<_,String>(0)?, r.get::<_,String>(1)?)))?
+        let existing: std::collections::HashMap<String, String> = stmt
+            .query_map([], |r| Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?)))?
             .filter_map(|r| r.ok())
             .map(|(url, name)| (normalize_for_compare(&url), name))
             .collect();
@@ -327,7 +341,8 @@ async fn create_sources_from_urls(state: Arc<AppState>, candidates: Vec<String>)
         )?;
         let slug = format!("{id}-{}", slugify(&name));
         conn.execute("UPDATE sources SET slug=? WHERE id=?", params![slug, id])?;
-        created.push(json!({"id": id, "name": name, "url": url, "slug": slug, "status": "pending"}));
+        created
+            .push(json!({"id": id, "name": name, "url": url, "slug": slug, "status": "pending"}));
         tokio::spawn(run_download(Arc::clone(&state), id));
     }
 
@@ -343,7 +358,15 @@ fn split_bulk_input(text: &str) -> Vec<String> {
 
 fn kill_by_pid(pid: u32) {
     #[cfg(target_os = "windows")]
-    { let _ = std::process::Command::new("taskkill").args(["/F", "/PID", &pid.to_string()]).spawn(); }
+    {
+        let _ = std::process::Command::new("taskkill")
+            .args(["/F", "/PID", &pid.to_string()])
+            .spawn();
+    }
     #[cfg(not(target_os = "windows"))]
-    { let _ = std::process::Command::new("kill").args(["-TERM", &pid.to_string()]).spawn(); }
+    {
+        let _ = std::process::Command::new("kill")
+            .args(["-TERM", &pid.to_string()])
+            .spawn();
+    }
 }

@@ -1,13 +1,13 @@
+use crate::settings::Settings;
+use anyhow::Result;
+use r2d2::Pool;
+use r2d2_sqlite::SqliteConnectionManager;
 use std::{
     collections::{HashMap, HashSet},
     path::PathBuf,
     sync::{atomic::AtomicBool, Arc, Mutex},
 };
-use r2d2::Pool;
-use r2d2_sqlite::SqliteConnectionManager;
 use tokio::sync::RwLock;
-use anyhow::Result;
-use crate::settings::Settings;
 
 /// Effective tag set for a group_id: own tags ∪ ancestor tags ∪ ancestor names.
 /// Rebuilt on any group or group_tag write; read lock held during list_media.

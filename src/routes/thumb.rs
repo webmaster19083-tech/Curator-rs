@@ -1,12 +1,12 @@
-use std::sync::Arc;
 use axum::{
     extract::{Path, State},
     http::{header, StatusCode},
     response::{IntoResponse, Redirect, Response},
 };
+use std::sync::Arc;
 
-use crate::state::AppState;
 use super::AppError;
+use crate::state::AppState;
 
 pub async fn get(
     Path(id): Path<i64>,
@@ -16,12 +16,14 @@ pub async fn get(
     let row = conn.query_row(
         "SELECT filepath, type, downloaded, origin_url FROM media WHERE id=?",
         [id],
-        |r| Ok((
-            r.get::<_,String>(0)?,
-            r.get::<_,String>(1)?,
-            r.get::<_,i64>(2)?,
-            r.get::<_,Option<String>>(3)?,
-        )),
+        |r| {
+            Ok((
+                r.get::<_, String>(0)?,
+                r.get::<_, String>(1)?,
+                r.get::<_, i64>(2)?,
+                r.get::<_, Option<String>>(3)?,
+            ))
+        },
     );
 
     let (filepath, mtype, downloaded, origin_url) = match row {
@@ -49,7 +51,9 @@ pub async fn get(
     let result = tokio::task::spawn_blocking(move || {
         crate::thumb::get_or_create_thumb(id, src.clone(), thumbs_dir)
             .or_else(|_| std::fs::read(&src).map_err(anyhow::Error::from))
-    }).await.map_err(anyhow::Error::from)??;
+    })
+    .await
+    .map_err(anyhow::Error::from)??;
 
     Ok((
         [
@@ -57,7 +61,8 @@ pub async fn get(
             (header::CACHE_CONTROL, "public, max-age=31536000, immutable"),
         ],
         result,
-    ).into_response())
+    )
+        .into_response())
 }
 
 async fn serve_file(path: &std::path::Path) -> Result<Response, AppError> {
@@ -65,5 +70,6 @@ async fn serve_file(path: &std::path::Path) -> Result<Response, AppError> {
     Ok((
         [(header::CACHE_CONTROL, "public, max-age=31536000, immutable")],
         bytes,
-    ).into_response())
+    )
+        .into_response())
 }

@@ -1,16 +1,34 @@
-use std::path::{Path, PathBuf};
-use serde::{Deserialize, Serialize};
 use anyhow::Result;
+use serde::{Deserialize, Serialize};
+use std::path::{Path, PathBuf};
 
-fn default_max_concurrent() -> u32 { 3 }
-fn default_slideshow_speed() -> f64 { 3000.0 }
-fn default_false() -> bool { false }
-fn default_theme() -> String { "dark".into() }
-fn default_export_reminder_days() -> u32 { 30 }
-fn default_ch_default_interval() -> f64 { 5.0 }
-fn default_ch_default_limit() -> u32 { 200 }
-fn default_true() -> bool { true }
-fn default_ch_media_type() -> String { "image".into() }
+fn default_max_concurrent() -> u32 {
+    3
+}
+fn default_slideshow_speed() -> f64 {
+    3000.0
+}
+fn default_false() -> bool {
+    false
+}
+fn default_theme() -> String {
+    "dark".into()
+}
+fn default_export_reminder_days() -> u32 {
+    30
+}
+fn default_ch_default_interval() -> f64 {
+    5.0
+}
+fn default_ch_default_limit() -> u32 {
+    200
+}
+fn default_true() -> bool {
+    true
+}
+fn default_ch_media_type() -> String {
+    "image".into()
+}
 
 #[derive(Serialize, Deserialize, Clone, Debug)]
 pub struct Settings {

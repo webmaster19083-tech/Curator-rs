@@ -1,8 +1,11 @@
-use std::{collections::{HashMap, HashSet}, path::Path};
+use anyhow::{Context, Result};
 use r2d2::Pool;
 use r2d2_sqlite::SqliteConnectionManager;
 use rusqlite::{params, Connection};
-use anyhow::{Context, Result};
+use std::{
+    collections::{HashMap, HashSet},
+    path::Path,
+};
 
 use crate::slug::derive_name_from_url;
 
@@ -76,15 +79,21 @@ pub fn run_migrations(conn: &Connection) -> Result<()> {
     )?;
 
     // ── ADD MISSING COLUMNS (safe on existing DBs) ───────────────────────
-    add_column_if_missing(conn, "sources", "group_id",
-        "INTEGER REFERENCES groups(id) ON DELETE SET NULL")?;
-    add_column_if_missing(conn, "groups", "parent_id",
-        "INTEGER REFERENCES groups(id) ON DELETE SET NULL")?;
-    add_column_if_missing(conn, "media", "rating",
-        "INTEGER NOT NULL DEFAULT 0")?;
+    add_column_if_missing(
+        conn,
+        "sources",
+        "group_id",
+        "INTEGER REFERENCES groups(id) ON DELETE SET NULL",
+    )?;
+    add_column_if_missing(
+        conn,
+        "groups",
+        "parent_id",
+        "INTEGER REFERENCES groups(id) ON DELETE SET NULL",
+    )?;
+    add_column_if_missing(conn, "media", "rating", "INTEGER NOT NULL DEFAULT 0")?;
     add_column_if_missing(conn, "media", "origin_url", "TEXT")?;
-    add_column_if_missing(conn, "media", "downloaded",
-        "INTEGER NOT NULL DEFAULT 1")?;
+    add_column_if_missing(conn, "media", "downloaded", "INTEGER NOT NULL DEFAULT 1")?;
 
     // ── INDEXES ──────────────────────────────────────────────────────────
     conn.execute_batch(
@@ -106,9 +115,10 @@ pub fn run_migrations(conn: &Connection) -> Result<()> {
     // deliberately renamed is left alone.
     let rows: Vec<(i64, String, String)> = {
         let mut stmt = conn.prepare("SELECT id, name, url FROM sources")?;
-        let rows: Vec<(i64, String, String)> = stmt.query_map([], |r| {
-            Ok((r.get(0)?, r.get(1)?, r.get(2)?))
-        })?.filter_map(|r| r.ok()).collect();
+        let rows: Vec<(i64, String, String)> = stmt
+            .query_map([], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)))?
+            .filter_map(|r| r.ok())
+            .collect();
         rows
     };
 
@@ -119,7 +129,10 @@ pub fn run_migrations(conn: &Connection) -> Result<()> {
         }
         let new_guess = derive_name_from_url(&url);
         if new_guess != name {
-            conn.execute("UPDATE sources SET name=? WHERE id=?", params![new_guess, id])?;
+            conn.execute(
+                "UPDATE sources SET name=? WHERE id=?",
+                params![new_guess, id],
+            )?;
         }
     }
 
@@ -142,7 +155,9 @@ fn add_column_if_missing(conn: &Connection, table: &str, col: &str, def: &str) -
 /// take the very first path segment, lstrip '@', format "{seg} ({site})".
 fn old_buggy_name(url: &str) -> String {
     use url::Url;
-    let Ok(parsed) = Url::parse(url) else { return String::new() };
+    let Ok(parsed) = Url::parse(url) else {
+        return String::new();
+    };
     let host = parsed.host_str().unwrap_or("").to_lowercase();
     let host = host.strip_prefix("www.").unwrap_or(&host);
     let site = host.split('.').next().unwrap_or("site");
@@ -165,7 +180,8 @@ fn old_buggy_name(url: &str) -> String {
 pub fn build_group_ancestry_map(conn: &Connection) -> Result<HashMap<i64, Vec<i64>>> {
     let parents: HashMap<i64, Option<i64>> = {
         let mut stmt = conn.prepare("SELECT id, parent_id FROM groups")?;
-        let parents: HashMap<i64, Option<i64>> = stmt.query_map([], |r| Ok((r.get(0)?, r.get(1)?)))?
+        let parents: HashMap<i64, Option<i64>> = stmt
+            .query_map([], |r| Ok((r.get(0)?, r.get(1)?)))?
             .filter_map(|r| r.ok())
             .collect();
         parents
@@ -176,7 +192,9 @@ pub fn build_group_ancestry_map(conn: &Connection) -> Result<HashMap<i64, Vec<i6
         let mut seen = HashSet::from([id]);
         let mut cur = parents.get(&id).copied().flatten();
         while let Some(p) = cur {
-            if seen.contains(&p) { break; }
+            if seen.contains(&p) {
+                break;
+            }
             out.push(p);
             seen.insert(p);
             cur = parents.get(&p).copied().flatten();
@@ -184,18 +202,20 @@ pub fn build_group_ancestry_map(conn: &Connection) -> Result<HashMap<i64, Vec<i6
         out
     }
 
-    Ok(parents.keys().map(|&id| (id, chain(id, &parents))).collect())
+    Ok(parents
+        .keys()
+        .map(|&id| (id, chain(id, &parents)))
+        .collect())
 }
 
 /// group_id → set of effective tag names (own tags ∪ ancestor tags ∪ group names)
-pub fn build_group_effective_tags_map(
-    conn: &Connection,
-) -> Result<HashMap<i64, HashSet<String>>> {
+pub fn build_group_effective_tags_map(conn: &Connection) -> Result<HashMap<i64, HashSet<String>>> {
     let ancestry = build_group_ancestry_map(conn)?;
 
     let names: HashMap<i64, String> = {
         let mut stmt = conn.prepare("SELECT id, name FROM groups")?;
-        let names: HashMap<i64, String> = stmt.query_map([], |r| Ok((r.get(0)?, r.get::<_, String>(1)?)))?
+        let names: HashMap<i64, String> = stmt
+            .query_map([], |r| Ok((r.get(0)?, r.get::<_, String>(1)?)))?
             .filter_map(|r| r.ok())
             .map(|(id, name)| (id, name.trim().to_lowercase()))
             .collect();
@@ -217,8 +237,12 @@ pub fn build_group_effective_tags_map(
     for (&gid, chain) in &ancestry {
         let mut tags = HashSet::new();
         for &aid in chain {
-            if let Some(n) = names.get(&aid) { tags.insert(n.clone()); }
-            if let Some(t) = own_tags.get(&aid) { tags.extend(t.iter().cloned()); }
+            if let Some(n) = names.get(&aid) {
+                tags.insert(n.clone());
+            }
+            if let Some(t) = own_tags.get(&aid) {
+                tags.extend(t.iter().cloned());
+            }
         }
         effective.insert(gid, tags);
     }

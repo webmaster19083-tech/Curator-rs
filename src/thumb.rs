@@ -1,9 +1,9 @@
+use anyhow::Result;
+use image::{imageops::FilterType, ImageFormat};
 use std::{
     io::Cursor,
     path::{Path, PathBuf},
 };
-use anyhow::Result;
-use image::{ImageFormat, imageops::FilterType};
 
 const THUMB_MAX_DIM: u32 = 360;
 

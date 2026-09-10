@@ -1,11 +1,11 @@
+use anyhow::Result;
 use std::{
     collections::HashSet,
     io::Write,
     path::{Path, PathBuf},
 };
-use anyhow::Result;
 use tempfile::NamedTempFile;
-use zip::{write::FileOptions, ZipWriter, CompressionMethod};
+use zip::{write::FileOptions, CompressionMethod, ZipWriter};
 
 static SPEED_TAGS: &[(&str, &str)] = &[
     // rating value → speed tag
@@ -26,7 +26,10 @@ pub fn rating_to_speed(rating: i64) -> Option<&'static str> {
 
 static SPEED_TAG_SET: once_cell::sync::Lazy<HashSet<&'static str>> =
     once_cell::sync::Lazy::new(|| {
-        ["slow", "medium", "fast", "cum", "succubus"].iter().copied().collect()
+        ["slow", "medium", "fast", "cum", "succubus"]
+            .iter()
+            .copied()
+            .collect()
     });
 
 pub struct MediaRow {
@@ -61,7 +64,9 @@ pub fn build_chpack(
 
     for (idx, row) in entries.iter().enumerate() {
         let src = dunce::simplified(&library_dir.join(&row.filepath)).to_path_buf();
-        if !src.exists() { continue; }
+        if !src.exists() {
+            continue;
+        }
 
         let ext = PathBuf::from(&row.filepath)
             .extension()
@@ -71,7 +76,8 @@ pub fn build_chpack(
 
         // Build filename: {idx}_{curator_tags}_{speed}.{ext}
         // Curator tags that collide with speed tag set are stripped.
-        let own_tags: Vec<String> = row.tags_csv
+        let own_tags: Vec<String> = row
+            .tags_csv
             .as_deref()
             .unwrap_or("")
             .split(',')
@@ -91,7 +97,11 @@ pub fn build_chpack(
         let mut f = std::fs::File::open(&src)?;
         std::io::copy(&mut f, &mut zip)?;
 
-        let file_type = if row.media_type == "video" { "video" } else { "image" };
+        let file_type = if row.media_type == "video" {
+            "video"
+        } else {
+            "image"
+        };
         media_entries.push(serde_json::json!({
             "file": archive_name,
             "type": file_type,

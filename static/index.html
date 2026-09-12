@@ -1,11 +1,13 @@
 <!doctype html>
 <html lang="en">
 <head>
-<script src="/desktop.js"></script>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>Curator</title>
+<title>Curator — a gallery-dl browser</title>
 <link rel="icon" href="data:,">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Space+Grotesk:wght@500;600;700&family=IBM+Plex+Sans:wght@400;500;600&family=IBM+Plex+Mono:wght@400;500&display=swap" rel="stylesheet">
 <link rel="stylesheet" href="/style.css">
 </head>
 <body>
@@ -74,6 +76,8 @@
         <input id="import-file-input" type="file" accept="application/json" hidden>
         <span class="muted">·</span>
         <a id="view-log-link" class="link-btn" href="/api/log" target="_blank" rel="noopener noreferrer">⚠ view log</a>
+        <span class="muted">·</span>
+        <button id="chpack-export-btn" class="link-btn" title="Export selected source as CockHero .chpack">🎮 export .chpack</button>
       </div>
     </footer>
   </aside>
@@ -91,8 +95,8 @@
         <div class="type-filter" role="group" aria-label="Filter by media type">
           <button class="type-filter-btn active" data-type-filter="all">all</button>
           <button class="type-filter-btn" data-type-filter="image">photos</button>
-          <button class="type-filter-btn" data-type-filter="clip" title="Videos up to the configured maximum clip length">clips</button>
-          <button class="type-filter-btn" data-type-filter="video" title="Videos over the configured maximum clip length, plus files whose duration is not known yet">videos</button>
+          <button class="type-filter-btn" data-type-filter="clip" title="Videos up to 90 seconds">clips</button>
+          <button class="type-filter-btn" data-type-filter="video" title="Videos over 90 seconds, plus files whose duration is not known yet">videos</button>
         </div>
         <select id="sort-select" class="btn btn-ghost" title="Sort order">
           <option value="default">sort: default</option>
@@ -174,6 +178,20 @@
       <input id="settings-max-clip-length" type="number" min="5" max="3600" step="1"> seconds
     </label>
 
+    <h2 class="settings-subhead">Library</h2>
+    <label class="settings-field mono small">
+      default library layout
+      <select id="settings-library-layout"><option value="grid">Grid</option><option value="table">Table</option></select>
+    </label>
+    <label class="settings-field mono small">
+      ffmpeg executable
+      <input id="settings-ffmpeg-bin" type="text" placeholder="ffmpeg">
+    </label>
+    <label class="settings-field mono small">
+      optional P-HAR action-model path
+      <input id="settings-action-model-path" type="text" placeholder="Leave blank for review-only Fast ratings">
+    </label>
+
     <h2 class="settings-subhead">Appearance</h2>
     <label class="settings-field mono small">
       theme
@@ -223,16 +241,39 @@
 
     <h2 class="settings-subhead">NSFW auto-rating</h2>
     <p class="muted">
-      Runs newly-downloaded (and, in the background, existing) photos through a local
-      classifier and sets their star rating automatically — 1★ clothed/safe up to 5★
-      extremely explicit — for anything not already rated by hand. Use the
-      "all ratings" dropdown in the toolbar to hide content above a rating cutoff.
-      Requires Python plus the <code>opennsfw-standalone</code> package to be installed
-      separately (see <code>curator --docs</code>) — nothing else in Curator depends on
-      this, so it's fine to leave off. Toggling this needs a restart to take effect.
+      NudeNet classifies anatomy exposure locally: 1★ SFW, 2★ Slow, and 3★ Medium.
+      Detector confidence alone never creates Fast or Cum. An optional supervised P-HAR
+      temporal model can suggest 4★ Fast for qualifying clips; 5★ Cum is always confirmed
+      by a person or a reserved <code>pace:cum</code> tag. Long videos and unavailable
+      dependencies go to Review without blocking image classification. Toggling needs a restart.
     </p>
     <label class="settings-checkbox mono small">
       <input id="settings-nsfw-filter-enabled" type="checkbox"> enable NSFW auto-rating (restart required)
+    </label>
+
+    <h2 class="settings-subhead">GOON defaults</h2>
+    <label class="settings-checkbox mono small">
+      <input id="settings-metronome-enabled" type="checkbox"> metronome enabled
+    </label>
+    <label class="settings-field mono small">
+      metronome volume
+      <input id="settings-metronome-volume" type="number" min="0" max="1" step="0.05">
+    </label>
+    <label class="settings-field mono small">
+      persona
+      <select id="settings-goon-persona"><option value="neutral">Neutral</option><option value="mommy">Mommy</option><option value="dom">Dom</option><option value="brat">Brat</option></select>
+    </label>
+    <label class="settings-field mono small">
+      installed speech voice
+      <select id="settings-tts-voice"><option value="">System default</option></select>
+    </label>
+    <label class="settings-field mono small">
+      voice rate / pitch / volume
+      <input id="settings-tts-rate" type="number" min="0.1" max="3" step="0.1"> / <input id="settings-tts-pitch" type="number" min="0" max="2" step="0.1"> / <input id="settings-tts-volume" type="number" min="0" max="1" step="0.05">
+    </label>
+    <label class="settings-field mono small">
+      soundtrack provider
+      <select id="settings-soundtrack-provider"><option value="local">Local audio</option><option value="youtube">YouTube</option><option value="soundcloud">SoundCloud</option><option value="apple_music">Apple Music</option><option value="spotify">Spotify (independent only)</option></select>
     </label>
 
     <h2 class="settings-subhead">Startup</h2>
@@ -272,7 +313,7 @@
       <div class="lightbox-meta mono small" id="lightbox-meta"></div>
       <div id="lightbox-clip-tools" hidden>
         <label>Clip length <select id="clip-seconds"><option value="15">15s</option><option value="30">30s</option><option value="60" selected>60s</option></select></label>
-        <button id="create-clips-btn" class="btn btn-ghost" title="Create virtual clips from the original video; the original is preserved.">Create clips…</button>
+        <button id="create-clips-btn" class="btn btn-ghost" title="Create separate MP4 files. Original stays untouched; this uses additional disk space.">Create clips (keep original)</button>
       </div>
       <span id="clip-job-status" role="status" class="mono small"></span>
       <button class="btn btn-accent" id="lightbox-start-slideshow">▶ slideshow from here</button>
@@ -348,11 +389,7 @@
   <div id="vr-container"></div>
 </div>
 
-<!-- Optional VR enhancement. It must never hold up Curator's first paint
-     when a machine is offline or a CDN is blocked. -->
-<script async src="https://cdnjs.cloudflare.com/ajax/libs/three.js/r128/three.min.js"></script>
-<script src="/virtual-clips.js"></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/three.js/r128/three.min.js"></script>
 <script src="/app.js"></script>
-<script src="/library.js"></script>
 </body>
 </html>

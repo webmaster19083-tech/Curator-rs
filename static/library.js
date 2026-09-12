@@ -26,11 +26,32 @@ const explorer = {
   searchResults: [],
   searchSelected: new Set(),
   playMode: localStorage.getItem('curator-last-play-mode') || 'slideshow',
+  layout: localStorage.getItem('curator-library-layout') || 'grid',
+  sourceCollapsed: new Set(),
+  activityTimer: null,
   goon: null,
 };
 
+try {
+  explorer.sourceCollapsed = new Set(JSON.parse(localStorage.getItem('curator-source-hierarchy-collapsed') || '[]'));
+} catch (_) { explorer.sourceCollapsed = new Set(); }
+
 function normalizePlayMode(mode) {
   return ({ 'mobile-feed': 'feed', 'portrait-wall': 'portrait' })[mode] || mode;
+}
+
+function supportsPlayMode(mode) {
+  const narrowOrCoarse = window.matchMedia('(max-width: 900px), (pointer: coarse)').matches;
+  const wideFine = window.matchMedia('(min-width: 901px) and (pointer: fine)').matches;
+  if (mode === 'feed') return narrowOrCoarse;
+  if (mode === 'portrait' || mode === 'vr') return wideFine;
+  return true;
+}
+function updatePlayCapabilities() {
+  explorerAll('[data-play-mode="feed"]').forEach((button) => { button.hidden = !supportsPlayMode('feed'); });
+  explorerAll('[data-play-mode="portrait"]').forEach((button) => { button.hidden = !supportsPlayMode('portrait'); });
+  const vr = explorerEl('#vr-btn'); if (vr && !supportsPlayMode('vr')) vr.hidden = true;
+  if (!supportsPlayMode(explorer.playMode)) setPlayMode('slideshow', false);
 }
 
 state.selectedMediaIds = explorer.selected;
@@ -42,6 +63,20 @@ function explorerAll(selector, root = document) { return [...root.querySelectorA
 function effectiveRating(item) {
   const value = item?.effective_rating ?? item?.human_rating ?? item?.rating ?? item?.auto_rating ?? 0;
   return Number.isFinite(Number(value)) ? Number(value) : 0;
+}
+
+function setExplorerLayout(layout, persist = true) {
+  layout = layout === 'table' ? 'table' : 'grid';
+  explorer.layout = layout;
+  localStorage.setItem('curator-library-layout', layout);
+  const grid = explorerEl('#grid'); const columns = explorerEl('#explorer-columns');
+  grid?.classList.toggle('explorer-grid-layout', layout === 'grid');
+  grid?.classList.toggle('explorer-table-layout', layout === 'table');
+  columns?.classList.toggle('layout-hidden', layout === 'grid');
+  explorerAll('[data-library-layout]').forEach((button) => {
+    const active = button.dataset.libraryLayout === layout; button.classList.toggle('active', active); button.setAttribute('aria-pressed', String(active));
+  });
+  if (persist) api('/api/settings', { method: 'PATCH', body: JSON.stringify({ library_layout: layout }) }).catch(() => {});
 }
 
 function formatBytes(value) {
@@ -92,10 +127,16 @@ function setExplorerVisible(mediaVisible) {
 function updateExplorerLocation(label) {
   const node = explorerEl('#explorer-location');
   if (node) node.textContent = label;
+  const category = ['search', 'sources', 'creators'].includes(explorer.nav) ? 'Discover'
+    : ['groups', 'tags', 'ratings', 'review'].includes(explorer.nav) ? 'Organization'
+      : ['downloads', 'recent'].includes(explorer.nav) ? 'Activity' : 'Library';
+  const route = explorerEl('#explorer-route-label'); if (route) route.textContent = `CURATOR / ${category}`;
+  const kicker = explorerEl('.explorer-kicker'); if (kicker) kicker.textContent = category;
 }
 
 function updateNavigation() {
   if (!explorer.installed) return;
+  renderExplorerSourceHierarchy();
   explorerAll('[data-nav]').forEach((button) => button.classList.toggle('active', button.dataset.nav === explorer.nav));
   const activeDownloads = state.sources.filter((source) => source.status === 'pending' || source.status === 'downloading').length;
   const badge = explorerEl('#sidebar-download-count');
@@ -108,6 +149,61 @@ function updateNavigation() {
     const items = state.sources.reduce((sum, source) => sum + Number(source.item_count || 0), 0);
     stats.textContent = `${state.sources.length} sources · ${items.toLocaleString()} items`;
   }
+}
+
+function saveSourceHierarchyCollapse() {
+  localStorage.setItem('curator-source-hierarchy-collapsed', JSON.stringify([...explorer.sourceCollapsed]));
+}
+function sourceStatusText(source) {
+  const status = String(source.status || 'idle').toLowerCase();
+  return ({ downloading: 'active', pending: 'queued', retrying: 'retry', paused: 'paused', complete: 'done', completed: 'done', error: 'failed' })[status] || status;
+}
+function renderExplorerSourceHierarchy() {
+  const host = explorerEl('#explorer-source-hierarchy'); if (!host) return;
+  host.replaceChildren();
+  const groupsByParent = new Map();
+  state.groups.forEach((group) => {
+    const key = group.parent_id == null ? 'root' : String(group.parent_id);
+    if (!groupsByParent.has(key)) groupsByParent.set(key, []);
+    groupsByParent.get(key).push(group);
+  });
+  const sourcesFor = (groupId) => state.sources.filter((source) => (source.group_id == null ? null : Number(source.group_id)) === groupId);
+  const descendantSources = (group) => {
+    const children = groupsByParent.get(String(group.id)) || [];
+    return sourcesFor(group.id).length + children.reduce((count, child) => count + descendantSources(child), 0);
+  };
+  const appendSource = (source, depth) => {
+    const row = document.createElement('div'); row.className = 'source-tree-source'; row.style.setProperty('--depth', depth);
+    const browse = document.createElement('button'); browse.type = 'button'; browse.className = 'source-tree-browse'; browse.textContent = source.name;
+    browse.title = source.url; browse.addEventListener('click', () => switchView({ type: 'creator', id: source.id }));
+    const badge = document.createElement('span'); badge.className = `source-status source-status-${sourceStatusText(source)}`; badge.textContent = sourceStatusText(source);
+    const actions = document.createElement('button'); actions.type = 'button'; actions.className = 'source-tree-actions'; actions.textContent = '⋯'; actions.setAttribute('aria-label', `Actions for ${source.name}`);
+    actions.addEventListener('click', (event) => { event.stopPropagation(); openSourceMenu(source.id, actions); });
+    row.append(browse, badge, actions); host.append(row);
+  };
+  const appendGroup = (group, depth) => {
+    const key = `group:${group.id}`; const collapsed = explorer.sourceCollapsed.has(key);
+    const children = groupsByParent.get(String(group.id)) || []; const direct = sourcesFor(group.id);
+    const row = document.createElement('div'); row.className = 'source-tree-group'; row.style.setProperty('--depth', depth);
+    const toggle = document.createElement('button'); toggle.type = 'button'; toggle.className = 'source-tree-toggle'; toggle.textContent = collapsed ? '›' : '⌄';
+    toggle.setAttribute('aria-label', `${collapsed ? 'Expand' : 'Collapse'} ${group.name}`);
+    toggle.addEventListener('click', () => { if (collapsed) explorer.sourceCollapsed.delete(key); else explorer.sourceCollapsed.add(key); saveSourceHierarchyCollapse(); renderExplorerSourceHierarchy(); });
+    const browse = document.createElement('button'); browse.type = 'button'; browse.className = 'source-tree-browse'; browse.textContent = group.name;
+    browse.addEventListener('click', () => switchView({ type: 'group', id: group.id, name: group.name }));
+    const count = document.createElement('span'); count.className = 'source-tree-count'; count.textContent = `${descendantSources(group)} · ${children.length}`;
+    row.append(toggle, browse, count); host.append(row);
+    if (!collapsed) { children.forEach((child) => appendGroup(child, depth + 1)); direct.forEach((source) => appendSource(source, depth + 1)); }
+  };
+  const ungrouped = state.sources.filter((source) => source.group_id == null);
+  const ungroupedKey = 'ungrouped'; const ungroupedCollapsed = explorer.sourceCollapsed.has(ungroupedKey);
+  const ungroupedRow = document.createElement('div'); ungroupedRow.className = 'source-tree-group';
+  const toggle = document.createElement('button'); toggle.type = 'button'; toggle.className = 'source-tree-toggle'; toggle.textContent = ungroupedCollapsed ? '›' : '⌄';
+  toggle.addEventListener('click', () => { if (ungroupedCollapsed) explorer.sourceCollapsed.delete(ungroupedKey); else explorer.sourceCollapsed.add(ungroupedKey); saveSourceHierarchyCollapse(); renderExplorerSourceHierarchy(); });
+  const browse = document.createElement('button'); browse.type = 'button'; browse.className = 'source-tree-browse'; browse.textContent = 'Ungrouped Sources'; browse.addEventListener('click', () => switchView({ type: 'group', id: 0, name: 'Ungrouped Sources' }));
+  const count = document.createElement('span'); count.className = 'source-tree-count'; count.textContent = String(ungrouped.length);
+  ungroupedRow.append(toggle, browse, count); host.append(ungroupedRow);
+  if (!ungroupedCollapsed) ungrouped.forEach((source) => appendSource(source, 1));
+  (groupsByParent.get('root') || []).forEach((group) => appendGroup(group, 0));
 }
 
 function updateBulkUI() {
@@ -216,7 +312,8 @@ function explorerBuildTile(item, index) {
   const duration = document.createElement('span'); duration.className = 'explorer-duration mono'; duration.textContent = formatDuration(item.duration_secs); row.append(duration);
   const size = document.createElement('span'); size.className = 'explorer-size mono'; size.textContent = formatBytes(item.file_size_bytes); row.append(size);
   const rating = document.createElement('span'); rating.className = 'explorer-rating mono';
-  const value = effectiveRating(item); rating.textContent = value ? `★ ${value}` : '—';
+  const value = effectiveRating(item); const paceLabels = { 1: 'SFW', 2: 'Slow', 3: 'Medium', 4: 'Fast', 5: 'Cum' };
+  rating.textContent = value ? `★ ${value} · ${paceLabels[value] || 'Unrated'}` : '—';
   rating.title = item.human_rating != null ? `Human ${item.human_rating}; automatic ${item.auto_rating || 0}` : item.auto_rating ? `Automatic ${item.auto_rating}` : 'Unrated';
   if (item.human_rating != null || item.rating_reviewed) rating.classList.add('human'); row.append(rating);
   const date = document.createElement('span'); date.className = 'explorer-date mono'; date.textContent = formatDate(item.added_at); row.append(date);
@@ -377,8 +474,8 @@ async function handleBulkAction(action) {
   } else if (action === 'add-tag') {
     const tag = prompt('Add tag to selected media:')?.trim(); if (tag) await doBulk('add_tag', { tag });
   } else if (action === 'set-rating') {
-    const rating = Number(prompt('Set effective human rating (0–5):', '3'));
-    if (Number.isInteger(rating) && rating >= 0 && rating <= 5) await doBulk('set_rating', { rating });
+    const rating = Number(prompt('Set human rating (1–5):', '3'));
+    if (Number.isInteger(rating) && rating >= 1 && rating <= 5) await doBulk('set_rating', { rating });
   } else if (action === 'delete') {
     if (confirm(`Delete ${explorer.selected.size} selected media item(s)? This can remove local files.`)) await doBulk('delete');
   } else if (action === 'review') launchPlayMode('review', selectedItems());
@@ -391,8 +488,9 @@ async function handleBulkAction(action) {
 }
 
 function launchSlideshowItems(items) {
-  if (!items.length) { toast('Nothing to play yet.', true); return; }
-  closeLightbox(); ss.items = preparePlaybackItems(items, false); ss.index = 0; ss.playing = true;
+  const playable = excludeSfwFromPlayback(items, 'Slideshow');
+  if (!playable.length) { toast('Nothing eligible to show yet.', true); return; }
+  closeLightbox(); ss.items = preparePlaybackItems(playable, false); ss.index = 0; ss.playing = true;
   ss.speed = Number(el('#ss-speed')?.value || appSettings.default_slideshow_speed || 3000);
   ss.loop = !!el('#ss-loop')?.checked; ss.shuffleMode = !!el('#ss-shuffle')?.checked;
   if (ss.shuffleMode && ss.items.length > 1) ss.items = preparePlaybackItems(ss.items, true);
@@ -415,57 +513,229 @@ async function restorePlayMode() {
     const settings = await api('/api/settings');
     const mode = normalizePlayMode(settings.last_play_mode);
     if (mode) setPlayMode(mode, false);
+    if (settings.library_layout) setExplorerLayout(settings.library_layout, false);
   } catch (_) {
     // Local persistence is still useful when a remote server is reconnecting.
   }
 }
 
 function launchPlayMode(mode = explorer.playMode, items = null) {
+  if (!supportsPlayMode(mode)) { toast(`${mode === 'feed' ? 'Mobile Feed' : 'Portrait Wall'} is unavailable on this device.`); return; }
   setPlayMode(mode); const list = items?.length ? items : state.currentItems;
-  if (mode === 'feed') { if (items?.length) toast('Mobile Feed uses the active library filter.'); startFeed(); }
+  if (mode === 'feed') startFeed(false, items?.length ? items : null);
   else if (mode === 'slideshow') launchSlideshowItems(list);
-  else if (mode === 'portrait') { if (items?.length) toast('Portrait Wall uses the active library filter.'); startPortraitWall(); }
-  else if (mode === 'review') startFeed(true);
+  else if (mode === 'portrait') startPortraitWall(items?.length ? items : null);
+  else if (mode === 'review') startFeed(true, items?.length ? items : null);
   else if (mode === 'goon') startGoonSession(list);
 }
 
-const GOON_FALLBACK_PLAN = [
-  { id: 'warmup', title: 'Warm up', duration_s: 90, intensity: 1, prompt: 'Settle in and find a comfortable pace.', event: 'begin' },
-  { id: 'build', title: 'Build', duration_s: 180, intensity: 2, prompt: 'Keep a steady rhythm. Change media when the cue appears.', event: 'increase' },
-  { id: 'focus', title: 'Focus', duration_s: 180, intensity: 3, prompt: 'Stay focused on the session cue.', event: 'hold' },
-  { id: 'cooldown', title: 'Cooldown', duration_s: 60, intensity: 1, prompt: 'Slow down, breathe, and end when ready.', event: 'cooldown', terminal: true },
-];
-
+// GOON is intentionally driven by one Web Audio timebase.  UI animation,
+// stage transitions, visual swaps, metronome clicks and local speech derive
+// from `AudioContext.currentTime`; no stage owns an independent timeout.
+function goonCurrentBeat(session) {
+  if (!session.running || !session.audio) return session.anchorBeat;
+  return session.anchorBeat + (session.audio.currentTime - session.anchorAt) * session.bpm / 60;
+}
+function goonRebase(session, beat = goonCurrentBeat(session)) {
+  session.anchorBeat = Math.max(0, Math.min(session.totalBeats, beat));
+  // The offset shifts the timeline origin in audio seconds. Keeping it in
+  // the anchor (rather than layering another timer) makes seek, pause/resume,
+  // and BPM edits use the same master clock.
+  if (session.audio) session.anchorAt = session.audio.currentTime + session.beatOffsetSecs;
+  session.nextScheduledBeat = Math.ceil(session.anchorBeat);
+}
+function goonStageIndex(session, beat) {
+  return session.stages.findIndex((stage) => beat >= Number(stage.start_beat) && beat < Number(stage.end_beat));
+}
+function goonClick(session, time, accented) {
+  if (!session.metronome.enabled || !session.audio) return;
+  const oscillator = session.audio.createOscillator();
+  const gain = session.audio.createGain();
+  oscillator.frequency.value = accented ? 1320 : 880;
+  gain.gain.setValueAtTime(Math.max(0, Math.min(1, session.metronome.volume)) * (accented ? 0.20 : 0.12), time);
+  gain.gain.exponentialRampToValueAtTime(0.001, time + 0.045);
+  oscillator.connect(gain).connect(session.audio.destination);
+  oscillator.start(time); oscillator.stop(time + 0.05);
+}
+function goonScheduleMetronome(session) {
+  if (!session.running || !session.audio || session.audio.state !== 'running') return;
+  const secondsPerBeat = 60 / session.bpm;
+  const now = session.audio.currentTime;
+  const horizon = now + 0.14;
+  while (session.nextScheduledBeat <= session.totalBeats) {
+    const time = session.anchorAt + (session.nextScheduledBeat - session.anchorBeat) * secondsPerBeat;
+    if (time > horizon) break;
+    if (time >= now - 0.03) goonClick(session, time, session.nextScheduledBeat % session.meter === 0);
+    session.nextScheduledBeat += 1;
+  }
+  session.scheduler = window.setTimeout(() => goonScheduleMetronome(session), 25);
+}
+function goonSpeak(session, text) {
+  if (!text || !session.running) return;
+  if (!('speechSynthesis' in window)) { session.textOnly = true; return; }
+  window.speechSynthesis.cancel();
+  const utterance = new SpeechSynthesisUtterance(text);
+  const voices = window.speechSynthesis.getVoices();
+  const voiceName = appSettings.tts_voice || '';
+  const voice = voices.find((candidate) => candidate.name === voiceName);
+  if (voice) utterance.voice = voice;
+  utterance.rate = Number(appSettings.tts_rate || 1);
+  utterance.pitch = Number(appSettings.tts_pitch || 1);
+  utterance.volume = Math.max(0, Math.min(1, Number(appSettings.tts_volume ?? 1)));
+  window.speechSynthesis.speak(utterance);
+}
+function goonRenderBeatMap(session, beat) {
+  const map = explorerEl('#goon-beat-map'); if (!map) return;
+  const current = Math.floor(beat);
+  explorerAll('.goon-beat', map).forEach((node) => {
+    const value = Number(node.dataset.beat);
+    node.classList.toggle('current', value === current);
+    node.classList.toggle('past', value < current);
+    node.classList.toggle('upcoming', value > current && value <= current + session.meter * 2);
+  });
+  const seek = explorerEl('#goon-seek'); if (seek && document.activeElement !== seek) seek.value = String(Math.round(beat));
+}
+function goonShowStageMedia(session, stage, force = false) {
+  const mediaStage = explorerEl('#slideshow-stage');
+  if (!stage?.media_rating) {
+    clearAdvanceTimer(); detachVideoListeners(); ss.items = []; ss.playing = false;
+    if (mediaStage) { mediaStage.replaceChildren(); mediaStage.classList.add('goon-no-media'); }
+    return;
+  }
+  const media = Array.isArray(stage.media) ? stage.media : [];
+  if (!media.length) {
+    clearAdvanceTimer(); detachVideoListeners(); ss.items = []; ss.playing = false;
+    if (mediaStage) { mediaStage.replaceChildren(); mediaStage.classList.add('goon-no-media'); }
+    return;
+  }
+  mediaStage?.classList.remove('goon-no-media');
+  const marker = `${stage.id}:${session.visualIndex}`;
+  if (!force && session.visualMarker === marker) return;
+  session.visualMarker = marker;
+  const item = media[session.visualIndex % media.length];
+  session.visualIndex += 1;
+  ss.items = [item]; ss.index = 0; ss.active = true; ss.playing = false;
+  renderSlide();
+}
+function goonApplyStage(session, index) {
+  session.stageIndex = index;
+  const stage = index >= 0 ? session.stages[index] : null;
+  const title = explorerEl('#goon-stage-title');
+  const prompt = explorerEl('#goon-stage-prompt');
+  const intensity = explorerEl('#goon-intensity');
+  if (!stage) {
+    if (title) title.textContent = 'Count in';
+    if (prompt) prompt.textContent = 'Follow the count before the first stage.';
+    if (intensity) intensity.textContent = `Beat ${Math.floor(goonCurrentBeat(session)) + 1} / ${session.totalBeats}`;
+    return;
+  }
+  if (title) title.textContent = stage.title || stage.pace || 'GOON';
+  if (prompt) prompt.textContent = stage.prompt || '';
+  if (intensity) intensity.textContent = stage.media_rating ? `${String(stage.pace || '').toUpperCase()} · ${stage.media_rating}★` : 'SUCCUBUS · beat map only';
+  session.visualIndex = 0; session.visualMarker = null;
+  goonShowStageMedia(session, stage, true);
+  goonSpeak(session, stage.prompt || '');
+  session.lastBeat = Math.floor(goonCurrentBeat(session));
+}
+function goonTick(session) {
+  if (!session.running || explorer.goon !== session) return;
+  const beat = goonCurrentBeat(session);
+  if (beat >= session.totalBeats) { endGoonSession('completed'); return; }
+  const whole = Math.floor(beat);
+  const index = goonStageIndex(session, whole);
+  if (index !== session.stageIndex) goonApplyStage(session, index);
+  const stage = index >= 0 ? session.stages[index] : null;
+  if (stage && whole !== session.lastBeat) {
+    const markers = stage.visual_change_beats || [];
+    if (markers.includes(whole)) goonShowStageMedia(session, stage);
+  }
+  session.lastBeat = whole;
+  const elapsed = Math.max(0, beat * 60 / session.bpm);
+  const time = explorerEl('#goon-stage-time'); if (time) time.textContent = `${Math.floor(elapsed / 60)}:${String(Math.floor(elapsed % 60)).padStart(2, '0')}`;
+  goonRenderBeatMap(session, beat);
+  session.raf = requestAnimationFrame(() => goonTick(session));
+}
+function goonBuildBeatMap(session) {
+  const map = explorerEl('#goon-beat-map'); if (!map) return;
+  map.replaceChildren();
+  for (let beat = 0; beat <= session.totalBeats; beat++) {
+    const node = document.createElement('span'); node.className = 'goon-beat'; node.dataset.beat = String(beat);
+    if (beat % session.meter === 0) node.classList.add('accent');
+    const stage = session.stages.find((entry) => Number(entry.start_beat) === beat || Number(entry.end_beat) === beat);
+    if (stage) { node.classList.add('boundary'); node.title = stage.title || stage.pace; }
+    if (session.stages.some((entry) => (entry.visual_change_beats || []).includes(beat))) node.classList.add('visual');
+    map.append(node);
+  }
+}
+function goonStartClock(session) {
+  if (session.running) return;
+  const AudioCtor = window.AudioContext || window.webkitAudioContext;
+  if (!AudioCtor) { toast('This browser has no Web Audio clock; the beat map remains text-only.', true); return; }
+  session.audio ||= new AudioCtor();
+  session.audio.resume().then(() => {
+    if (explorer.goon !== session || session.ended) return;
+    session.running = true; session.startedAt ||= performance.now(); goonRebase(session, session.anchorBeat);
+    explorerEl('#goon-start')?.setAttribute('hidden', '');
+    const pause = explorerEl('#goon-pause'); if (pause) pause.textContent = 'Pause';
+    goonScheduleMetronome(session); goonTick(session);
+  }).catch(() => toast('Start was blocked by the browser. Tap Start again.', true));
+}
+function goonPauseClock(session) {
+  if (!session?.audio) return;
+  if (session.running) {
+    goonRebase(session); session.running = false; cancelAnimationFrame(session.raf); clearTimeout(session.scheduler);
+    session.audio.suspend(); window.speechSynthesis?.cancel();
+    const pause = explorerEl('#goon-pause'); if (pause) pause.textContent = 'Resume';
+  } else goonStartClock(session);
+}
+function goonSetBpm(session, value) {
+  const bpm = Number(value); if (!Number.isFinite(bpm) || bpm < 40 || bpm > 300) return;
+  const beat = goonCurrentBeat(session); session.bpm = bpm; goonRebase(session, beat);
+  const readout = explorerEl('#goon-bpm'); if (readout) readout.value = String(Math.round(bpm * 10) / 10);
+}
+function goonTapTempo(session) {
+  const now = performance.now(); session.taps = [...(session.taps || []), now].slice(-6);
+  if (session.taps.length < 2) return;
+  const intervals = session.taps.slice(1).map((time, index) => time - session.taps[index]).filter((value) => value >= 200 && value <= 1500);
+  if (intervals.length) goonSetBpm(session, 60000 / (intervals.reduce((sum, value) => sum + value, 0) / intervals.length));
+}
 async function startGoonSession(items) {
-  let payload = null;
-  try { payload = await api('/api/goon/session', { method: 'POST', body: JSON.stringify({ media_ids: items.map((item) => item.id) }) }); } catch (_) {}
-  const media = payload?.media || payload?.items || items.filter((item) => mediaMatchesTypeFilter(item, 'clip') || item.type === 'image');
-  if (!media?.length) { toast('GOON needs at least one ready media item.', true); return; }
-  const stages = payload?.stages || payload?.plan?.stages || GOON_FALLBACK_PLAN;
-  launchSlideshowItems(media);
+  const original = Array.isArray(items) ? items : [];
+  const selected = excludeSfwFromPlayback(original, 'GOON');
+  let payload;
+  try { payload = await api('/api/goon/session', { method: 'POST', body: JSON.stringify({ media_ids: original.map((item) => item.id), persona: appSettings.goon_persona, metronome: { enabled: !!appSettings.metronome_enabled, volume: Number(appSettings.metronome_volume ?? .55) } }) }); }
+  catch (error) { toast(`Could not plan GOON: ${error.message}`, true); return; }
+  const stages = Array.isArray(payload?.stages) ? payload.stages : [];
+  if (!stages.length) { toast('GOON needs a valid pace plan.', true); return; }
+  if (!selected.length && Number(payload?.selection?.skipped_sfw_count || 0)) toast('All selected media are SFW; GOON will run its beat map without media.');
+  closeLightbox(); ss.active = true; ss.playing = false; clearAdvanceTimer();
+  explorerEl('#slideshow').hidden = false;
+  const timeline = payload.timeline || {};
   const hud = explorerEl('#goon-hud'); hud.hidden = false;
-  explorer.goon = { stages, stageIndex: -1, timer: null, interval: null, startedAt: Date.now(), payload, ended: false };
-  advanceGoonStage();
+  const session = explorer.goon = {
+    payload, stages, bpm: Number(timeline.bpm || 120), meter: Number(timeline.meter || 4),
+    totalBeats: Number(timeline.total_beats || stages.at(-1)?.end_beat || 4), anchorBeat: 0, anchorAt: 0,
+    stageIndex: -2, lastBeat: -1, visualIndex: 0, visualMarker: null, running: false, ended: false,
+    metronome: { enabled: !!payload.metronome?.enabled, volume: Number(payload.metronome?.volume ?? .55) },
+    soundtrack: payload.soundtrack || {}, beatOffsetSecs: Number(timeline.beat_offset_secs || 0), taps: [], startedAt: null,
+  };
+  goonBuildBeatMap(session); goonApplyStage(session, -1); goonRenderBeatMap(session, 0);
+  const bpm = explorerEl('#goon-bpm'); if (bpm) bpm.value = String(session.bpm);
+  const offset = explorerEl('#goon-offset'); if (offset) offset.value = String(session.beatOffsetSecs);
+  const metro = explorerEl('#goon-metronome'); if (metro) metro.checked = session.metronome.enabled;
+  const metroVolume = explorerEl('#goon-metronome-volume'); if (metroVolume) metroVolume.value = String(session.metronome.volume);
+  explorerEl('#goon-start')?.removeAttribute('hidden');
+  const pause = explorerEl('#goon-pause'); if (pause) pause.textContent = 'Pause';
+  const seek = explorerEl('#goon-seek'); if (seek) { seek.max = String(session.totalBeats); seek.value = '0'; }
+  const meta = explorerEl('#goon-soundtrack'); if (meta) meta.textContent = `${session.soundtrack.provider || 'local'} · ${session.bpm} BPM${session.soundtrack.spotify_synchronization_disabled ? ' · visual sync disabled' : ''}`;
 }
-
-function advanceGoonStage() {
-  const session = explorer.goon; if (!session) return;
-  const stage = session.stages[++session.stageIndex]; if (!stage) return endGoonSession();
-  const title = explorerEl('#goon-stage-title'); const prompt = explorerEl('#goon-stage-prompt'); const intensity = explorerEl('#goon-intensity'); const time = explorerEl('#goon-stage-time');
-  if (title) title.textContent = stage.title || stage.name || 'GOON';
-  if (prompt) prompt.textContent = stage.prompt || stage.event || '';
-  if (intensity) intensity.textContent = `Intensity ${stage.intensity ?? 1}/5`;
-  const durationMs = Math.max(1, Number(stage.duration_s || stage.duration || 60)) * 1000;
-  ss.speed = Math.max(500, Number(stage.media_interval_ms || stage.interval_ms || ss.speed || 3000)); restartImageTimerIfNeeded();
-  const deadline = Date.now() + durationMs; clearInterval(session.interval);
-  session.interval = setInterval(() => { const seconds = Math.max(0, Math.ceil((deadline - Date.now()) / 1000)); if (time) time.textContent = `${Math.floor(seconds / 60)}:${String(seconds % 60).padStart(2, '0')}`; }, 250);
-  clearTimeout(session.timer); session.timer = setTimeout(() => { if (stage.terminal || stage.transition === 'end') endGoonSession('completed'); else { ssStep(1); advanceGoonStage(); } }, durationMs);
-}
-
 function endGoonSession(endedState = 'completed') {
   const session = explorer.goon; if (!session) return;
-  session.ended = true; clearTimeout(session.timer); clearInterval(session.interval); explorerEl('#goon-hud').hidden = true; explorer.goon = null;
-  api('/api/goon/session/complete', { method: 'POST', body: JSON.stringify({ duration_s: Math.round((Date.now() - session.startedAt) / 1000), stages_completed: session.stageIndex + 1, ended_state: endedState }) }).catch(() => {});
+  session.ended = true; session.running = false; cancelAnimationFrame(session.raf); clearTimeout(session.scheduler);
+  session.audio?.suspend().catch(() => {}); window.speechSynthesis?.cancel();
+  explorerEl('#goon-hud').hidden = true; explorer.goon = null;
+  const duration = session.startedAt ? Math.round((performance.now() - session.startedAt) / 1000) : 0;
+  api('/api/goon/session/complete', { method: 'POST', body: JSON.stringify({ duration_s: duration, stages_completed: Math.max(0, session.stageIndex + 1), ended_state: endedState, soundtrack_provider: session.soundtrack.provider || 'local', bpm: session.bpm, beat_offset_secs: session.beatOffsetSecs, rating_phases: session.stages.map((stage) => stage.pace) }) }).catch(() => {});
   explorerLegacy.exitSlideshow();
 }
 
@@ -480,15 +750,17 @@ function normalizeSearchResult(result) {
     thumbnail: result.thumbnail || result.thumbnail_url || '', source: result.source || result.provider || '', source_url: result.source_url || result.url || '',
     provider: result.provider || result.source || 'gallery-dl', result_type: result.result_type || result.type || 'Collection',
     item_count: result.item_count ?? result.count ?? null, date: result.date || result.published_at || '', gallery_dl_compatible: result.gallery_dl_compatible !== false,
+    gallery_dl_validated: result.gallery_dl_validated === true,
   };
 }
 
 async function runUnifiedSearch() {
   const panel = explorerEl('#explorer-panel'); const query = explorerEl('#discover-query')?.value.trim() || ''; if (!query) return;
-  const provider = explorerEl('#discover-provider')?.value || ''; const resultType = explorerEl('#discover-result-type')?.value || ''; const sort = explorerEl('#discover-sort')?.value || 'relevance';
+  const providers = explorerAll('#discover-providers input[type="checkbox"]:checked').map((input) => input.value);
+  const resultType = explorerEl('#discover-result-type')?.value || ''; const sort = explorerEl('#discover-sort')?.value || 'relevance';
   const status = explorerEl('#discover-status'); if (status) status.textContent = 'Searching providers…';
   try {
-    const params = new URLSearchParams({ query, sort }); if (provider) params.set('provider', provider); if (resultType) params.set('result_type', resultType);
+    const params = new URLSearchParams({ query, sort }); if (providers.length) params.set('providers', providers.join(',')); if (resultType) params.set('result_type', resultType);
     const data = await api(`/api/search?${params}`); explorer.searchResults = (data.results || data.items || []).map(normalizeSearchResult); explorer.searchSelected.clear();
     if (status) {
       const unavailable = (data.provider_errors || []).map((entry) => entry.provider).filter(Boolean);
@@ -538,7 +810,10 @@ function previewSearchResult(result) {
 }
 
 async function addSearchResultsToCurator() {
-  const results = [...explorer.searchSelected].map((index) => explorer.searchResults[index]).filter(Boolean); if (!results.length) return;
+  const chosen = [...explorer.searchSelected].map((index) => explorer.searchResults[index]).filter(Boolean); if (!chosen.length) return;
+  const results = chosen.filter((result) => result.gallery_dl_compatible && result.gallery_dl_validated);
+  if (results.length !== chosen.length) toast(`${chosen.length - results.length} CDN or unverified result${chosen.length - results.length === 1 ? '' : 's'} remain preview-only.`);
+  if (!results.length) return;
   try { await api('/api/search/download', { method: 'POST', body: JSON.stringify({ results }) }); toast(`${results.length} result${results.length === 1 ? '' : 's'} added to Curator`); await refreshSources(); }
   catch (error) { toast(`Could not add search results: ${error.message}`, true); }
 }
@@ -546,8 +821,26 @@ async function addSearchResultsToCurator() {
 async function renderSearchPanel(panel) {
   panel.replaceChildren(makePanelHeading('Search', 'Search gallery-dl-compatible providers and external indexes in one place.'));
   const controls = document.createElement('form'); controls.className = 'discover-controls'; controls.noValidate = true;
-  controls.innerHTML = '<input id="discover-query" type="search" placeholder="Search creators, galleries, posts, collections" autocomplete="off"><select id="discover-provider"><option value="">All providers</option><option value="gallery-dl">gallery-dl sources</option><option value="balbums">balbums.st</option></select><select id="discover-result-type"><option value="">All result types</option><option value="creator">Creator</option><option value="album">Album/Gallery</option><option value="post">Post</option><option value="collection">Collection</option></select><select id="discover-sort"><option value="relevance">Relevance</option><option value="date_desc">Newest</option><option value="date_asc">Oldest</option></select><button class="btn btn-accent" type="submit">Search</button>';
+  controls.innerHTML = '<input id="discover-query" type="search" placeholder="Search creators, galleries, posts, collections" autocomplete="off"><select id="discover-result-type"><option value="">All result types</option><option value="creator">Creator</option><option value="album">Album/Gallery</option><option value="post">Post</option><option value="collection">Collection</option></select><select id="discover-sort"><option value="relevance">Relevance</option><option value="date_desc">Newest</option><option value="date_asc">Oldest</option></select><button class="btn btn-accent" type="submit">Search</button>';
   controls.addEventListener('submit', (event) => { event.preventDefault(); runUnifiedSearch(); }); panel.append(controls);
+  const providerPanel = document.createElement('details'); providerPanel.id = 'discover-providers'; providerPanel.className = 'discover-providers'; providerPanel.open = true;
+  const summary = document.createElement('summary'); summary.textContent = 'Providers'; providerPanel.append(summary);
+  const providerList = document.createElement('div'); providerList.className = 'discover-provider-list'; providerPanel.append(providerList); panel.append(providerPanel);
+  let registry = []; let selected = new Set(['local', 'balbums', 'kemono', 'erome', 'redgifs', 'deviantart']);
+  try {
+    const [providerData, settings] = await Promise.all([api('/api/search/providers'), api('/api/settings')]);
+    registry = providerData.providers || []; if (Array.isArray(settings.search_providers) && settings.search_providers.length) selected = new Set(settings.search_providers);
+  } catch (_) {
+    registry = [{ id: 'local', name: 'Curator library', availability: 'available' }, { id: 'balbums', name: 'Balbums / Bunkr', availability: 'available' }];
+  }
+  registry.forEach((provider) => {
+    const label = document.createElement('label'); label.className = 'discover-provider';
+    const check = document.createElement('input'); check.type = 'checkbox'; check.value = provider.id; check.checked = selected.has(provider.id); check.disabled = provider.availability === 'unavailable';
+    check.addEventListener('change', () => { const values = explorerAll('#discover-providers input:checked').map((input) => input.value); api('/api/settings', { method: 'PATCH', body: JSON.stringify({ search_providers: values }) }).catch(() => {}); });
+    const text = document.createElement('span'); text.textContent = provider.name || provider.id;
+    const status = document.createElement('small'); status.textContent = provider.authentication_required ? 'auth required' : provider.availability || (provider.generated ? 'experimental' : 'available');
+    label.append(check, text, status); providerList.append(label);
+  });
   const bulk = document.createElement('div'); bulk.className = 'discover-bulk'; bulk.innerHTML = '<label><input id="discover-select-all" type="checkbox"> Select all</label><span id="discover-selection-count">0 selected</span>';
   const add = panelButton('Add to Curator'); add.addEventListener('click', addSearchResultsToCurator);
   const download = panelButton('Download Selected'); download.classList.add('btn-accent'); download.addEventListener('click', addSearchResultsToCurator);
@@ -638,28 +931,59 @@ async function renderTagsPanel(panel) {
 }
 
 function renderRatingsPanel(panel) {
-  panel.replaceChildren(makePanelHeading('Ratings', 'Human ratings override automated ratings wherever Curator sorts, filters, reviews, and plays media.'));
+  panel.replaceChildren(makePanelHeading('Ratings', '1★ SFW · 2★ Slow · 3★ Medium · 4★ Fast · 5★ Cum. Human ratings override automated ratings wherever Curator sorts, filters, reviews, and plays media.'));
   const row = document.createElement('div'); row.className = 'rating-filter-row';
+  const labels = { 1: 'SFW', 2: 'Slow', 3: 'Medium', 4: 'Fast', 5: 'Cum' };
   for (let value = 5; value >= 0; value--) {
-    const button = panelButton(value ? `${'★'.repeat(value)} ${value}` : 'Unrated', 'rating-filter');
+    const button = panelButton(value ? `${'★'.repeat(value)} ${value} · ${labels[value]}` : 'Unrated', 'rating-filter');
     button.addEventListener('click', () => { explorer.active = 'media'; state.explorerSection = 'media'; explorer.nav = 'ratings'; state.view = { type: 'all' }; state.ratingStatus = value ? '' : 'unrated'; state.sortOrder = 'rating_desc'; state.maxRatingFilter = value ? String(value) : ''; updateExplorerLocation(value ? `${value}-star media` : 'Unrated media'); explorerLoadView(); }); row.append(button);
   } panel.append(row);
 }
 
+function stopActivityPolling() {
+  if (explorer.activityTimer) { clearInterval(explorer.activityTimer); explorer.activityTimer = null; }
+}
+async function refreshActivityPanel(panel) {
+  if (explorer.active !== 'downloads' || document.hidden || !panel.isConnected) return;
+  const status = explorerEl('#activity-status', panel); const list = explorerEl('#activity-source-list', panel);
+  try {
+    const data = await api('/api/downloads/status');
+    if (explorer.active !== 'downloads' || !panel.isConnected) return;
+    if (status) status.textContent = data.paused ? `Paused · ${data.paused_source_ids?.length || 0} source(s) ready to resume` : `${data.active_count || 0} active · ${data.queued_count || 0} queued · ${data.retrying_count || 0} retrying`;
+    if (!list) return; list.replaceChildren();
+    (data.sources || []).forEach((source) => {
+      const card = document.createElement('article'); card.className = `activity-source activity-${source.phase}`;
+      const heading = document.createElement('header'); const name = document.createElement('strong'); name.textContent = source.name;
+      const phase = document.createElement('span'); phase.className = 'source-status'; phase.textContent = source.phase; heading.append(name, phase); card.append(heading);
+      const progress = document.createElement('p'); progress.className = 'mono small';
+      const total = source.known_total == null ? 'indeterminate total' : `${source.completed_count || 0} / ${source.known_total} (${Math.round(Number(source.percentage || 0))}%)`;
+      progress.textContent = `${total}${source.queue_position ? ` · queue #${source.queue_position}` : ''}${source.current_filename ? ` · ${source.current_filename}` : ''}`; card.append(progress);
+      if (source.known_total != null) { const bar = document.createElement('div'); bar.className = 'activity-progress'; const fill = document.createElement('span'); fill.style.width = `${Math.max(0, Math.min(100, Number(source.percentage || 0)))}%`; bar.append(fill); card.append(bar); }
+      if (source.error || source.retry_at) { const detail = document.createElement('small'); detail.className = 'muted'; detail.textContent = source.error || `Retry scheduled at ${new Date(Number(source.retry_at) * 1000).toLocaleTimeString()}`; card.append(detail); }
+      const actions = document.createElement('div'); actions.className = 'explorer-card-actions';
+      const pause = panelButton(source.phase === 'paused' ? 'Resume' : 'Pause');
+      pause.addEventListener('click', async () => { const endpoint = source.phase === 'paused' ? 'resume' : 'pause'; await api(`/api/downloads/sources/${source.id}/${endpoint}`, { method: 'POST' }); refreshActivityPanel(panel); });
+      const sync = panelButton('Sync'); sync.addEventListener('click', () => resyncSource(source.id)); actions.append(pause, sync); card.append(actions); list.append(card);
+    });
+  } catch (error) { if (status) status.textContent = `Status unavailable: ${error.message}`; }
+}
 async function renderDownloadsPanel(panel) {
-  panel.replaceChildren(makePanelHeading('Downloads', 'Downloads continue in Curator’s background service even when this window is closed.'));
-  const status = document.createElement('p'); status.className = 'downloads-status'; status.textContent = 'Loading status…'; panel.append(status);
+  stopActivityPolling();
+  panel.replaceChildren(makePanelHeading('Activity', 'Source-level queue and indexing progress. Curator only polls while this view is visible.'));
+  const status = document.createElement('p'); status.id = 'activity-status'; status.className = 'downloads-status'; status.textContent = 'Loading status…'; panel.append(status);
   const actions = document.createElement('div'); actions.className = 'explorer-card-actions';
   const pause = panelButton('Pause downloads'); const resume = panelButton('Resume downloads'); const resync = panelButton('Sync all sources');
-  pause.addEventListener('click', async () => { await api('/api/downloads/pause', { method: 'POST' }); renderExplorerPanel('downloads'); });
-  resume.addEventListener('click', async () => { await api('/api/downloads/resume', { method: 'POST' }); renderExplorerPanel('downloads'); });
+  pause.addEventListener('click', async () => { await api('/api/downloads/pause', { method: 'POST' }); refreshActivityPanel(panel); });
+  resume.addEventListener('click', async () => { await api('/api/downloads/resume', { method: 'POST' }); refreshActivityPanel(panel); });
   resync.addEventListener('click', () => resyncAllSources()); actions.append(pause, resume, resync); panel.append(actions);
-  try { const data = await api('/api/downloads/status'); status.textContent = data.paused ? `Paused · ${data.paused_source_ids?.length || 0} source(s) ready to resume` : `${data.active_count || 0} active download(s)`; pause.disabled = !!data.paused; resume.disabled = !data.paused; }
-  catch (error) { status.textContent = `Status unavailable: ${error.message}`; }
+  const list = document.createElement('div'); list.id = 'activity-source-list'; list.className = 'activity-source-list'; panel.append(list);
+  await refreshActivityPanel(panel);
+  explorer.activityTimer = setInterval(() => refreshActivityPanel(panel), 2000);
 }
 
 async function renderExplorerPanel(section) {
   if (!explorer.installed) return;
+  if (section !== 'downloads') stopActivityPolling();
   if (section === 'media') return explorerLoadView();
   const request = ++explorer.panelRequest; setExplorerVisible(false);
   const panel = explorerEl('#explorer-panel'); if (!panel) return; panel.replaceChildren();
@@ -690,16 +1014,31 @@ function installExplorerUi() {
   while (sidebar.firstChild) legacySidebar.append(sidebar.firstChild); sidebar.append(legacySidebar); sidebar.classList.add('explorer-sidebar');
   const navigation = document.createElement('div'); navigation.className = 'explorer-sidebar-content';
   navigation.innerHTML = '<header class="explorer-brand"><span class="brand-mark">C</span><span>CURATOR</span><button type="button" class="explorer-sidebar-close" aria-label="Close navigation">×</button></header><button id="explorer-add-source" class="explorer-add-source" type="button">+ Add source</button><nav class="explorer-navigation" aria-label="Curator navigation"><section><h2>Library</h2><button data-nav="all" type="button">All Media</button><button data-nav="images" type="button">Images</button><button data-nav="clips" type="button">Clips</button><button data-nav="videos" type="button">Videos</button></section><section><h2>Discover</h2><button data-nav="search" type="button">Search</button><button data-nav="sources" type="button">Sources</button><button data-nav="creators" type="button">Creators</button></section><section><h2>Organization</h2><button data-nav="groups" type="button">Groups</button><button data-nav="tags" type="button">Tags</button><button data-nav="ratings" type="button">Ratings</button><button data-nav="review" type="button">Review Queue</button></section><section><h2>Activity</h2><button data-nav="downloads" type="button">Downloads <span id="sidebar-download-count" class="nav-count" hidden></span></button><button data-nav="recent" type="button">Recent</button></section></nav><footer><button id="explorer-settings" type="button">Settings</button><span id="explorer-stats" class="mono small muted"></span></footer>';
+  // The sidebar is intentionally source-centric.  Navigation and global
+  // actions live in the compact Tools disclosure, leaving room for the
+  // expandable groups → subgroups → sources hierarchy below it.
+  const brandRoute = explorerEl('.explorer-brand > span:nth-child(2)', navigation); if (brandRoute) { brandRoute.id = 'explorer-route-label'; brandRoute.textContent = 'CURATOR / Library'; }
+  const tools = explorerEl('.explorer-navigation', navigation);
+  tools.innerHTML = '<details class="explorer-tools" open><summary>Tools</summary><section><h2>Library</h2><button data-nav="all" type="button">Library</button></section><section><h2>Discover</h2><button data-nav="search" type="button">Discover</button><button data-nav="sources" type="button">Sources</button><button data-nav="creators" type="button">Creators</button></section><section><h2>Organization</h2><button data-nav="groups" type="button">Groups</button><button data-nav="tags" type="button">Tags</button><button data-nav="ratings" type="button">Ratings</button><button data-nav="review" type="button">Review</button></section><section><h2>Activity</h2><button data-nav="downloads" type="button">Activity <span id="sidebar-download-count" class="nav-count" hidden></span></button><button data-nav="recent" type="button">Recent</button></section><section class="explorer-tool-actions"><h2>Actions</h2><button id="explorer-add-source" type="button">Add Source</button><button id="explorer-resync-all" type="button">Sync all</button><button id="explorer-pause-downloads" type="button">Pause / resume</button><button id="explorer-settings" type="button">Settings</button><button id="explorer-export" type="button">Export</button><button id="explorer-import" type="button">Import</button><a href="/api/log" target="_blank" rel="noopener noreferrer">View log</a></section></details><section class="explorer-source-tree"><h2>Source hierarchy</h2><div id="explorer-source-hierarchy"></div></section>';
+  explorerEl('.explorer-sidebar-content > footer', navigation).hidden = true;
   sidebar.prepend(navigation);
   explorerAll('[data-nav]', navigation).forEach((button) => button.addEventListener('click', () => navigateTo(button.dataset.nav)));
   explorerEl('#explorer-add-source', navigation).addEventListener('click', () => explorerEl('#add-source-btn')?.click());
   explorerEl('#explorer-settings', navigation).addEventListener('click', openSettingsModal);
+  explorerEl('#explorer-resync-all', navigation).addEventListener('click', () => explorerEl('#resync-all-btn')?.click());
+  explorerEl('#explorer-pause-downloads', navigation).addEventListener('click', () => explorerEl('#pause-downloads-btn')?.click());
+  explorerEl('#explorer-export', navigation).addEventListener('click', () => explorerEl('#export-btn')?.click());
+  explorerEl('#explorer-import', navigation).addEventListener('click', () => triggerImportPicker());
   explorerEl('.explorer-sidebar-close', navigation).addEventListener('click', closeSidebarDrawer);
 
   legacyToolbar.hidden = true; legacyToolbar.classList.add('legacy-toolbar');
   const toolbar = document.createElement('header'); toolbar.className = 'explorer-toolbar';
   toolbar.innerHTML = '<div class="explorer-toolbar-top"><div><p class="explorer-kicker">Library</p><h1 id="explorer-location">All Media</h1></div><div class="explorer-toolbar-actions"><button id="explorer-add-source-main" class="btn btn-ghost" type="button">+ Add source</button><label class="explorer-search"><span class="sr-only">Search library</span><input id="explorer-library-search" type="search" placeholder="Search library" autocomplete="off"></label><div class="explorer-play-split"><button id="explorer-play-primary" class="btn btn-accent" type="button">Play</button><button id="explorer-play-toggle" class="btn btn-accent" type="button" aria-label="Choose play mode" aria-haspopup="menu" aria-expanded="false">▾</button><div id="explorer-play-menu" role="menu" hidden><button type="button" data-play-mode="feed">Mobile Feed</button><button type="button" data-play-mode="slideshow">Slideshow</button><button type="button" data-play-mode="portrait">Portrait Wall</button><button type="button" data-play-mode="review">Review</button><button type="button" data-play-mode="goon">GOON</button></div></div></div></div><div class="explorer-toolbar-filters"><div class="explorer-type-buttons"><button type="button" data-type="all" class="explorer-type-filter active">All</button><button type="button" data-type="image" class="explorer-type-filter">Images</button><button type="button" data-type="clip" class="explorer-type-filter">Clips</button><button type="button" data-type="video" class="explorer-type-filter">Videos</button></div><select id="explorer-sort" aria-label="Sort media"><option value="default">Sort: default</option><optgroup label="Name"><option value="filename_asc">Name (A–Z)</option><option value="filename_desc">Name (Z–A)</option></optgroup><optgroup label="Date"><option value="date_desc">Date added (newest)</option><option value="date_asc">Date added (oldest)</option><option value="downloaded_desc">Date downloaded (newest)</option><option value="downloaded_asc">Date downloaded (oldest)</option><option value="modified_desc">Date modified (newest)</option><option value="modified_asc">Date modified (oldest)</option></optgroup><optgroup label="Media"><option value="duration_desc">Duration (longest)</option><option value="duration_asc">Duration (shortest)</option><option value="size_desc">File size (largest)</option><option value="size_asc">File size (smallest)</option><option value="rating_desc">Rating (highest)</option><option value="rating_asc">Rating (lowest)</option></optgroup><optgroup label="Source"><option value="creator_asc">Creator (A–Z)</option><option value="creator_desc">Creator (Z–A)</option><option value="source_asc">Source (A–Z)</option><option value="source_desc">Source (Z–A)</option></optgroup><option value="shuffle">Random</option></select><select id="explorer-tag-filter" aria-label="Filter by tag"><option value="">All tags</option></select><select id="explorer-max-rating" aria-label="Maximum rating"><option value="">All ratings</option><option value="4">Up to 4 stars</option><option value="3">Up to 3 stars</option><option value="2">Up to 2 stars</option><option value="1">Up to 1 star</option></select><select id="explorer-rating-status" aria-label="Rating status"><option value="">All review states</option><option value="unrated">Unrated</option><option value="auto">Auto rated</option><option value="needs_review">Needs review</option><option value="reviewed">Human reviewed</option></select></div><div id="explorer-bulk-bar" hidden><span id="explorer-selection-count" class="mono small"></span><button type="button" data-bulk="add-group">Add to Group</button><button type="button" data-bulk="add-tag">Add Tag</button><button type="button" data-bulk="set-rating">Set Rating</button><button type="button" data-bulk="move">Move</button><button type="button" data-bulk="delete" class="danger">Delete</button><button type="button" data-bulk="review">Review</button><button type="button" data-bulk="play">Play Selected</button><button type="button" data-bulk="refresh">Refresh Metadata</button><button type="button" data-bulk="open-source">Open Source</button><button type="button" data-bulk="clear">Clear</button></div>';
   legacyToolbar.before(toolbar);
+  const layoutControls = document.createElement('div'); layoutControls.className = 'explorer-layout-controls';
+  layoutControls.setAttribute('role', 'group'); layoutControls.setAttribute('aria-label', 'Library layout');
+  layoutControls.innerHTML = '<button type="button" data-library-layout="grid" aria-pressed="false">Grid</button><button type="button" data-library-layout="table" aria-pressed="false">Table</button>';
+  explorerEl('.explorer-toolbar-filters', toolbar).prepend(layoutControls);
   const columns = document.createElement('div'); columns.id = 'explorer-columns'; columns.className = 'explorer-columns';
   columns.innerHTML = '<span><input id="explorer-select-all" type="checkbox" aria-label="Select all media"></span><button type="button" data-sort="filename_asc">Name</button><button type="button" data-sort="creator_asc">Creator</button><button type="button" data-sort="source_asc">Source</button><button type="button" data-sort="duration_desc">Duration</button><button type="button" data-sort="size_desc">Size</button><button type="button" data-sort="rating_desc">Rating</button><button type="button" data-sort="date_desc">Date Added</button>';
   const panel = document.createElement('section'); panel.id = 'explorer-panel'; panel.className = 'explorer-panel'; panel.hidden = true;
@@ -714,6 +1053,7 @@ function installExplorerUi() {
   explorerEl('#explorer-tag-filter').addEventListener('change', (event) => { state.tagFilter = event.target.value; explorerLoadView(); });
   explorerEl('#explorer-max-rating').addEventListener('change', (event) => { state.maxRatingFilter = event.target.value; explorerLoadView(); });
   explorerEl('#explorer-rating-status').addEventListener('change', (event) => { state.ratingStatus = event.target.value; explorerLoadView(); });
+  explorerAll('[data-library-layout]', layoutControls).forEach((button) => button.addEventListener('click', () => setExplorerLayout(button.dataset.libraryLayout)));
   explorerEl('#explorer-library-search').addEventListener('input', (event) => { clearTimeout(explorer.searchTimer); explorer.searchTimer = setTimeout(() => { explorer.searchQuery = event.target.value; explorerLoadView(); }, 180); });
   explorerEl('#explorer-select-all').addEventListener('change', selectAllVisible);
   explorerAll('[data-sort]', columns).forEach((button) => button.addEventListener('click', () => { const sort = explorerEl('#explorer-sort'); sort.value = button.dataset.sort; sort.dispatchEvent(new Event('change')); }));
@@ -725,9 +1065,38 @@ function installExplorerUi() {
   document.addEventListener('click', (event) => { if (!event.target.closest('.explorer-play-split')) { playMenu.hidden = true; playToggle.setAttribute('aria-expanded', 'false'); } });
 
   const slideshow = explorerEl('#slideshow'); const goonHud = document.createElement('section'); goonHud.id = 'goon-hud'; goonHud.hidden = true;
-  goonHud.innerHTML = '<div><span id="goon-stage-title">GOON</span><span id="goon-stage-time" class="mono">0:00</span></div><p id="goon-stage-prompt"></p><div><span id="goon-intensity" class="mono">Intensity 1/5</span><button id="goon-end" type="button">End session</button></div>';
-  slideshow.append(goonHud); explorerEl('#goon-end').addEventListener('click', endGoonSession);
-  setPlayMode(explorer.playMode, false); void restorePlayMode(); updateNavigation(); updateBulkUI();
+  goonHud.innerHTML = '<header><span id="goon-stage-title">GOON</span><span id="goon-stage-time" class="mono">0:00</span></header><p id="goon-stage-prompt"></p><div class="goon-readout"><span id="goon-intensity" class="mono">Count in</span><span id="goon-soundtrack" class="mono"></span></div><div class="goon-controls"><button id="goon-start" class="btn btn-accent" type="button">Start session</button><button id="goon-pause" class="btn btn-ghost" type="button">Pause</button><button id="goon-tap" class="btn btn-ghost" type="button">Tap tempo</button><label>BPM <input id="goon-bpm" type="number" min="40" max="300" step="0.1"></label><label>offset <input id="goon-offset" type="number" min="-30" max="30" step="0.01">s</label><label><input id="goon-metronome" type="checkbox"> metronome</label><label>vol <input id="goon-metronome-volume" type="range" min="0" max="1" step="0.05"></label><button id="goon-end" type="button">End session</button></div><input id="goon-seek" class="goon-seek" type="range" min="0" value="0" aria-label="Seek beat timeline"><div id="goon-beat-map" class="goon-beat-map" aria-label="Beat map"></div>';
+  slideshow.append(goonHud);
+  explorerEl('#goon-start').addEventListener('click', () => explorer.goon && goonStartClock(explorer.goon));
+  explorerEl('#goon-pause').addEventListener('click', () => explorer.goon && goonPauseClock(explorer.goon));
+  explorerEl('#goon-tap').addEventListener('click', () => explorer.goon && goonTapTempo(explorer.goon));
+  explorerEl('#goon-bpm').addEventListener('change', (event) => explorer.goon && goonSetBpm(explorer.goon, event.target.value));
+  explorerEl('#goon-offset').addEventListener('change', (event) => {
+    const session = explorer.goon; if (!session) return;
+    const beat = goonCurrentBeat(session);
+    session.beatOffsetSecs = Number(event.target.value) || 0;
+    goonRebase(session, beat);
+  });
+  explorerEl('#goon-metronome').addEventListener('change', (event) => {
+    if (!explorer.goon) return; explorer.goon.metronome.enabled = event.target.checked; appSettings.metronome_enabled = event.target.checked;
+    api('/api/settings', { method: 'PATCH', body: JSON.stringify({ metronome_enabled: event.target.checked }) }).catch(() => {});
+  });
+  explorerEl('#goon-metronome-volume').addEventListener('input', (event) => {
+    if (!explorer.goon) return; const volume = Number(event.target.value); explorer.goon.metronome.volume = volume; appSettings.metronome_volume = volume;
+    api('/api/settings', { method: 'PATCH', body: JSON.stringify({ metronome_volume: volume }) }).catch(() => {});
+  });
+  explorerEl('#goon-seek').addEventListener('input', (event) => {
+    const session = explorer.goon; if (!session) return; goonRebase(session, Number(event.target.value));
+    const index = goonStageIndex(session, Math.floor(session.anchorBeat)); if (index !== session.stageIndex) goonApplyStage(session, index); goonRenderBeatMap(session, session.anchorBeat);
+  });
+  explorerEl('#goon-end').addEventListener('click', endGoonSession);
+  setExplorerLayout(explorer.layout, false); setPlayMode(explorer.playMode, false); updatePlayCapabilities();
+  window.addEventListener('resize', updatePlayCapabilities, { passive: true });
+  document.addEventListener('visibilitychange', () => {
+    if (document.hidden) stopActivityPolling();
+    else if (explorer.active === 'downloads') renderExplorerPanel('downloads');
+  });
+  void restorePlayMode(); updateNavigation(); updateBulkUI();
 }
 
 // This script is loaded after the library markup and app.js.  Installing

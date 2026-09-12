@@ -2,6 +2,7 @@
 use crate::{db::now_iso, AppState};
 use rusqlite::OptionalExtension;
 
+#[allow(dead_code)]
 pub fn create(
     state: &AppState,
     id: i64,
@@ -52,8 +53,8 @@ pub fn create(
         if existing.is_some() {
             continue;
         }
-        tx.execute("INSERT INTO media(source_id,filepath,filename,type,added_at,downloaded,duration_secs,duration_attempted,clip_parent_id,clip_start_secs,clip_end_secs,file_size_bytes,rating,auto_rating,auto_rating_score,rating_source,rating_reviewed,rating_reviewed_at,nsfw_state)
-          SELECT source_id,?1,filename || ' [' || ?2 || '-' || ?3 || 's]','video',?4,1,?5,1,id,?2,?3,0,rating,auto_rating,auto_rating_score,rating_source,rating_reviewed,rating_reviewed_at,'done' FROM media WHERE id=?6",
+        tx.execute("INSERT INTO media(source_id,filepath,filename,type,added_at,downloaded,duration_secs,duration_attempted,clip_parent_id,clip_start_secs,clip_end_secs,file_size_bytes,rating,auto_rating,auto_rating_score,action_rating,action_model,action_model_version,action_score,action_evidence,classifier_model,classifier_version,classifier_score,classifier_evidence,classification_label,manual_review_required,manual_review_reason,rating_source,rating_reviewed,rating_reviewed_at,nsfw_state)
+          SELECT source_id,?1,filename || ' [' || ?2 || '-' || ?3 || 's]','video',?4,1,?5,1,id,?2,?3,0,rating,auto_rating,auto_rating_score,action_rating,action_model,action_model_version,action_score,action_evidence,classifier_model,classifier_version,classifier_score,classifier_evidence,classification_label,manual_review_required,manual_review_reason,rating_source,rating_reviewed,rating_reviewed_at,'done' FROM media WHERE id=?6",
           rusqlite::params![key,start,end,now_iso(),end-start,id])?;
         let clip = tx.last_insert_rowid();
         tx.execute("INSERT INTO media_tags(media_id,tag_id) SELECT ?1,tag_id FROM media_tags WHERE media_id=?2",rusqlite::params![clip,id])?;

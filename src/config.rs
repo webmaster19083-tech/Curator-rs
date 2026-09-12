@@ -21,29 +21,27 @@ use serde::{Deserialize, Serialize};
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct Config {
-    pub data_dir: Option<String>,
+    pub data_dir:       Option<String>,
     pub gallery_dl_bin: Option<String>,
     pub python_bin: Option<String>,
     pub ffprobe_bin: Option<String>,
+    /// ffmpeg is deliberately separate from ffprobe.  The latter is enough
+    /// for the ordinary clips/videos split; sampling video frames and
+    /// decoding a local soundtrack require the actual encoder binary.
+    pub ffmpeg_bin: Option<String>,
+    /// Optional path to a P-HAR-compatible temporal action model.  Leaving
+    /// this unset keeps NudeNet image classification available and routes
+    /// clips to manual review instead of repeatedly trying to load a model.
+    pub action_model_path: Option<String>,
 }
 
 /// `config.json` always lives next to the running executable (not in
 /// `data_dir` — it has to be readable before `data_dir` is even resolved).
 pub fn config_path() -> PathBuf {
-    if let Some(path) = std::env::var_os("CURATOR_CONFIG") {
-        return PathBuf::from(path);
-    }
-    let legacy = std::env::current_exe()
+    std::env::current_exe()
         .ok()
         .and_then(|p| p.parent().map(|d| d.join("config.json")))
-        .unwrap_or_else(|| PathBuf::from("config.json"));
-    if legacy.is_file() {
-        return legacy;
-    }
-    dirs::config_dir()
-        .unwrap_or_else(|| PathBuf::from("."))
-        .join("Curator")
-        .join("config.json")
+        .unwrap_or_else(|| PathBuf::from("config.json"))
 }
 
 pub fn load_config() -> Config {
@@ -63,20 +61,14 @@ pub fn load_config() -> Config {
 /// + this).
 pub fn save_config(cfg: &Config) -> std::io::Result<()> {
     let path = config_path();
-    let text = serde_json::to_string_pretty(cfg).map_err(std::io::Error::other)?;
-    if let Some(parent) = path.parent() {
-        std::fs::create_dir_all(parent)?;
-    }
+    let text = serde_json::to_string_pretty(cfg)
+        .map_err(std::io::Error::other)?;
     std::fs::write(path, text)
 }
 
 pub fn resolve_data_dir(cfg: &Config) -> PathBuf {
-    resolve_data_dir_with_env(cfg, std::env::var("CURATOR_DATA_DIR").ok().as_deref())
-}
-
-fn resolve_data_dir_with_env(cfg: &Config, env_value: Option<&str>) -> PathBuf {
     // 1. Environment variable
-    if let Some(env_val) = env_value {
+    if let Ok(env_val) = std::env::var("CURATOR_DATA_DIR") {
         if !env_val.is_empty() {
             return PathBuf::from(env_val);
         }
@@ -102,9 +94,6 @@ fn resolve_data_dir_with_env(cfg: &Config, env_value: Option<&str>) -> PathBuf {
 pub fn ensure_config_json(data_dir: &std::path::Path) {
     let path = config_path();
     if !path.exists() {
-        if let Some(parent) = path.parent() {
-            let _ = std::fs::create_dir_all(parent);
-        }
         let content = serde_json::json!({ "data_dir": data_dir.to_string_lossy() });
         let _ = std::fs::write(&path, serde_json::to_string_pretty(&content).unwrap());
     }
@@ -114,22 +103,28 @@ pub fn ensure_config_json(data_dir: &std::path::Path) {
 mod tests {
     use super::*;
 
+    // The process environment is global.  Keep these precedence tests from
+    // racing when the suite is deliberately run with multiple test threads.
+    static DATA_DIR_ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
     #[test]
     fn resolve_data_dir_prefers_env_var_over_config() {
+        let _guard = DATA_DIR_ENV_LOCK.lock().unwrap();
         // Isolate from whatever the real environment/config might have —
         // this only asserts precedence, not the literal default path.
-        let cfg = Config {
-            data_dir: Some("/tmp/curator-config-test-dir".into()),
-            ..Default::default()
-        };
-        let resolved = resolve_data_dir_with_env(&cfg, Some("/tmp/curator-env-test-dir"));
+        std::env::set_var("CURATOR_DATA_DIR", "/tmp/curator-env-test-dir");
+        let cfg = Config { data_dir: Some("/tmp/curator-config-test-dir".into()), ..Default::default() };
+        let resolved = resolve_data_dir(&cfg);
+        std::env::remove_var("CURATOR_DATA_DIR");
         assert_eq!(resolved, PathBuf::from("/tmp/curator-env-test-dir"));
     }
 
     #[test]
     fn resolve_data_dir_falls_back_to_home_curator() {
+        let _guard = DATA_DIR_ENV_LOCK.lock().unwrap();
+        std::env::remove_var("CURATOR_DATA_DIR");
         let cfg = Config::default();
-        let resolved = resolve_data_dir_with_env(&cfg, None);
+        let resolved = resolve_data_dir(&cfg);
         assert!(resolved.ends_with("Curator"));
     }
 }

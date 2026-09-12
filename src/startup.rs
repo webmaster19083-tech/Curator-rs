@@ -1,9 +1,9 @@
-//! Windows login-start registration shared by Settings, OOBE, and the tray.
+//! Windows login-start registration shared by Settings and first-run setup.
 
 /// Register or remove the current Curator executable from the per-user Run
-/// key.  HKCU requires no elevation and `--background` ensures Windows login
-/// never flashes the main window before Curator can settle in the tray.
-#[cfg(target_os = "windows")]
+/// key. HKCU requires no elevation and `--background` prevents a login launch
+/// from flashing a foreground window before Curator settles into the tray.
+#[cfg(windows)]
 pub fn set_start_with_windows(enabled: bool) -> Result<(), String> {
     use std::process::Command;
 
@@ -28,11 +28,10 @@ pub fn set_start_with_windows(enabled: bool) -> Result<(), String> {
     } else {
         command.args(["delete", RUN_KEY, "/v", VALUE_NAME, "/f"]);
     }
-
     let output = command
         .output()
         .map_err(|error| format!("Could not update Windows startup: {error}"))?;
-    // Deleting a missing Run entry is already the requested end-state.
+    // Deleting a missing Run entry already reaches the requested end state.
     if output.status.success() || !enabled {
         return Ok(());
     }
@@ -44,29 +43,27 @@ pub fn set_start_with_windows(enabled: bool) -> Result<(), String> {
     })
 }
 
-#[cfg(target_os = "windows")]
+#[cfg(windows)]
 fn run_value(executable: &std::path::Path) -> String {
     format!("\"{}\" --background", executable.display())
 }
 
-/// Keeping this a no-op outside Windows keeps the cross-platform headless and
-/// desktop builds compatible while making the setting useful where it applies.
-#[cfg(not(target_os = "windows"))]
+/// Keep non-Windows/headless builds compatible while retaining the saved
+/// preference for a later Windows desktop launch.
+#[cfg(not(windows))]
 pub fn set_start_with_windows(_enabled: bool) -> Result<(), String> {
     Ok(())
 }
 
-#[cfg(all(test, target_os = "windows"))]
+#[cfg(all(test, windows))]
 mod tests {
     use super::*;
 
     #[test]
-    fn startup_command_is_quoted_and_background_first() {
+    fn startup_command_is_quoted() {
         assert_eq!(
-            run_value(std::path::Path::new(
-                r"C:\Program Files\Curator\Curator.exe"
-            )),
-            r#""C:\Program Files\Curator\Curator.exe" --background"#
+            run_value(std::path::Path::new(r"C:\Program Files\Curator\Curator.exe")),
+            r#""C:\Program Files\Curator\Curator.exe" --background"#,
         );
     }
 }

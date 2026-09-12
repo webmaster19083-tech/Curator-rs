@@ -45,10 +45,27 @@ function clipMaxSeconds() {
 // repeat at mode/session boundaries while allowing reuse once a collection has
 // been exhausted. A one-item queue is deliberately the only exception.
 const playbackHistory = [];
+
+// The current scale reserves 1 star for SFW media.  Keep this guard close
+// to the shared playback helpers so every viewer gets the same behavior,
+// even when it is launched from a lightbox, keyboard shortcut, or a saved
+// Explorer selection rather than the visible toolbar.
+function playbackRating(item) {
+  const value = item?.effective_rating ?? item?.human_rating ?? item?.rating ?? item?.auto_rating ?? 0;
+  const rating = Number(value);
+  return Number.isFinite(rating) ? rating : 0;
+}
+function excludeSfwFromPlayback(items, mode, announce = true) {
+  const source = Array.isArray(items) ? items : [];
+  const allowed = source.filter((item) => playbackRating(item) !== 1);
+  const skipped = source.length - allowed.length;
+  if (announce && skipped) toast(`Skipped ${skipped} SFW item${skipped === 1 ? '' : 's'} before ${mode}.`);
+  return allowed;
+}
 function preparePlaybackItems(items, shuffle = false) {
   const unique = [];
   const ids = new Set();
-  for (const item of items || []) {
+  for (const item of excludeSfwFromPlayback(items, 'playback', false)) {
     if (!item || ids.has(item.id)) continue;
     ids.add(item.id); unique.push(item);
   }
@@ -70,13 +87,11 @@ function mediaMatchesTypeFilter(item, typeFilter) {
   // Unknown durations stay visible under Videos until metadata is available.
   if (item.duration_secs == null) return typeFilter === 'video';
   return typeFilter === 'clip'
-    ? item.duration_secs <= clipMaxSeconds()
-    : item.duration_secs > clipMaxSeconds();
+    ? item.duration_secs <= CLIP_MAX_SECONDS
+    : item.duration_secs > CLIP_MAX_SECONDS;
 }
 
 function reportVideoDuration(video, item) {
-  bindVirtualClip(video, item);
-  if (item.clip_start_secs != null) return;
   if (item.duration_secs != null || item._durationPending) return;
   video.addEventListener('loadedmetadata', async () => {
     const duration = video.duration;
@@ -100,7 +115,7 @@ function reportVideoDuration(video, item) {
 // visibly different code path (that's the whole point: nothing about
 // how it's displayed should reveal which one it is).
 function mediaFullSrc(item) {
-  return item.downloaded === 0 ? item.origin_url : `/library/${encodeURI(item.playback_filepath || item.filepath)}`;
+  return item.downloaded === 0 ? item.origin_url : `/library/${encodeURI(item.filepath)}`;
 }
 function mediaThumbSrc(item) {
   // No local file to thumbnail yet, so this is the one place a
@@ -177,13 +192,21 @@ const ss = {
 
 let appSettings = {
   max_concurrent: 6,
-  max_clip_length_secs: 60,
   default_slideshow_speed: 3000,
   default_slideshow_loop: true,
   default_slideshow_shuffle: false,
-  start_with_windows: false,
-  keep_running_in_tray: true,
   theme: 'system',
+  library_layout: 'grid',
+  ffmpeg_bin: 'ffmpeg',
+  action_model_path: null,
+  metronome_enabled: false,
+  metronome_volume: 0.55,
+  goon_persona: 'neutral',
+  tts_voice: null,
+  tts_rate: 1,
+  tts_pitch: 1,
+  tts_volume: 1,
+  soundtrack_provider: 'local',
 };
 
 // ---------------------------------------------------------------------
@@ -218,7 +241,6 @@ async function loadAppSettings() {
   }
   appSettings.theme = normalizeTheme(appSettings.theme);
   applyTheme(appSettings.theme);
-  configureClipLengthControls();
 
   // Seed both the live slideshow state (used directly by the portrait
   // wall, which may never touch the slideshow's own controls) and the
@@ -232,18 +254,6 @@ async function loadAppSettings() {
   el('#ss-speed').value = String(appSettings.default_slideshow_speed);
   el('#ss-loop').checked = appSettings.default_slideshow_loop;
   el('#ss-shuffle').checked = appSettings.default_slideshow_shuffle;
-}
-
-function configureClipLengthControls() {
-  const select = el('#clip-seconds');
-  if (!select) return;
-  const maximum = clipMaxSeconds();
-  const values = [...new Set([5, 15, 30, 45, 60, maximum].filter((value) => value >= 5 && value <= maximum))]
-    .sort((a, b) => a - b);
-  const previous = Number(select.value);
-  select.replaceChildren(...values.map((value) => new Option(`${value}s`, String(value), false, value === Math.min(previous || maximum, maximum))));
-  const clipsButton = el('#create-clips-btn');
-  if (clipsButton) clipsButton.title = `Create virtual clips up to ${maximum} seconds. The original video is preserved.`;
 }
 
 // "system" isn't a real palette — it resolves to the OS's own light/dark
@@ -316,6 +326,7 @@ function bindGlobalUI() {
   el('#settings-run-setup-again').addEventListener('click', runSetupAgain);
 
   el('#export-btn').addEventListener('click', exportSources);
+  el('#chpack-export-btn').addEventListener('click', exportChpack);
   el('#import-trigger-btn').addEventListener('click', triggerImportPicker);
   el('#import-file-input').addEventListener('change', handleImportFile);
   el('#export-reminder-export-btn').addEventListener('click', exportSources);
@@ -476,7 +487,7 @@ function renderSidebar() {
   const list = el('#source-list');
   list.innerHTML = '';
 
-  if (state.sources.length === 0 && state.groups.length === 0) {
+  if (state.sources.length === 0) {
     list.innerHTML = '<li class="source-empty muted small">No sources yet. Add a creator URL to begin.</li>';
     updateStatsLine();
     return;
@@ -950,6 +961,34 @@ function announceAddResult(data) {
 // settings (download concurrency)
 // ---------------------------------------------------------------------
 
+function populateTtsVoiceSelect(selected) {
+  const select = el('#settings-tts-voice');
+  if (!select) return;
+  const voices = 'speechSynthesis' in window ? window.speechSynthesis.getVoices() : [];
+  select.replaceChildren(new Option('System default', ''));
+  voices.forEach((voice) => select.add(new Option(`${voice.name} (${voice.lang})`, voice.name)));
+  if (selected && ![...select.options].some((option) => option.value === selected)) select.add(new Option(`${selected} (unavailable)`, selected));
+  select.value = selected || '';
+}
+
+async function renderRemoteAccessStatus() {
+  const target = el('#settings-remote-access');
+  if (!target) return;
+  try {
+    const info = await api('/api/remote-access');
+    if (!info.running) {
+      target.textContent = 'Local server is stopped.';
+      return;
+    }
+    const urls = [...(info.local_urls || []), ...(info.lan_urls || []), ...(info.tailscale_urls || [])];
+    target.textContent = urls.length
+      ? `Server running · ${urls.join(' · ')}`
+      : `Server running on port ${info.port}`;
+  } catch (_) {
+    target.textContent = 'Server status is unavailable.';
+  }
+}
+
 async function openSettingsModal() {
   try {
     const data = await api('/api/settings');
@@ -959,12 +998,23 @@ async function openSettingsModal() {
   }
   el('#settings-max-concurrent').value = appSettings.max_concurrent;
   el('#settings-max-clip-length').value = appSettings.max_clip_length_secs || 60;
+  el('#settings-library-layout').value = appSettings.library_layout || 'grid';
+  el('#settings-ffmpeg-bin').value = appSettings.ffmpeg_bin || 'ffmpeg';
+  el('#settings-action-model-path').value = appSettings.action_model_path || '';
   el('#settings-theme').value = appSettings.theme;
   el('#settings-default-speed').value = appSettings.default_slideshow_speed;
   el('#settings-default-loop').checked = !!appSettings.default_slideshow_loop;
   el('#settings-default-shuffle').checked = !!appSettings.default_slideshow_shuffle;
   el('#settings-export-reminder-days').value = appSettings.export_reminder_days;
   el('#settings-nsfw-filter-enabled').checked = !!appSettings.nsfw_filter_enabled;
+  el('#settings-metronome-enabled').checked = !!appSettings.metronome_enabled;
+  el('#settings-metronome-volume').value = appSettings.metronome_volume ?? 0.55;
+  el('#settings-goon-persona').value = appSettings.goon_persona || 'neutral';
+  populateTtsVoiceSelect(appSettings.tts_voice);
+  el('#settings-tts-rate').value = appSettings.tts_rate ?? 1;
+  el('#settings-tts-pitch').value = appSettings.tts_pitch ?? 1;
+  el('#settings-tts-volume').value = appSettings.tts_volume ?? 1;
+  el('#settings-soundtrack-provider').value = appSettings.soundtrack_provider || 'local';
   el('#settings-start-with-windows').checked = !!appSettings.start_with_windows;
   el('#settings-keep-running-in-tray').checked = appSettings.keep_running_in_tray !== false;
   renderRemoteAccessStatus();
@@ -979,15 +1029,28 @@ async function saveSettings() {
   const reminderDays = Number.isFinite(rawReminderDays) ? Math.max(1, Math.min(365, rawReminderDays)) : 30;
   const nsfwFilterEnabled = el('#settings-nsfw-filter-enabled').checked;
   const nsfwFilterChanged = !!appSettings.nsfw_filter_enabled !== nsfwFilterEnabled;
+  const externalToolsChanged = (appSettings.ffmpeg_bin || 'ffmpeg') !== el('#settings-ffmpeg-bin').value.trim()
+    || (appSettings.action_model_path || '') !== el('#settings-action-model-path').value.trim();
   const body = {
     max_concurrent: maxConcurrent,
     max_clip_length_secs: Math.max(5, Math.min(3600, parseInt(el('#settings-max-clip-length').value, 10) || 60)),
+    library_layout: el('#settings-library-layout').value,
+    ffmpeg_bin: el('#settings-ffmpeg-bin').value.trim() || 'ffmpeg',
+    action_model_path: el('#settings-action-model-path').value.trim(),
     theme: el('#settings-theme').value,
     default_slideshow_speed: parseInt(el('#settings-default-speed').value, 10),
     default_slideshow_loop: el('#settings-default-loop').checked,
     default_slideshow_shuffle: el('#settings-default-shuffle').checked,
     export_reminder_days: reminderDays,
     nsfw_filter_enabled: nsfwFilterEnabled,
+    metronome_enabled: el('#settings-metronome-enabled').checked,
+    metronome_volume: Math.max(0, Math.min(1, Number(el('#settings-metronome-volume').value) || 0)),
+    goon_persona: el('#settings-goon-persona').value,
+    tts_voice: el('#settings-tts-voice').value,
+    tts_rate: Math.max(0.5, Math.min(2, Number(el('#settings-tts-rate').value) || 1)),
+    tts_pitch: Math.max(0.5, Math.min(2, Number(el('#settings-tts-pitch').value) || 1)),
+    tts_volume: Math.max(0, Math.min(1, Number(el('#settings-tts-volume').value) || 0)),
+    soundtrack_provider: el('#settings-soundtrack-provider').value,
     start_with_windows: el('#settings-start-with-windows').checked,
     keep_running_in_tray: el('#settings-keep-running-in-tray').checked,
   };
@@ -996,45 +1059,13 @@ async function saveSettings() {
     appSettings = { ...appSettings, ...data };
     applyTheme(appSettings.theme);
     configureClipLengthControls();
+    if (typeof setExplorerLayout === 'function') setExplorerLayout(appSettings.library_layout, false);
     closeSettingsModal();
     toast(nsfwFilterChanged ? 'Settings saved — restart Curator for NSFW auto-rating to take effect' : 'Settings saved');
     renderExportReminderBanner();
+    if (externalToolsChanged) toast('Classifier/tool changes take effect after restarting Curator.');
   } catch (e) {
     toast('Could not save settings: ' + e.message, true);
-  }
-}
-
-async function renderRemoteAccessStatus() {
-  const node = el('#settings-remote-access');
-  if (!node) return;
-  node.textContent = 'Checking server status…';
-  try {
-    const info = await api('/api/remote-access');
-    const urls = [
-      ...(info.local_urls || []),
-      ...(info.lan_urls || []),
-      ...(info.tailscale_urls || []),
-    ];
-    node.replaceChildren();
-    const heading = document.createElement('div');
-    heading.textContent = `Server: ${info.server || (info.running ? 'Running' : 'Stopped')}  ·  Port: ${info.port ?? '—'}`;
-    node.append(heading);
-    const groups = [
-      ['Local', info.local_urls],
-      ['LAN', info.lan_urls],
-      ['Tailscale', info.tailscale_urls],
-    ];
-    for (const [label, entries] of groups) {
-      if (!entries?.length) continue;
-      const row = document.createElement('div');
-      row.textContent = `${label}  ${entries.join('  ')}`;
-      node.append(row);
-    }
-    if (!urls.length && info.running) {
-      const row = document.createElement('div'); row.textContent = 'No currently reachable interface addresses were detected.'; node.append(row);
-    }
-  } catch (error) {
-    node.textContent = `Remote access status unavailable: ${error.message}`;
   }
 }
 
@@ -1076,6 +1107,65 @@ async function exportSources() {
     renderExportReminderBanner();
   } catch (e) {
     toast('Could not export sources: ' + e.message, true);
+  }
+}
+
+// ---------------------------------------------------------------------
+// CockHero .chpack export
+// ---------------------------------------------------------------------
+
+async function exportChpack() {
+  // Build payload — scope to current source if one is selected, else whole library.
+  const sourceId = state.view.type === 'creator' ? state.view.id : null;
+  const sourceName = sourceId != null ? (state.sourcesById[sourceId]?.name || '') : '';
+
+  // Prompt for pack name — pre-fill with source name or a default.
+  const defaultName = sourceName || 'Curator Pack';
+  const packName = window.prompt('Pack name for CockHero:', defaultName);
+  if (packName === null) return; // cancelled
+
+  const author = window.prompt('Author name:', 'Curator') ?? 'Curator';
+  const description = window.prompt('Description (optional):', '') ?? '';
+
+  const body = {
+    name: packName.trim() || defaultName,
+    author: author.trim() || 'Curator',
+    description: description.trim(),
+    unlock_cost: 0,
+  };
+  if (sourceId != null) body.source_id = sourceId;
+
+  const scope = sourceId != null
+    ? `source "${state.sourcesById[sourceId]?.name || sourceId}"`
+    : 'entire library';
+  toast(`Building .chpack for ${scope}…`);
+
+  try {
+    const resp = await fetch('/api/export/chpack', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(body),
+    });
+    if (!resp.ok) {
+      const err = await resp.json().catch(() => ({ detail: resp.statusText }));
+      throw new Error(err.detail || resp.statusText);
+    }
+    const blob = await resp.blob();
+    // Derive filename from Content-Disposition or fall back.
+    const cd = resp.headers.get('Content-Disposition') || '';
+    const match = cd.match(/filename="([^"]+)"/);
+    const filename = match ? match[1] : `${body.name.replace(/[^\w\-. ]/g, '_')}.chpack`;
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href = url;
+    a.download = filename;
+    document.body.appendChild(a);
+    a.click();
+    a.remove();
+    URL.revokeObjectURL(url);
+    toast(`Downloaded ${filename}`);
+  } catch (e) {
+    toast('chpack export failed: ' + e.message, true);
   }
 }
 
@@ -1347,9 +1437,6 @@ let gridShuffleSeed = null;
 async function loadView() {
   const requestId = ++viewRequestSeq;
   const params = new URLSearchParams({limit: 150, media_type: state.typeFilter});
-  const sizeFilter = el('#size-filter')?.value;
-  if (sizeFilter === 'unknown') params.set('unknown_size','true');
-  else if (sizeFilter) params.set('min_size',sizeFilter);
   if (state.view.type === 'creator') params.set('source_id', state.view.id);
   else if (state.view.type === 'group') params.set('group_id', state.view.id);
   else params.set('only_included', 'true');
@@ -1555,7 +1642,7 @@ async function stepLightbox(delta) {
 function renderLightboxItem() {
   const item = state.currentItems[state.lightboxIndex];
   if (!item) return;
-  el('#lightbox-clip-tools').hidden = item.type !== 'video' || item.downloaded === 0 || item.clip_parent_id != null || (item.duration_secs != null && item.duration_secs <= clipMaxSeconds());
+  el('#lightbox-clip-tools').hidden = item.type !== 'video' || item.downloaded === 0 || item.clip_parent_id != null || (item.duration_secs != null && item.duration_secs <= CLIP_MAX_SECONDS);
   const stage = el('#lightbox-stage');
   stage.innerHTML = '';
   const src = mediaFullSrc(item);
@@ -1604,7 +1691,7 @@ async function watchClipJob(id) {
   try {
     const job = await api(`/api/clip-jobs/${id}`);
     if (job.status === 'running') {
-      el('#clip-job-status').textContent = 'Saving virtual clip ranges. No video files are copied.';
+      el('#clip-job-status').textContent = 'Creating clips in background. Original preserved.';
       setTimeout(() => watchClipJob(id), 3000); return;
     }
     localStorage.removeItem('curatorClipJob');
@@ -1630,9 +1717,9 @@ function renderStarRating(container, rating, onRate) {
     star.className = 'star' + (i <= rating ? ' filled' : '');
     star.textContent = '★';
     star.title = `${i} star${i === 1 ? '' : 's'}`;
-    // Clicking the star that's already the current rating clears it —
-    // otherwise there'd be no way to get back to "unrated" once rated.
-    star.addEventListener('click', () => onRate(i === rating ? 0 : i));
+    // Rating APIs intentionally accept only 1–5; use the review undo action
+    // when a human decision needs to be removed.
+    star.addEventListener('click', () => onRate(i));
     container.appendChild(star);
   }
 }
@@ -1772,12 +1859,13 @@ async function startSlideshow(startIndex) {
     await loadView();
     startIndex = 0;
   }
-  if (!state.currentItems.length) { toast('Nothing to show yet.', true); return; }
+  const playableItems = excludeSfwFromPlayback(state.currentItems, 'slideshow');
+  if (!playableItems.length) { toast('Nothing eligible to show yet.', true); return; }
   closeLightbox();
   closeSourceMenu();
 
   const requested = state.currentItems[Math.max(0, startIndex || 0)];
-  ss.items = preparePlaybackItems(state.currentItems, false);
+  ss.items = preparePlaybackItems(playableItems, false);
   ss.index = Math.max(0, ss.items.indexOf(requested));
   ss.playing = true;
   ss.speed = parseInt(el('#ss-speed').value, 10);
@@ -1786,7 +1874,7 @@ async function startSlideshow(startIndex) {
 
   if (ss.shuffleMode) {
     const current = ss.items[ss.index];
-    ss.items = preparePlaybackItems(ss.items, true);
+    ss.items = shuffleArray(ss.items.slice());
     ss.index = Math.max(0, ss.items.indexOf(current));
   }
 
@@ -1817,25 +1905,34 @@ const PW_PREFETCH_DEPTH = 2; // verified-portrait items to keep queued up per pa
 const pw = {
   active: false,
   queueIndex: 0,
-  items: [],
   timers: [null, null, null],
   ready: [[], [], []],             // per-pane queues of already-checked {item, el}
   filling: [false, false, false],  // guards against two overlapping fill loops on one pane
 };
 
 async function pwNextCandidate() {
+  // `pw.items` is the already-filtered playback queue.  Reading directly
+  // from state.currentItems here would re-introduce 1★ SFW media after the
+  // initial eligibility check, especially when a later page is loaded.
+  if (!Array.isArray(pw.items)) pw.items = [];
   if (pw.queueIndex >= pw.items.length && mediaPage.more) {
-    await loadMoreMedia();
-    pw.items = preparePlaybackItems(state.currentItems, true);
-    pw.queueIndex = 0;
+    if (pw.loadingMore) {
+      while (pw.loadingMore && pw.active) await new Promise((resolve) => setTimeout(resolve, 20));
+    } else {
+      pw.loadingMore = true;
+      const previousLength = state.currentItems.length;
+      try {
+        await loadMoreMedia();
+        const appended = state.currentItems.slice(previousLength);
+        const known = new Set(pw.items.map((item) => item.id));
+        pw.items.push(...preparePlaybackItems(appended, true).filter((item) => !known.has(item.id)));
+      } finally {
+        pw.loadingMore = false;
+      }
+    }
   }
-  if (pw.queueIndex >= pw.items.length) {
-    // The already-seen collection can recycle after exhaustion, but its next
-    // choice is rearranged to avoid the most recently displayed item.
-    pw.items = preparePlaybackItems(pw.items, true);
-    pw.queueIndex = 0;
-  }
-  return pw.items[pw.queueIndex++] || null;
+  if (pw.queueIndex >= pw.items.length) return null;
+  return pw.items[pw.queueIndex++];
 }
 
 // Orientation isn't stored anywhere, so this checks it the cheap way:
@@ -1857,11 +1954,10 @@ function pwCheckAndPrepare(item) {
         // server-backfilled duration_secs, which may not be known yet for
         // this file) so the exclusion is correct immediately, not only
         // once the background backfill has caught up to it.
-        if ((item.clip_start_secs != null ? item.duration_secs : v.duration) > clipMaxSeconds()) { resolve(null); return; }
+        if (v.duration > CLIP_MAX_SECONDS) { resolve(null); return; }
         resolve(v.videoHeight > v.videoWidth ? { item, el: v } : null);
       };
       v.onerror = () => resolve(null);
-      bindVirtualClip(v, item);
       v.src = mediaFullSrc(item);
     } else {
       const probe = new Image();
@@ -1920,7 +2016,6 @@ function pwMountPane(i, item, mediaEl) {
 
   const media = el(`#pw-pane-media-${i}`);
   media.innerHTML = '';
-  rememberPlaybackItem(item);
   mediaEl.className = 'pw-media';
   media.appendChild(mediaEl);
 
@@ -1955,11 +2050,14 @@ function pwMountPane(i, item, mediaEl) {
   }
 }
 
-function startPortraitWall() {
-  if (!state.currentItems.length) { toast('Nothing to show here.', true); return; }
+function startPortraitWall(explicitItems = null) {
+  const sourceItems = Array.isArray(explicitItems) ? explicitItems : state.currentItems;
+  const playableItems = excludeSfwFromPlayback(sourceItems, 'Portrait Wall');
+  if (!playableItems.length) { toast('Nothing eligible to show here.', true); return; }
   pw.active = true;
   pw.queueIndex = 0;
-  pw.items = preparePlaybackItems(state.currentItems, true);
+  pw.items = preparePlaybackItems(playableItems, true);
+  pw.loadingMore = false;
   pw.ready = [[], [], []];
   pw.filling = [false, false, false];
   el('#portrait-wall').hidden = false;
@@ -1969,6 +2067,8 @@ function startPortraitWall() {
 
 function exitPortraitWall() {
   pw.active = false;
+  pw.items = [];
+  pw.loadingMore = false;
   for (let i = 0; i < 3; i++) {
     if (pw.timers[i]) { clearTimeout(pw.timers[i]); pw.timers[i] = null; }
     const media = el(`#pw-pane-media-${i}`);
@@ -1977,7 +2077,6 @@ function exitPortraitWall() {
     if (media) media.innerHTML = '';
   }
   pw.ready = [[], [], []];
-  pw.items = [];
   if (isFullscreen() && document.fullscreenElement === el('#portrait-wall')) exitBrowserFullscreen();
   el('#portrait-wall').hidden = true;
 }
@@ -2019,6 +2118,7 @@ const feed = {
   recyclePool: new Map(), recycleMode: false, failedIds: new Set(),
   loading: new Set(), wakeLock: null, wakePending: null, wakeEpoch: 0,
   waitingNext: null, retryTimer: null,
+  lastHumanRating: null, reviewRatings: [],
 };
 
 function feedFlashIcon(iconEl, symbol) {
@@ -2103,7 +2203,7 @@ function feedBuildItem(item) {
       // duration_secs, which may not be known yet for this file) so the
       // exclusion is correct immediately, not only once the backfill has
       // caught up to it.
-      return ok && !feed.review && (item.clip_start_secs != null ? item.duration_secs : mediaEl.duration) > clipMaxSeconds() ? false : ok;
+      return ok && !feed.review && mediaEl.duration > CLIP_MAX_SECONDS ? false : ok;
     });
     mediaEl.onloadedmetadata = () => {
       if (mediaEl.videoWidth > mediaEl.videoHeight) wrap.classList.add('rotated');
@@ -2113,7 +2213,7 @@ function feedBuildItem(item) {
     mediaEl.addEventListener('timeupdate', () => {
       if (!mediaEl.duration) return;
       fill.style.transition = 'none';
-      fill.style.width = (clipProgress(mediaEl) * 100) + '%';
+      fill.style.width = ((mediaEl.currentTime / mediaEl.duration) * 100) + '%';
     });
     mediaEl.addEventListener('ended', () => { if (feed.active && !feed.review && feed.activeSection === section) feedGoNext(section); });
 
@@ -2145,7 +2245,7 @@ function feedBuildItem(item) {
       if (!mediaEl.duration) return;
       const rect = track.getBoundingClientRect();
       const ratio = Math.min(1, Math.max(0, (e.clientX - rect.left) / rect.width));
-      mediaEl.currentTime = clipStart(mediaEl) + ratio * clipDuration(mediaEl);
+      mediaEl.currentTime = ratio * mediaEl.duration;
       fill.style.transition = 'none';
       fill.style.width = (ratio * 100) + '%';
     };
@@ -2206,7 +2306,7 @@ function feedGoNext(section) {
     if (!feed.review && !feed.page.more && !feed.page.pending && !feed.inFlight &&
         [...feed.recyclePool.keys()].filter(id => !feed.failedIds.has(id)).length === 1) {
       feedDeactivate(section);
-      if (section._mediaEl.tagName === 'VIDEO') section._mediaEl.currentTime = clipStart(section._mediaEl);
+      if (section._mediaEl.tagName === 'VIDEO') section._mediaEl.currentTime = 0;
       feedActivate(section);
     }
   }
@@ -2301,7 +2401,8 @@ async function feedFetchPage() {
   try {
     const data = await api(page.url + (page.cursor ? '&cursor=' + encodeURIComponent(page.cursor) : ''));
     if (!feed.active || session !== feed.session) return;
-    feed.items = feed.items.slice(feed.sourceIndex).concat(data.media);
+    const incoming = feed.review ? data.media : excludeSfwFromPlayback(data.media, 'Mobile Feed');
+    feed.items = feed.items.slice(feed.sourceIndex).concat(incoming);
     feed.sourceIndex = 0;
     page.cursor = data.next_cursor; page.more = data.has_more;
   } catch (e) {
@@ -2408,17 +2509,30 @@ function feedReleaseWakeLock() {
   if (lock) lock.release().catch(() => {});
 }
 
-function startFeed(review = false) {
+function startFeed(review = false, explicitItems = null) {
   if (feed.active) exitFeed();
   feed.session++;
   feed.active = true; feed.review = review;
   feed.sourceIndex = 0; feed.inFlight = 0; feed.activeSection = null;
   feed.seenIds.clear(); feed.recentIds = []; feed.queuedIds.clear();
   feed.recyclePool.clear(); feed.failedIds.clear(); feed.recycleMode = false;
+  // Swipe-left only repeats a rating made in this review run, never a
+  // rating carried over from a prior session.
+  feed.lastHumanRating = null; feed.reviewRatings = [];
+  const explicit = Array.isArray(explicitItems);
   const params = new URLSearchParams(mediaPage.url.split('?')[1] || '');
   if (review) { params.set('rating_status', 'needs_review'); params.set('sort', 'default'); params.delete('shuffle_seed'); }
-  feed.items = review ? [] : state.currentItems.slice();
-  feed.page = {url:'/api/media?' + params, cursor:review ? null : mediaPage.cursor, more:review || mediaPage.more, pending:false};
+  // Review intentionally retains 1-star items so a person can correct an
+  // automatic false positive. The ordinary media feed never plays them.
+  feed.items = explicit
+    ? (review ? explicitItems.slice() : excludeSfwFromPlayback(explicitItems, 'Mobile Feed'))
+    : (review ? [] : excludeSfwFromPlayback(state.currentItems, 'Mobile Feed'));
+  feed.page = {
+    url: explicit ? null : '/api/media?' + params,
+    cursor: explicit ? null : (review ? null : mediaPage.cursor),
+    more: explicit ? false : (review || mediaPage.more),
+    pending: false,
+  };
   const scrollEl = el('#feed-scroll');
   scrollEl.innerHTML = '';
   feed.itemObserver = new IntersectionObserver(entries => {
@@ -2481,6 +2595,8 @@ function feedBuildReviewControls(section, item) {
         const original = state.currentItems.find(m => m.id === item.id);
         if (original) Object.assign(original, result);
         section._reviewToken = null;
+        feed.reviewRatings = feed.reviewRatings.filter((entry) => entry.id !== item.id);
+        feed.lastHumanRating = feed.reviewRatings.at(-1)?.rating ?? null;
         label.textContent = `AUTO ${item.auto_rating} - Review undone`;
         refreshStars(item.auto_rating);
         panel.querySelectorAll('button').forEach(b => b.disabled = false);
@@ -2517,6 +2633,12 @@ function feedBuildReviewControls(section, item) {
       });
       Object.assign(item, result);
       section._reviewToken = result.rating_reviewed_at;
+      const savedRating = Number(result.rating);
+      if (Number.isInteger(savedRating) && savedRating >= 1 && savedRating <= 5) {
+        feed.reviewRatings = feed.reviewRatings.filter((entry) => entry.id !== item.id);
+        feed.reviewRatings.push({ id: item.id, rating: savedRating });
+        feed.lastHumanRating = savedRating;
+      }
       const original = state.currentItems.find(m => m.id === item.id);
       if (original) Object.assign(original, result);
       if (!feed.active || session !== feed.session) return;
@@ -2562,7 +2684,7 @@ function feedBuildReviewControls(section, item) {
     if (feed.active && session === feed.session && feed.activeSection === section) feedGoNext(section);
     saving = false;
   });
-  const hint = document.createElement('small'); hint.textContent = 'Swipe right: approve / left: choose stars / up: skip / down: previous & undo';
+  const hint = document.createElement('small'); hint.textContent = 'Swipe right: approve / left: repeat latest rating (or choose stars) / up: skip / down: previous & undo';
   panel.appendChild(hint); card.appendChild(panel);
   section.addEventListener('click', e => {
     if (suppressClick) { e.preventDefault(); e.stopPropagation(); suppressClick = false; }
@@ -2580,7 +2702,7 @@ function feedBuildReviewControls(section, item) {
     suppressClick = true; card.classList.add('dragging');
     const shift = Math.max(-180, Math.min(180, dx));
     card.style.transform = `translateX(${shift}px) rotate(${shift / 22}deg)`;
-    stamp.textContent = dx > 0 ? 'APPROVE' : 'CHOOSE STARS';
+    stamp.textContent = dx > 0 ? 'APPROVE' : (feed.lastHumanRating ? `REPEAT ${feed.lastHumanRating}★` : 'CHOOSE STARS');
     stamp.classList.toggle('choose', dx < 0);
     stamp.style.opacity = String(Math.min(1, Math.abs(dx) / 90));
   });
@@ -2593,6 +2715,7 @@ function feedBuildReviewControls(section, item) {
     if (saving || Math.abs(dx) < 60 || Math.abs(dx) < Math.abs(dy) * 1.5) return;
     suppressClick = true;
     if (dx > 0) save(null);
+    else if (feed.lastHumanRating) save(feed.lastHumanRating);
     else {
       choices[0].focus(); label.textContent = `AUTO ${item.auto_rating} - Choose a human star rating`;
       animate('choose');
@@ -2601,8 +2724,8 @@ function feedBuildReviewControls(section, item) {
 }
 
 // ---------------------------------------------------------------------
-// VR — WebXR immersive viewing via an optional asynchronous Three.js
-// enhancement. Images only for now: a video in VR needs a live <video>
+// VR — WebXR immersive viewing via Three.js (loaded from CDN in
+// index.html). Images only for now: a video in VR needs a live <video>
 // element wrapped in THREE.VideoTexture, which is meaningfully more
 // complexity on top of something that's already hard to verify without
 // real headset hardware — skipped for this first version. Videos in the
@@ -2630,7 +2753,11 @@ async function vrCheckSupport() {
   if (!('xr' in navigator)) return; // no WebXR in this browser at all
   try {
     const supported = await navigator.xr.isSessionSupported('immersive-vr');
-    if (supported) el('#vr-btn').hidden = false;
+    // The explorer shell also gates VR to wide/fine-pointer clients.  Keep
+    // that capability policy in force even when WebXR reports support.
+    if (supported && (typeof supportsPlayMode !== 'function' || supportsPlayMode('vr'))) {
+      el('#vr-btn').hidden = false;
+    }
   } catch (e) {
     // isSessionSupported can itself throw in some unsupported/non-secure
     // contexts — treat that the same as "not supported" and stay hidden
@@ -2642,7 +2769,7 @@ function startVRMode() {
     toast('Could not load the 3D library (offline, or a blocked CDN?) — VR view needs it.', true);
     return;
   }
-  vr.items = state.currentItems.filter((item) => item.type === 'image');
+  vr.items = excludeSfwFromPlayback(state.currentItems, 'VR').filter((item) => item.type === 'image');
   if (!vr.items.length) {
     toast("No photos in the current view for VR yet (video isn't supported in VR mode).", true);
     return;
@@ -2814,12 +2941,10 @@ function renderSlide() {
   const stage = el('#slideshow-stage');
   stage.innerHTML = '';
   const item = ss.items[ss.index];
-  rememberPlaybackItem(item);
   const src = mediaFullSrc(item);
 
   if (item.type === 'video') {
     const v = document.createElement('video');
-    bindVirtualClip(v, item);
     v.src = src;
     v.className = 'slideshow-media';
     v.playsInline = true;
@@ -2867,7 +2992,7 @@ function onVideoTimeUpdate() {
   if (!ss.videoEl || !ss.videoEl.duration) return;
   const fill = el('#slideshow-progress-fill');
   fill.style.transition = 'none';
-  fill.style.width = (clipProgress(ss.videoEl) * 100) + '%';
+  fill.style.width = ((ss.videoEl.currentTime / ss.videoEl.duration) * 100) + '%';
 }
 
 function onVideoEnded() {
@@ -2887,7 +3012,7 @@ function onVideoPause() {
   // manually paused, flipping ss.playing to false a moment before
   // onVideoEnded checks that very flag. Net effect: videos never actually
   // advanced the slideshow, silently, on every single completion.
-  if (ss.videoEl && (ss.videoEl.ended || ss.videoEl._clipEnded)) return;
+  if (ss.videoEl && ss.videoEl.ended) return;
   if (ss.playing) { ss.playing = false; updateSlideshowUI(); }
 }
 

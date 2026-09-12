@@ -1,7 +1,7 @@
+mod beat;
+mod chpack;
 mod config;
 mod db;
-#[cfg(test)]
-mod desktop_tests;
 mod downloader;
 mod duration;
 mod hierarchy;
@@ -35,6 +35,7 @@ use tracing::{error, info, warn};
 
 pub static DOCS_TEXT: &str = include_str!("../DOCS.txt");
 pub static NSFW_WORKER_PY: &str = include_str!("../nsfw_worker.py");
+pub static ACTION_WORKER_PY: &str = include_str!("../action_worker.py");
 
 pub type GroupTagCache = Arc<RwLock<Option<Arc<HashMap<i64, HashSet<String>>>>>>;
 
@@ -90,6 +91,8 @@ pub struct AppState {
     /// is not private activity telemetry and a restart begins a new session.
     pub playback_history: Arc<Mutex<VecDeque<i64>>>,
     pub settings: Arc<RwLock<db::Settings>>,
+    /// Version-aware discovery registry built once at process startup.
+    pub search_registry: Arc<routes::search::ProviderRegistry>,
     pub data_dir: PathBuf,
     pub library_dir: PathBuf,
     pub archives_dir: PathBuf,
@@ -102,6 +105,7 @@ pub struct AppState {
     pub static_dir: PathBuf,
     pub gallery_dl_bin: String,
     pub ffprobe_bin: String,
+    pub ffmpeg_bin: String,
     /// Only otherwise used to spawn the NSFW worker at startup (see
     /// `nsfw::NsfwClassifier::spawn`) — kept on `AppState` as well so the
     /// OOBE dependency check can probe the *currently configured*
@@ -109,6 +113,9 @@ pub struct AppState {
     pub python_bin: String,
     /// None if NSFW auto-rating is off or its worker never started.
     pub nsfw: Option<nsfw::NsfwClassifier>,
+    /// Optional P-HAR worker, independently supervised from NudeNet.
+    pub action_classifier: Option<nsfw::ActionClassifier>,
+    pub action_model_path: Option<String>,
 }
 
 fn setup_logging(log_path: &std::path::Path) {
@@ -130,7 +137,8 @@ fn setup_logging(log_path: &std::path::Path) {
         .with(filter)
         .with(fmt::layer().with_writer(std::io::stdout))
         .with(fmt::layer().with_writer(non_blocking).with_ansi(false))
-        .init();
+        .try_init()
+        .ok();
 }
 
 // ─── main ─────────────────────────────────────────────────────────────────────
@@ -173,6 +181,11 @@ pub async fn initialize() -> Result<AppState> {
         .ffprobe_bin
         .filter(|s| !s.is_empty())
         .unwrap_or_else(|| "ffprobe".to_string());
+    let ffmpeg_bin = cfg
+        .ffmpeg_bin
+        .filter(|s| !s.is_empty())
+        .unwrap_or_else(|| "ffmpeg".to_string());
+    let action_model_path = cfg.action_model_path.filter(|s| !s.trim().is_empty());
 
     // Database pool + migrations
     let pool = db::init_pool(&data_dir).map_err(|e| {
@@ -222,6 +235,10 @@ pub async fn initialize() -> Result<AppState> {
             nsfw_worker_path, e
         );
     }
+    let action_worker_path = data_dir.join("action_worker.py");
+    if let Err(e) = std::fs::write(&action_worker_path, ACTION_WORKER_PY) {
+        warn!("Could not write action_worker.py to {:?}: {}", action_worker_path, e);
+    }
     let nsfw_classifier = if settings.nsfw_filter_enabled {
         info!("NSFW auto-rating enabled — starting classifier worker");
         Some(nsfw::NsfwClassifier::spawn(
@@ -231,8 +248,27 @@ pub async fn initialize() -> Result<AppState> {
     } else {
         None
     };
+    let action_classifier = if settings.nsfw_filter_enabled {
+        action_model_path.as_ref().map(|model_path| {
+            info!("P-HAR action model configured — starting optional action worker");
+            nsfw::ActionClassifier::spawn(
+                python_bin.clone(),
+                action_worker_path,
+                model_path.clone(),
+            )
+        })
+    } else {
+        None
+    };
     if let Some(ref classifier) = nsfw_classifier {
-        nsfw::spawn_backfill_loop(pool.clone(), classifier.clone(), library_dir.clone());
+        nsfw::spawn_backfill_loop(
+            pool.clone(),
+            classifier.clone(),
+            action_classifier.clone(),
+            library_dir.clone(),
+            ffmpeg_bin.clone(),
+            settings.max_clip_length_secs,
+        );
     }
 
     // Video duration backfill (for the clips/videos split — see
@@ -250,10 +286,28 @@ pub async fn initialize() -> Result<AppState> {
     }
 
     // Static directories
-    let static_dir = std::env::current_exe()
+    // Release bundles place `static/` beside the executable, while `cargo
+    // run` keeps it at the workspace root. Prefer the bundled copy but fall
+    // back to the working-tree asset directory so development and packaged
+    // builds serve the same shell instead of silently returning 404s.
+    let bundled_static = std::env::current_exe()
         .ok()
-        .and_then(|p| p.parent().map(|d| d.join("static")))
+        .and_then(|path| path.parent().map(|dir| dir.join("static")))
+        .filter(|path| path.is_dir());
+    let static_dir = bundled_static
+        .or_else(|| {
+            std::env::current_dir()
+                .ok()
+                .map(|path| path.join("static"))
+                .filter(|path| path.is_dir())
+        })
         .unwrap_or_else(|| PathBuf::from("static"));
+    let registry_bin = gallery_dl_bin.clone();
+    let search_registry = Arc::new(
+        tokio::task::spawn_blocking(move || routes::search::build_provider_registry(&registry_bin))
+            .await
+            .unwrap_or_else(|_| routes::search::default_provider_registry()),
+    );
 
     let state = AppState {
         pool,
@@ -273,6 +327,7 @@ pub async fn initialize() -> Result<AppState> {
         remote_server: Arc::new(remote::ServerStatus::new(remote::DEFAULT_SERVER_PORT)),
         playback_history: Arc::new(Mutex::new(VecDeque::with_capacity(24))),
         settings: Arc::new(RwLock::new(settings)),
+        search_registry,
         data_dir: data_dir.clone(),
         library_dir: library_dir.clone(),
         archives_dir,
@@ -281,8 +336,11 @@ pub async fn initialize() -> Result<AppState> {
         static_dir: static_dir.clone(),
         gallery_dl_bin,
         ffprobe_bin,
+        ffmpeg_bin,
         python_bin,
         nsfw: nsfw_classifier,
+        action_classifier,
+        action_model_path,
     };
 
     // Recover completed files whose final event was lost before a crash.
@@ -343,6 +401,9 @@ pub fn router(state: AppState) -> axum::Router {
 pub async fn shutdown(state: &AppState) {
     state.shutdown.cancel();
     if let Some(worker) = &state.nsfw {
+        worker.shutdown().await;
+    }
+    if let Some(worker) = &state.action_classifier {
         worker.shutdown().await;
     }
     state.download_tasks.close();

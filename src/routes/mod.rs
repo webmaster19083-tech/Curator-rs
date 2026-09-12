@@ -1,15 +1,16 @@
+pub mod ch;
 pub mod clips;
 pub mod downloads;
 pub mod export;
-pub mod goon;
 pub mod groups;
 pub mod library;
 pub mod media;
 pub mod misc;
 pub mod oobe;
 pub mod remote;
-pub mod search;
 pub mod settings;
+pub mod search;
+pub mod goon;
 pub mod source_tags;
 pub mod sources;
 pub mod tags;
@@ -63,10 +64,7 @@ pub fn build_router(state: Arc<AppState>) -> Router {
             "/api/source-tag-rules",
             get(source_tags::list_rules).post(source_tags::save_rule),
         )
-        .route(
-            "/api/source-tag-rules/:id",
-            delete(source_tags::delete_rule),
-        )
+        .route("/api/source-tag-rules/:id", delete(source_tags::delete_rule))
         // ── Sources ────────────────────────────────────────────────────────
         .route("/api/sources", get(sources::list).post(sources::add))
         .route("/api/sources/resync-all", post(sources::resync_all))
@@ -80,6 +78,7 @@ pub fn build_router(state: Arc<AppState>) -> Router {
         .route("/api/sources/:id/resync", post(sources::resync))
         .route("/api/sources/:id/log", get(misc::source_log))
         // ── Unified discovery ───────────────────────────────────────────────
+        .route("/api/search/providers", get(search::providers))
         .route("/api/search", get(search::search))
         .route("/api/search/download", post(search::download_selected))
         // ── Groups ─────────────────────────────────────────────────────────
@@ -94,11 +93,14 @@ pub fn build_router(state: Arc<AppState>) -> Router {
         .route("/api/downloads/status", get(downloads::status))
         .route("/api/downloads/pause", post(downloads::pause))
         .route("/api/downloads/resume", post(downloads::resume))
+        .route("/api/downloads/sources/:id/pause", post(downloads::pause_source))
+        .route("/api/downloads/sources/:id/resume", post(downloads::resume_source))
         // ── Settings ───────────────────────────────────────────────────────
         .route("/api/settings", get(settings::get).patch(settings::patch))
         .route("/api/remote-access", get(remote::status))
         // ── Export / Import ────────────────────────────────────────────────
         .route("/api/export", get(export::export_sources))
+        .route("/api/export/chpack", post(export::export_chpack))
         .route("/api/import", post(export::import_sources))
         // ── Stats / Log ────────────────────────────────────────────────────
         .route("/api/stats", get(misc::stats))
@@ -106,5 +108,10 @@ pub fn build_router(state: Arc<AppState>) -> Router {
         // ── Curator interactive sessions ────────────────────────────────────
         .route("/api/goon/session", post(goon::start))
         .route("/api/goon/session/complete", post(goon::complete))
+        .route("/api/goon/connectors", get(goon::connector_status))
+        .route("/api/goon/playlists", get(goon::list_playlists).post(goon::save_playlist))
+        .route("/api/goon/beat-maps/analyze", post(goon::analyze_beat_map))
+        .route("/api/goon/beat-maps/:id", patch(goon::update_beat_map))
+        .route("/api/goon/oauth/callback", post(goon::oauth_callback))
         .with_state(state)
 }

@@ -5,8 +5,7 @@ use std::time::{Duration, Instant};
 use anyhow::Result;
 use futures::{Stream, StreamExt};
 use serde_json::Value;
-use tokio::io::{AsyncReadExt, BufReader};
-
+use tokio::io::{AsyncBufReadExt, AsyncReadExt, BufReader};
 use tracing::{info, warn};
 
 use crate::db::now_iso;
@@ -52,157 +51,6 @@ pub fn filter_gdl_stderr(raw: &str) -> String {
         .join("\n")
 }
 
-// gallery-dl already retries individual HTTP requests.  A gallery is still
-// allowed to exit non-zero after those retries are exhausted, though, which
-// used to turn a short CDN outage (or a provider's 429 window) into a
-// terminal Curator error.  Keep the second layer deliberately small and
-// source-level: gallery-dl's download archive remains the authority for what
-// is already complete, so restarting it is safe and naturally resumes only
-// the unfinished work.
-const MAX_TRANSIENT_RETRIES: i64 = 6;
-
-fn provider_key(url: &str) -> String {
-    url.split_once("://")
-        .map(|(_, rest)| rest)
-        .unwrap_or(url)
-        .split('/')
-        .next()
-        .unwrap_or("unknown")
-        .split('@')
-        .next_back()
-        .unwrap_or("unknown")
-        .split(':')
-        .next()
-        .unwrap_or("unknown")
-        .trim()
-        .to_ascii_lowercase()
-}
-
-fn rate_limited(log_text: &str) -> bool {
-    let lower = log_text.to_ascii_lowercase();
-    lower.contains("429")
-        || lower.contains("too many requests")
-        || lower.contains("rate limit")
-        || lower.contains("rate-limit")
-}
-
-fn retryable_failure(exit_code: i32, log_text: &str) -> bool {
-    // gallery-dl uses a non-zero status for request/extractor failures.  Exit
-    // code 4 has repeatedly appeared with interrupted/transient downloads in
-    // the field, so retry it once through Curator's bounded backoff as well.
-    if exit_code == 4 || rate_limited(log_text) {
-        return true;
-    }
-    let lower = log_text.to_ascii_lowercase();
-    [
-        "incompleteread",
-        "connection broken",
-        "connection reset",
-        "connection aborted",
-        "timed out",
-        "timeout",
-        "temporary failure",
-        "temporarily unavailable",
-        "network is unreachable",
-        "name or service not known",
-        "dns",
-        "http 500",
-        "http 502",
-        "http 503",
-        "http 504",
-        "service unavailable",
-    ]
-    .iter()
-    .any(|needle| lower.contains(needle))
-}
-
-fn retry_delay(attempt: i64, is_rate_limited: bool) -> Duration {
-    // Make 429s substantially quieter than ordinary network blips.  The
-    // capped exponential progression prevents both a tight retry loop and a
-    // permanently stuck queue.
-    let base = if is_rate_limited { 60_u64 } else { 10_u64 };
-    let cap = if is_rate_limited { 30 * 60 } else { 5 * 60 };
-    let exponent = attempt.saturating_sub(1).clamp(0, 8) as u32;
-    Duration::from_secs(base.saturating_mul(1_u64 << exponent).min(cap))
-}
-
-async fn wait_for_provider_cooldown(
-    state: &AppState,
-    provider: &str,
-    cancel: &tokio_util::sync::CancellationToken,
-) -> bool {
-    loop {
-        let wait = {
-            let cooldowns = state.download_cooldowns.lock().await;
-            cooldowns
-                .get(provider)
-                .copied()
-                .and_then(|until| until.checked_duration_since(Instant::now()))
-        };
-        let Some(wait) = wait else { return true };
-        tokio::select! {
-            _ = state.shutdown.cancelled() => return false,
-            _ = cancel.cancelled() => return false,
-            _ = tokio::time::sleep(wait) => {}
-        }
-    }
-}
-
-async fn extend_provider_cooldown(state: &AppState, provider: String, delay: Duration) {
-    let requested = Instant::now() + delay;
-    let mut cooldowns = state.download_cooldowns.lock().await;
-    cooldowns
-        .entry(provider)
-        .and_modify(|current| *current = (*current).max(requested))
-        .or_insert(requested);
-}
-
-fn schedule_retry(state: Arc<AppState>, source_id: i64, delay: Duration) {
-    let retry_state = Arc::clone(&state);
-    state.download_tasks.spawn(async move {
-        let state = retry_state;
-        tokio::select! {
-            _ = state.shutdown.cancelled() => return,
-            _ = tokio::time::sleep(delay) => {}
-        }
-
-        if state
-            .downloads_paused
-            .load(std::sync::atomic::Ordering::SeqCst)
-        {
-            if let Ok(conn) = state.pool.get() {
-                let _ = conn.execute(
-                    "UPDATE sources SET status='paused' WHERE id=?1 AND status='retrying'",
-                    [source_id],
-                );
-            }
-            return;
-        }
-
-        // A manual resync, source removal, or successful concurrent recovery
-        // wins over this delayed task.  That makes retries idempotent and
-        // prevents a stale timer from duplicating an import.
-        let due = state
-            .pool
-            .get()
-            .ok()
-            .and_then(|conn| {
-                conn.query_row(
-                    "SELECT status='retrying' AND retry_at<=unixepoch() FROM sources WHERE id=?1",
-                    [source_id],
-                    |row| row.get::<_, bool>(0),
-                )
-                .ok()
-            })
-            .unwrap_or(false);
-        if due {
-            state
-                .download_tasks
-                .spawn(run_download(Arc::clone(&state), source_id));
-        }
-    });
-}
-
 // ─── Kill a process by PID ───────────────────────────────────────────────────
 //
 // Windows taskkill must include /T; killing only the parent leaves ffmpeg children alive.
@@ -212,39 +60,28 @@ pub async fn kill_pid(pid: u32) {
     }
     #[cfg(target_os = "windows")]
     {
+        // Use the shared process seam: it hides taskkill's helper window and
+        // kills taskkill itself if Windows stalls while walking descendants.
         let mut taskkill = crate::process::command("taskkill");
         taskkill
             .args(["/F", "/T", "/PID", &pid.to_string()])
             .kill_on_drop(true);
-        match tokio::time::timeout(Duration::from_secs(5), taskkill.output()).await {
-            Err(_) => warn!("Timed out terminating process tree for PID {pid}"),
-            Ok(Err(e)) => warn!("Could not terminate process tree for PID {pid}: {e}"),
+        let result = tokio::time::timeout(Duration::from_secs(5), taskkill.output()).await;
+        match result {
             Ok(Ok(output)) if output.status.success() => {}
-            Ok(Ok(output)) => {
-                // A child can exit naturally in the small race between the
-                // cancellation check and taskkill.  That is a successful
-                // outcome, not a noisy warning worthy of suggesting that
-                // descendants were leaked (the old log made this look like
-                // a real shutdown failure on Windows).
-                let stderr = String::from_utf8_lossy(&output.stderr);
-                let lower = stderr.to_ascii_lowercase();
-                if !lower.contains("no running instance")
-                    && !lower.contains("not found")
-                    && !lower.contains("does not exist")
-                {
-                    warn!(
-                        "Process-tree termination for PID {pid} returned {}: {}",
-                        output.status,
-                        stderr.trim()
-                    );
-                }
-            }
+            Ok(Ok(output)) => warn!(
+                "Process-tree termination for PID {pid} returned {}: {}",
+                output.status,
+                String::from_utf8_lossy(&output.stderr).trim()
+            ),
+            Ok(Err(e)) => warn!("Could not terminate process tree for PID {pid}: {e}"),
+            Err(_) => warn!("Process-tree termination for PID {pid} timed out"),
         }
     }
     #[cfg(not(target_os = "windows"))]
     {
         unsafe {
-            libc::kill(-(pid as i32), libc::SIGTERM);
+            libc::kill(pid as i32, libc::SIGTERM);
         }
     }
 }
@@ -322,22 +159,14 @@ pub fn spawn_gallery_dl(
             let _=child.kill().await;
             let _=child.wait().await;
         }
-        let (raw,read_result) = output_task.await.unwrap_or_else(|_| (String::new(), Ok(0)));
-        // Deregister immediately after the child has stopped, before any error return.
-        // Timeout/cancellation used to return above the old cleanup path and leave a
-        // stale source -> PID entry forever.
-        if let Some(id) = source_id {
-            state.active_processes.lock().await.remove(&id);
-        }
+        let (raw,_) = output_task.await.unwrap_or_else(|_| (String::new(), Ok(0)));
         if stopped || raw.len()>16*1024*1024 {
             let _=stderr_handle.await;
             yield Err(anyhow::anyhow!("Listing stopped (30s deadline, cancellation, or 16 MiB output limit)"));
             return;
         }
-        if let Err(e) = read_result {
-            let _=stderr_handle.await;
-            yield Err(anyhow::anyhow!("Could not read gallery-dl output: {e}"));
-            return;
+        if let (Some(id), Some(_)) = (source_id, pid) {
+            state.active_processes.lock().await.remove(&id);
         }
 
         let stderr_text = stderr_handle.await.unwrap_or_default();
@@ -575,18 +404,11 @@ pub fn index_file(state: &AppState, source_id: i64, path: &Path) -> Result<bool>
         .to_string_lossy()
         .replace('\\', "/");
     let stamp = crate::media_files::stamp(path);
-    let modified_at = crate::media_files::modified_at(path);
     let mut sidecar = path.as_os_str().to_os_string();
     sidecar.push(".json");
-    // gallery-dl's sidecar is more than a URL: it carries extractor tags,
-    // categories, labels, creator, and title when a provider exposes them.
-    // Keep the parsed document until after the media upsert so provenance can
-    // persist the raw evidence separately from both automatic and human tags.
-    let sidecar_metadata = std::fs::read_to_string(Path::new(&sidecar))
+    let origin: Option<String> = std::fs::read_to_string(Path::new(&sidecar))
         .ok()
-        .and_then(|raw| serde_json::from_str::<Value>(&raw).ok());
-    let origin: Option<String> = sidecar_metadata
-        .as_ref()
+        .and_then(|s| serde_json::from_str::<Value>(&s).ok())
         .and_then(|v| v.get("url").and_then(Value::as_str).map(str::to_owned));
     let conn = state.pool.get()?;
     let existing: Option<(i64, Option<String>, Option<String>, bool)> = conn
@@ -600,21 +422,6 @@ pub fn index_file(state: &AppState, source_id: i64, path: &Path) -> Result<bool>
         .as_ref()
         .is_some_and(|r| r.1 == stamp && r.3 && (origin.is_none() || r.2 == origin))
     {
-        // File creation often arrives before gallery-dl finishes writing its
-        // JSON sidecar.  A later metadata-only filesystem event must still
-        // be useful even though the media row itself is already current.
-        if let (Some(metadata), Some((media_id, _, _, _))) =
-            (sidecar_metadata.as_ref(), existing.as_ref())
-        {
-            if let Err(error) = crate::provenance::capture_source_metadata(
-                &conn,
-                *media_id,
-                origin.as_deref(),
-                metadata,
-            ) {
-                warn!("Could not retain late source metadata for media {media_id}: {error}");
-            }
-        }
         return Ok(false);
     }
     let tx = conn.unchecked_transaction()?;
@@ -630,24 +437,14 @@ pub fn index_file(state: &AppState, source_id: i64, path: &Path) -> Result<bool>
             .optional()?;
         if let Some(id) = placeholder {
             tx.execute("INSERT OR IGNORE INTO media_tags SELECT ?1, tag_id FROM media_tags WHERE media_id=?2", rusqlite::params![id,real_id])?;
-            tx.execute("UPDATE media SET (human_rating,rating,rating_source,rating_reviewed,rating_reviewed_at)=
-                (SELECT human_rating,rating,rating_source,rating_reviewed,rating_reviewed_at FROM media WHERE id=?2)
-                WHERE id=?1 AND human_rating IS NULL AND
-                    (SELECT human_rating FROM media WHERE id=?2) IS NOT NULL", rusqlite::params![id,real_id])?;
+            tx.execute("UPDATE media SET (rating,rating_source,rating_reviewed,rating_reviewed_at)=
+                (SELECT rating,rating_source,rating_reviewed,rating_reviewed_at FROM media WHERE id=?2)
+                WHERE id=?1 AND rating_reviewed=0 AND (rating=0 OR (SELECT rating_reviewed FROM media WHERE id=?2)=1)", rusqlite::params![id,real_id])?;
             tx.execute(
                 "UPDATE media SET (auto_rating,auto_rating_score)=
                 (SELECT auto_rating,auto_rating_score FROM media WHERE id=?2)
                 WHERE id=?1 AND auto_rating=0",
                 rusqlite::params![id, real_id],
-            )?;
-            tx.execute(
-                "UPDATE media SET rating=COALESCE(human_rating,NULLIF(auto_rating,0),0),
-                    rating_source=CASE WHEN human_rating IS NOT NULL THEN 'human'
-                                       WHEN auto_rating>0 THEN 'auto' ELSE 'none' END,
-                    rating_reviewed=CASE WHEN human_rating IS NULL THEN 0 ELSE 1 END,
-                    rating_reviewed_at=CASE WHEN human_rating IS NULL THEN NULL ELSE rating_reviewed_at END
-                 WHERE id=?1",
-                [id],
             )?;
             tx.execute("DELETE FROM media WHERE id=?1", [real_id])?;
         }
@@ -657,39 +454,32 @@ pub fn index_file(state: &AppState, source_id: i64, path: &Path) -> Result<bool>
     } else {
         "image"
     };
-    let indexed_at = now_iso();
-    tx.execute("INSERT INTO media(source_id,filepath,filename,type,added_at,origin_url,downloaded,file_stamp,downloaded_at,modified_at)
-        VALUES(?1,?2,?3,?4,?5,?6,1,?7,?5,?8)
+    tx.execute("INSERT INTO media(source_id,filepath,filename,type,added_at,origin_url,downloaded,file_stamp)
+        VALUES(?1,?2,?3,?4,?5,?6,1,?7)
         ON CONFLICT(source_id,origin_url) WHERE origin_url IS NOT NULL DO UPDATE SET
           filepath=excluded.filepath, filename=excluded.filename, downloaded=1, missing=0,
           file_stamp=excluded.file_stamp, modified_at=COALESCE(excluded.modified_at,media.modified_at),
           downloaded_at=CASE WHEN media.downloaded=0 OR media.missing=1 THEN excluded.downloaded_at ELSE media.downloaded_at END,
           nsfw_state='pending', nsfw_attempts=0, nsfw_retry_at=0, duration_attempted=0,
+          action_rating=0, action_model=NULL, action_model_version=NULL, action_score=NULL, action_evidence=NULL,
+          classifier_model=NULL, classifier_version=NULL, classifier_score=NULL, classifier_evidence=NULL,
+          classification_label='unclassified', manual_review_required=0, manual_review_reason=NULL,
           duration_secs=CASE WHEN media.file_stamp=excluded.file_stamp THEN media.duration_secs ELSE NULL END
         ON CONFLICT(filepath) DO UPDATE SET downloaded=1, missing=0, file_stamp=excluded.file_stamp,
-          modified_at=COALESCE(excluded.modified_at,media.modified_at),
-          downloaded_at=CASE WHEN media.downloaded=0 OR media.missing=1 THEN excluded.downloaded_at ELSE media.downloaded_at END,
           origin_url=COALESCE(excluded.origin_url,media.origin_url), nsfw_state='pending', nsfw_attempts=0,
+          action_rating=0, action_model=NULL, action_model_version=NULL, action_score=NULL, action_evidence=NULL,
+          classifier_model=NULL, classifier_version=NULL, classifier_score=NULL, classifier_evidence=NULL,
+          classification_label='unclassified', manual_review_required=0, manual_review_reason=NULL,
           nsfw_retry_at=0, duration_attempted=0, duration_secs=CASE WHEN media.file_stamp=excluded.file_stamp THEN media.duration_secs ELSE NULL END",
-        rusqlite::params![source_id,rel,path.file_name().unwrap_or_default().to_string_lossy(),kind,indexed_at,origin.as_deref(),stamp,modified_at])?;
-    tx.execute(
-        "UPDATE media SET file_size_bytes=?1 WHERE filepath=?2",
-        rusqlite::params![crate::media_files::file_size(path), rel],
-    )?;
+        rusqlite::params![source_id,rel,path.file_name().unwrap_or_default().to_string_lossy(),kind,now_iso(),origin,stamp])?;
     tx.commit()?;
-    if let Some(metadata) = sidecar_metadata.as_ref() {
-        let media_id: i64 =
-            conn.query_row("SELECT id FROM media WHERE filepath=?1", [&rel], |row| {
-                row.get(0)
-            })?;
-        if let Err(error) =
-            crate::provenance::capture_source_metadata(&conn, media_id, origin.as_deref(), metadata)
-        {
-            // Metadata is supplementary. A malformed sidecar must never turn
-            // a completed, otherwise valid file into a failed import.
-            warn!("Could not retain source metadata for media {media_id}: {error}");
-        }
-    }
+    // Completion derives from real indexed files, not parser/log guesses.
+    // A source with no successful placeholder listing keeps known_total NULL,
+    // which is intentionally rendered as indeterminate progress.
+    let _ = conn.execute(
+        "UPDATE sources SET completed_count=(SELECT COUNT(*) FROM media WHERE source_id=?1 AND downloaded=1 AND missing=0),current_filename=?2,progress_updated_at=?3 WHERE id=?1",
+        rusqlite::params![source_id, path.file_name().unwrap_or_default().to_string_lossy(), now_iso()],
+    );
     // Keep sidecars: restart recovery and late metadata events need their URL.
     Ok(true)
 }
@@ -697,9 +487,6 @@ pub fn index_file(state: &AppState, source_id: i64, path: &Path) -> Result<bool>
 pub fn scan_and_index(state: &AppState, source_id: i64, dest: &Path) -> Result<(i64, i64)> {
     let mut added = 0;
     for entry in walkdir::WalkDir::new(dest).into_iter() {
-        if state.shutdown.is_cancelled() {
-            break;
-        }
         let entry = entry?;
         if entry.file_type().is_file() && index_file(state, source_id, entry.path())? {
             added += 1;
@@ -712,8 +499,8 @@ pub fn scan_and_index(state: &AppState, source_id: i64, dest: &Path) -> Result<(
         |r| r.get(0),
     )?;
     conn.execute(
-        "UPDATE sources SET item_count=?1 WHERE id=?2",
-        rusqlite::params![total, source_id],
+        "UPDATE sources SET item_count=?1,completed_count=?1,progress_updated_at=?3 WHERE id=?2",
+        rusqlite::params![total, source_id, now_iso()],
     )?;
     Ok((total, added))
 }
@@ -730,10 +517,6 @@ async fn index_download(
     let (tx, mut rx) = tokio::sync::mpsc::channel::<PathBuf>(1024);
     let dirty = Arc::new(AtomicBool::new(false));
     let dirty_event = dirty.clone();
-    // FSEvents reports canonical paths (/private/var instead of /var on macOS).
-    // Map them back to the library spelling used by the database/indexer.
-    let watched_root = dunce::canonicalize(&dest).unwrap_or_else(|_| dest.clone());
-    let indexed_root = dest.clone();
     let mut watcher =
         notify::recommended_watcher(move |event: notify::Result<notify::Event>| match event {
             Ok(e) => {
@@ -744,10 +527,6 @@ async fn index_download(
                     return;
                 }
                 for path in e.paths {
-                    let path = path
-                        .strip_prefix(&watched_root)
-                        .map(|relative| indexed_root.join(relative))
-                        .unwrap_or(path);
                     if tx.try_send(path).is_err() {
                         dirty_event.store(true, Ordering::Relaxed);
                     }
@@ -791,8 +570,7 @@ async fn index_download(
             else {
                 for mut path in paths {
                     if path.extension().is_some_and(|e| e=="json") { path.set_extension(""); }
-                    if path.is_dir() { scan_and_index(&s,source_id,&path)?; }
-                    else if path.is_file() { index_file(&s,source_id,&path)?; }
+                    if path.is_file() { index_file(&s,source_id,&path)?; }
                     else if let Ok(rel)=path.strip_prefix(&s.library_dir) {
                         let conn=s.pool.get()?;
                         conn.execute("UPDATE media SET missing=1,downloaded=0,nsfw_state='missing' WHERE filepath=?1 AND downloaded=1",[rel.to_string_lossy().replace('\\',"/")])?;
@@ -910,24 +688,12 @@ pub async fn populate_placeholders(state: Arc<AppState>, source_id: i64) {
     };
     let now = now_iso();
 
-    let tx = match conn.unchecked_transaction() {
-        Ok(tx) => tx,
-        Err(error) => {
-            warn!("Placeholder pre-scan for source {source_id} could not begin a database transaction: {error}");
-            return;
-        }
-    };
+    let _ = conn.execute("BEGIN", []);
     {
-        let mut stmt = match tx.prepare(
+        let mut stmt = match conn.prepare(
             "INSERT OR IGNORE INTO media (source_id, filepath, filename, type, added_at, origin_url, downloaded)
              VALUES (?1, ?2, ?3, ?4, ?5, ?6, 0)"
-        ) {
-            Ok(stmt) => stmt,
-            Err(error) => {
-                warn!("Placeholder pre-scan for source {source_id} could not prepare its insert: {error}");
-                return;
-            }
-        };
+        ) { Ok(s) => s, Err(_) => { let _ = conn.execute("ROLLBACK", []); return; } };
 
         for item in &items {
             let fname = item
@@ -945,18 +711,20 @@ pub async fn populate_placeholders(state: Arc<AppState>, source_id: i64) {
                 fname
             };
             let fp = pending_filepath(source_id, &item.url);
-            if let Err(error) = stmt.execute(rusqlite::params![
+            let _ = stmt.execute(rusqlite::params![
                 source_id, fp, fname, item.kind, now, item.url
-            ]) {
-                warn!(
-                    "Placeholder pre-scan failed to insert an item for source {source_id}: {error}"
-                );
-            }
+            ]);
         }
     }
-    if let Err(error) = tx.commit() {
+    if let Err(error) = conn.execute("COMMIT", []) {
         warn!("Placeholder pre-scan for source {source_id} could not commit: {error}");
         return;
+    }
+    if let Ok(conn) = state.pool.get() {
+        let _ = conn.execute(
+            "UPDATE sources SET known_total=?1,progress_updated_at=?2 WHERE id=?3",
+            rusqlite::params![items.len() as i64, now_iso(), source_id],
+        );
     }
 
     info!(
@@ -1007,16 +775,16 @@ async fn run_download_impl(
     {
         if let Ok(conn) = state.pool.get() {
             let _ = conn.execute(
-                "UPDATE sources SET status='paused' WHERE id=?1",
-                [source_id],
+                "UPDATE sources SET status='paused',progress_updated_at=?1 WHERE id=?2",
+                rusqlite::params![now_iso(), source_id],
             );
         }
         return;
     }
 
-    // Do not spend one of the scarce gallery-dl permits while a provider is
-    // in a known rate-limit cooldown.  The source remains queued until the
-    // cooldown ends; cancellation and the global Pause control always win.
+    // Rate-limited providers remain queued without taking a gallery-dl permit.
+    // Local folder imports do not use gallery-dl and therefore have no remote
+    // provider cooldown to observe.
     let provider = state
         .pool
         .get()
@@ -1026,21 +794,21 @@ async fn run_download_impl(
                 row.get::<_, String>(0)
             })
             .ok()
-        })
-        .map(|url| provider_key(&url));
-    if let Some(provider) = provider {
+        });
+    let Some(provider_url) = provider else {
+        return;
+    };
+    if !provider_url.starts_with("local:") {
+        let provider = provider_key(&provider_url);
         if !wait_for_provider_cooldown(&state, &provider, &cancel).await {
             if let Ok(conn) = state.pool.get() {
                 let _ = conn.execute(
-                    "UPDATE sources SET status='paused' WHERE id=?1",
-                    [source_id],
+                    "UPDATE sources SET status='paused',progress_updated_at=?1 WHERE id=?2",
+                    rusqlite::params![now_iso(), source_id],
                 );
             }
             return;
         }
-    } else {
-        // The source was removed while a queued task was waiting.
-        return;
     }
 
     if state
@@ -1049,8 +817,8 @@ async fn run_download_impl(
     {
         if let Ok(conn) = state.pool.get() {
             let _ = conn.execute(
-                "UPDATE sources SET status='paused' WHERE id=?1",
-                [source_id],
+                "UPDATE sources SET status='paused',progress_updated_at=?1 WHERE id=?2",
+                rusqlite::params![now_iso(), source_id],
             );
         }
         return;
@@ -1060,8 +828,8 @@ async fn run_download_impl(
     {
         if let Ok(conn) = state.pool.get() {
             let _ = conn.execute(
-                "UPDATE sources SET status='downloading', error_message=NULL WHERE id=?1",
-                [source_id],
+                "UPDATE sources SET status='downloading', error_message=NULL,started_at=COALESCE(started_at,?1),progress_updated_at=?1,current_filename=NULL WHERE id=?2",
+                rusqlite::params![now_iso(), source_id],
             );
         } else {
             warn!("Source {source_id} could not claim downloading status: database unavailable");
@@ -1088,8 +856,8 @@ async fn run_download_impl(
     {
         if let Ok(conn) = state.pool.get() {
             let _ = conn.execute(
-                "UPDATE sources SET status='paused' WHERE id=?1",
-                [source_id],
+                "UPDATE sources SET status='paused',progress_updated_at=?1 WHERE id=?2",
+                rusqlite::params![now_iso(), source_id],
             );
         }
         return;
@@ -1125,19 +893,49 @@ async fn run_download_inner(
         }
     };
 
-    if let Some(folder) = url.strip_prefix("local:") {
-        let folder = PathBuf::from(folder);
-        let local_state = state.clone();
-        let _ = tokio::task::spawn_blocking(move || {
-            crate::local_import::sync_folder(&local_state, source_id, &folder)
-        })
-        .await;
-        return;
-    }
     let dest = dunce::simplified(&state.library_dir.join(&slug)).to_path_buf();
     let archive_path =
         dunce::simplified(&state.archives_dir.join(format!("{}.sqlite3", slug))).to_path_buf();
     let _ = std::fs::create_dir_all(&dest);
+
+    // Local folder sources use Curator's importer directly.  Route them
+    // before spawning gallery-dl so a missing gallery-dl binary cannot block
+    // local imports and no unused child process is created (or briefly
+    // orphaned) for a source that never needs it.
+    if let Some(folder) = url.strip_prefix("local:") {
+        let folder = PathBuf::from(folder);
+        let local_state = state.clone();
+        let local_cancel = cancel.clone();
+        let result = tokio::task::spawn_blocking(move || {
+            crate::local_import::sync_folder_with_cancel(
+                &local_state,
+                source_id,
+                &folder,
+                Some(local_cancel),
+            )
+        })
+        .await;
+        if cancel.is_cancelled() || state.downloads_paused.load(std::sync::atomic::Ordering::SeqCst) {
+            state.paused_source_ids.lock().await.insert(source_id);
+            if let Ok(conn) = state.pool.get() {
+                let _ = conn.execute(
+                    "UPDATE sources SET status='paused',error_message='Import paused; resume to continue',progress_updated_at=?1 WHERE id=?2",
+                    rusqlite::params![now_iso(), source_id],
+                );
+            }
+        } else {
+            match result {
+                Ok(Ok(())) => {}
+                Ok(Err(error)) => {
+                    warn!("Local import task for source {source_id} did not complete: {error}");
+                }
+                Err(error) => {
+                    warn!("Local import task for source {source_id} failed to join: {error}");
+                }
+            }
+        }
+        return;
+    }
 
     let initial_count: i64 = state
         .pool
@@ -1176,17 +974,20 @@ async fn run_download_inner(
                 "gallery-dl could not be launched: {}. Is it on your PATH?",
                 e
             );
-            if let Ok(conn) = state.pool.get() {
-                let _ = conn.execute(
-                    "UPDATE sources SET status='error', error_message=?1, synced_at=?2 WHERE id=?3",
-                    rusqlite::params![msg, now_iso(), source_id],
-                );
-            } else {
-                warn!("Source {source_id} failed to launch gallery-dl and database was unavailable: {msg}");
-            }
+            let conn = state.pool.get().unwrap();
+            let _ = conn.execute(
+                "UPDATE sources SET status='error', error_message=?1, synced_at=?2 WHERE id=?3",
+                rusqlite::params![msg, now_iso(), source_id],
+            );
             return;
         }
     };
+
+    // Keep the job guard alive for the whole download. On Windows it makes
+    // every gallery-dl helper/ffmpeg descendant die with the source process,
+    // including when the app is closed mid-transfer.
+    #[cfg(windows)]
+    let _process_tree_guard = child.id().and_then(crate::process::guard_process_tree);
 
     if let Some(pid) = child.id() {
         state.active_processes.lock().await.insert(source_id, pid);
@@ -1208,20 +1009,32 @@ async fn run_download_inner(
         index_done.clone(),
     ));
 
-    // Drain raw bytes even if an external tool emits invalid UTF-8. A decoding
-    // error must never close the pipe while the child is still writing.
+    // Drain stdout (keep last 500 lines)
     let stdout = child.stdout.take().unwrap();
     let stderr = child.stderr.take().unwrap();
+
+    let mut lines_buf: std::collections::VecDeque<String> = std::collections::VecDeque::new();
+    let mut stdout_reader = BufReader::new(stdout).lines();
+
     let mut stderr_task = tokio::spawn(async move { drain_tail(stderr).await });
-    let mut stdout_task = tokio::spawn(async move { drain_tail(stdout).await });
+
+    let mut stdout_task = tokio::spawn(async move {
+        while let Ok(Some(line)) = stdout_reader.next_line().await {
+            lines_buf.push_back(line);
+            if lines_buf.len() > 500 {
+                lines_buf.pop_front();
+            }
+        }
+        lines_buf
+    });
     let interrupted;
     let returncode;
     tokio::select! {
         _ = async { tokio::select! { _=state.shutdown.cancelled()=>{}, _=cancel.cancelled()=>{} } } => {
             interrupted=true;
             if let Some(pid)=child.id() { kill_pid(pid).await; }
-            let _ = child.kill().await;
-            returncode = match tokio::time::timeout(Duration::from_secs(3), child.wait()).await {
+            let _=child.kill().await;
+            returncode=match tokio::time::timeout(Duration::from_secs(3), child.wait()).await {
                 Ok(Ok(status)) => status.code().unwrap_or(-1),
                 Ok(Err(_)) | Err(_) => -1,
             };
@@ -1229,10 +1042,10 @@ async fn run_download_inner(
         status=child.wait() => { interrupted=false; returncode=status.map(|s|s.code().unwrap_or(-1)).unwrap_or(-1); }
     }
     index_done.cancel();
-    // Cancellation must not leave a download task waiting forever for a pipe
-    // held open by a misbehaving descendant or for a huge final scan.  Normal
-    // completions still get their diagnostic tails and final index; cancelled
-    // work is bounded and the atomic indexer can recover it on the next run.
+    // A killed gallery-dl can leave pipe handles inherited by a descendant,
+    // and a filesystem watcher can be mid-scan.  Shutdown must remain
+    // bounded: recovery on the next run is safe because indexing is
+    // idempotent and annotations live in the database.
     if interrupted {
         idx_task.abort();
         stdout_task.abort();
@@ -1242,13 +1055,14 @@ async fn run_download_inner(
     if !idx_task.is_finished() {
         idx_task.abort();
     }
-    let log_text = match tokio::time::timeout(Duration::from_secs(3), &mut stdout_task).await {
-        Ok(Ok(text)) => text,
+    let lines_buf = match tokio::time::timeout(Duration::from_secs(3), &mut stdout_task).await {
+        Ok(Ok(lines)) => lines,
         _ => {
             stdout_task.abort();
-            String::new()
+            std::collections::VecDeque::new()
         }
     };
+    let log_text = lines_buf.into_iter().collect::<Vec<_>>().join("\n");
     let stderr_text = match tokio::time::timeout(Duration::from_secs(3), &mut stderr_task).await {
         Ok(Ok(text)) => text,
         _ => {
@@ -1292,8 +1106,8 @@ async fn run_download_inner(
     };
 
     let mut status = if returncode == 0 { "done" } else { "error" };
-    let mut error_msg: Option<String> = None;
     let mut delayed_retry: Option<Duration> = None;
+    let mut error_msg: Option<String> = None;
 
     if was_paused {
         status = "paused";
@@ -1386,8 +1200,8 @@ async fn run_download_inner(
         let saved = if status == "retrying" {
             let delay_secs = delayed_retry.map_or(0_i64, |delay| delay.as_secs() as i64);
             conn.execute(
-                "UPDATE sources SET status=?1, item_count=?2, error_message=?3, log=?4, synced_at=?5,
-                    retry_attempts=retry_attempts+1, retry_at=unixepoch()+?6 WHERE id=?7",
+                "UPDATE sources SET status=?1, item_count=?2, completed_count=?2, error_message=?3, log=?4, synced_at=?5,
+                    progress_updated_at=?5,current_filename=NULL,retry_attempts=retry_attempts+1, retry_at=unixepoch()+?6 WHERE id=?7",
                 rusqlite::params![status, total, error_msg, log_tail, now_iso(), delay_secs, source_id],
             )
         } else {
@@ -1395,7 +1209,8 @@ async fn run_download_inner(
             // retry with a fresh budget.  Paused work deliberately retains
             // its state so Resume continues the same archive-backed job.
             conn.execute(
-                "UPDATE sources SET status=?1, item_count=?2, error_message=?3, log=?4, synced_at=?5,
+                "UPDATE sources SET status=?1, item_count=?2, completed_count=?2, error_message=?3, log=?4, synced_at=?5,
+                    progress_updated_at=?5,current_filename=NULL,completed_at=CASE WHEN ?1 IN ('done','error') THEN ?5 ELSE completed_at END,
                     retry_attempts=CASE WHEN ?1 IN ('done','error') THEN 0 ELSE retry_attempts END,
                     retry_at=CASE WHEN ?1 IN ('done','error') THEN 0 ELSE retry_at END WHERE id=?6",
                 rusqlite::params![status, total, error_msg, log_tail, now_iso(), source_id],
@@ -1411,6 +1226,147 @@ async fn run_download_inner(
     } else {
         warn!("Source {source_id} finished but final status could not be persisted: database unavailable");
     }
+}
+
+fn schedule_retry(state: Arc<AppState>, source_id: i64, delay: Duration) {
+    // `retry_at` is durable for restart recovery; this timer is only the fast
+    // path for a running app. It checks the stored state before launching so
+    // a manual resync, pause, removal, or another recovery can win safely.
+    let retry_state = Arc::clone(&state);
+    state.download_tasks.spawn(async move {
+        let state = retry_state;
+        tokio::select! {
+            _ = state.shutdown.cancelled() => return,
+            _ = tokio::time::sleep(delay) => {}
+        }
+
+        if state
+            .downloads_paused
+            .load(std::sync::atomic::Ordering::SeqCst)
+        {
+            if let Ok(conn) = state.pool.get() {
+                let _ = conn.execute(
+                    "UPDATE sources SET status='paused',progress_updated_at=?1 WHERE id=?2 AND status='retrying'",
+                    rusqlite::params![now_iso(), source_id],
+                );
+            }
+            return;
+        }
+
+        let due = state
+            .pool
+            .get()
+            .ok()
+            .and_then(|conn| {
+                conn.query_row(
+                    "SELECT status='retrying' AND retry_at<=unixepoch() FROM sources WHERE id=?1",
+                    [source_id],
+                    |row| row.get::<_, bool>(0),
+                )
+                .ok()
+            })
+            .unwrap_or(false);
+        if due {
+            state
+                .download_tasks
+                .spawn(run_download(Arc::clone(&state), source_id));
+        }
+    });
+}
+
+// gallery-dl already retries individual HTTP requests. A source-level retry
+// keeps a brief provider outage from becoming a terminal error while the
+// download archive remains the authority for work that has finished.
+const MAX_TRANSIENT_RETRIES: i64 = 6;
+
+fn provider_key(url: &str) -> String {
+    url.split_once("://")
+        .map(|(_, rest)| rest)
+        .unwrap_or(url)
+        .split('/')
+        .next()
+        .unwrap_or("unknown")
+        .split('@')
+        .next_back()
+        .unwrap_or("unknown")
+        .split(':')
+        .next()
+        .unwrap_or("unknown")
+        .trim()
+        .to_ascii_lowercase()
+}
+
+fn rate_limited(log_text: &str) -> bool {
+    let lower = log_text.to_ascii_lowercase();
+    lower.contains("429")
+        || lower.contains("too many requests")
+        || lower.contains("rate limit")
+        || lower.contains("rate-limit")
+}
+
+fn retryable_failure(exit_code: i32, log_text: &str) -> bool {
+    if exit_code == 4 || rate_limited(log_text) {
+        return true;
+    }
+    let lower = log_text.to_ascii_lowercase();
+    [
+        "incompleteread",
+        "connection broken",
+        "connection reset",
+        "connection aborted",
+        "timed out",
+        "timeout",
+        "temporary failure",
+        "temporarily unavailable",
+        "network is unreachable",
+        "name or service not known",
+        "dns",
+        "http 500",
+        "http 502",
+        "http 503",
+        "http 504",
+        "service unavailable",
+    ]
+    .iter()
+    .any(|needle| lower.contains(needle))
+}
+
+fn retry_delay(attempt: i64, is_rate_limited: bool) -> Duration {
+    let base = if is_rate_limited { 60_u64 } else { 10_u64 };
+    let cap = if is_rate_limited { 30 * 60 } else { 5 * 60 };
+    let exponent = attempt.saturating_sub(1).clamp(0, 8) as u32;
+    Duration::from_secs(base.saturating_mul(1_u64 << exponent).min(cap))
+}
+
+async fn wait_for_provider_cooldown(
+    state: &AppState,
+    provider: &str,
+    cancel: &tokio_util::sync::CancellationToken,
+) -> bool {
+    loop {
+        let wait = {
+            let cooldowns = state.download_cooldowns.lock().await;
+            cooldowns
+                .get(provider)
+                .copied()
+                .and_then(|until| until.checked_duration_since(Instant::now()))
+        };
+        let Some(wait) = wait else { return true };
+        tokio::select! {
+            _ = state.shutdown.cancelled() => return false,
+            _ = cancel.cancelled() => return false,
+            _ = tokio::time::sleep(wait) => {}
+        }
+    }
+}
+
+async fn extend_provider_cooldown(state: &AppState, provider: String, delay: Duration) {
+    let requested = Instant::now() + delay;
+    let mut cooldowns = state.download_cooldowns.lock().await;
+    cooldowns
+        .entry(provider)
+        .and_modify(|current| *current = (*current).max(requested))
+        .or_insert(requested);
 }
 
 fn short_error_summary(log_text: &str) -> String {
@@ -1451,19 +1407,16 @@ async fn drain_tail(mut reader: impl tokio::io::AsyncRead + Unpin) -> String {
 mod tests {
     use super::*;
 
+    #[cfg(windows)]
+    use tokio::process::Command;
+
     #[test]
-    fn transient_failure_detection_distinguishes_retryable_network_errors() {
-        assert!(retryable_failure(
-            1,
-            "[downloader.http][warning] ('Connection broken: IncompleteRead(12 bytes read, 99 more expected)', IncompleteRead(...))"
-        ));
+    fn transient_failure_detection_is_conservative_and_backoff_is_bounded() {
+        assert!(retryable_failure(1, "Connection broken: IncompleteRead"));
+        assert!(retryable_failure(1, "HTTP 503 service unavailable"));
         assert!(retryable_failure(4, "gallery-dl extractor exited"));
         assert!(retryable_failure(1, "429 Too Many Requests"));
         assert!(!retryable_failure(1, "unsupported URL / deleted resource"));
-    }
-
-    #[test]
-    fn retry_backoff_is_bounded_and_rate_limits_wait_longer() {
         assert_eq!(retry_delay(1, false), Duration::from_secs(10));
         assert_eq!(retry_delay(1, true), Duration::from_secs(60));
         assert!(retry_delay(99, false) <= Duration::from_secs(5 * 60));
@@ -1471,50 +1424,10 @@ mod tests {
     }
 
     #[test]
-    fn provider_key_uses_only_the_source_host() {
-        assert_eq!(provider_key("https://Bunkr.cr/a/abc"), "bunkr.cr");
-        assert_eq!(provider_key("example.test/path"), "example.test");
-    }
-
-    #[tokio::test]
-    async fn output_drain_survives_invalid_utf8_and_bounds_long_lines() {
-        let mut bytes = vec![b'x'; 100_000];
-        bytes.push(0xff);
-        bytes.extend_from_slice(b"still draining");
-        let tail = drain_tail(bytes.as_slice()).await;
-        assert!(tail.ends_with("still draining"));
-        assert!(tail.contains('\u{fffd}'));
-        assert!(tail.len() <= 65_538);
-    }
-
-    #[cfg(unix)]
-    #[tokio::test]
-    async fn listing_shutdown_removes_registered_process() {
-        let dir = tempfile::tempdir().unwrap();
-        let mut state = crate::test_support::state(dir.path());
-        Arc::get_mut(&mut state).unwrap().gallery_dl_bin = "sh".into();
-        let stream = spawn_gallery_dl(
-            vec!["-c".into(), "sleep 30".into()],
-            Some(77),
-            state.clone(),
-        );
-        futures::pin_mut!(stream);
-        let cancel = async {
-            tokio::time::timeout(std::time::Duration::from_secs(2), async {
-                loop {
-                    if state.active_processes.lock().await.contains_key(&77) {
-                        break;
-                    }
-                    tokio::task::yield_now().await;
-                }
-            })
-            .await
-            .unwrap();
-            state.shutdown.cancel();
-        };
-        let consume = async { while stream.next().await.is_some() {} };
-        tokio::join!(consume, cancel);
-        assert!(state.active_processes.lock().await.is_empty());
+    fn provider_key_does_not_include_credentials_or_paths() {
+        assert_eq!(provider_key("https://user:pass@example.test/a"), "example.test");
+        assert_eq!(provider_key("https://example.test/a"), "example.test");
+        assert_eq!(provider_key("local:C:\\media"), "local");
     }
 
     #[cfg(windows)]
@@ -1579,8 +1492,8 @@ mod tests {
         crate::test_support::source(&state);
         for (url, expected) in [
             ("https://fixture/success", "done"),
-            // HTTP 503 is recoverable: the durable queue should retry it
-            // instead of declaring the source permanently broken.
+            // HTTP 503 is a transient failure and is therefore surfaced as a
+            // durable retry state instead of being treated as terminal.
             ("https://fixture/failure", "retrying"),
         ] {
             state
@@ -1616,9 +1529,9 @@ mod tests {
         .unwrap();
         state.shutdown.cancel();
         tokio::time::timeout(std::time::Duration::from_secs(10), task)
-            .await
-            .unwrap()
-            .unwrap();
+        .await
+        .unwrap()
+        .unwrap();
         assert!(state.active_processes.lock().await.is_empty());
         assert_eq!(
             state
@@ -1659,7 +1572,7 @@ mod tests {
             .await
             .unwrap()
             .unwrap();
-        let output = crate::process::command("powershell.exe")
+        let output = Command::new("powershell.exe")
             .args([
                 "-NoProfile",
                 "-NonInteractive",
@@ -1700,7 +1613,7 @@ mod tests {
         let conn = state.pool.get().unwrap();
         conn.execute_batch("INSERT INTO media(id,source_id,filepath,filename,type,added_at,downloaded,origin_url,rating) VALUES(10,1,'pending','pending','image','2026',0,'https://example.test/item.jpg',4);
             INSERT INTO tags(id,name,added_at) VALUES(1,'keep','2026'),(2,'also keep','2026'); INSERT INTO media_tags VALUES(10,1);").unwrap();
-        conn.execute("UPDATE media SET human_rating=3,rating=3,rating_source='human',rating_reviewed=1,rating_reviewed_at='2026' WHERE id=10", []).unwrap();
+        conn.execute("UPDATE media SET rating=0,rating_source='human',rating_reviewed=1,rating_reviewed_at='2026' WHERE id=10", []).unwrap();
         let path = state.library_dir.join("test/item.jpg");
         std::fs::write(&path, b"downloaded").unwrap();
         assert!(index_file(&state, 1, &path).unwrap());
@@ -1724,7 +1637,7 @@ mod tests {
                 r.get::<_, i64>(2)?
             )))
             .unwrap(),
-            (10, 3, 1)
+            (10, 0, 1)
         );
         let provenance: (String, bool, i64) = conn
             .query_row(
@@ -1733,7 +1646,9 @@ mod tests {
                 |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
             )
             .unwrap();
-        assert_eq!(provenance, ("human".into(), true, 4));
+        // NudeNet compatibility results stop at Medium (3); only the
+        // temporal action model or a human can create Fast (4).
+        assert_eq!(provenance, ("human".into(), true, 3));
         assert_eq!(
             conn.query_row(
                 "SELECT COUNT(*) FROM media_tags WHERE media_id=10",

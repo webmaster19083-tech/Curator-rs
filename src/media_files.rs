@@ -6,8 +6,13 @@ use std::path::Path;
 pub fn file_size(path: &Path) -> Option<i64> {
     path.metadata()
         .ok()
-        .filter(|m| m.is_file())
-        .and_then(|m| i64::try_from(m.len()).ok())
+        .filter(|metadata| metadata.is_file())
+        .and_then(|metadata| i64::try_from(metadata.len()).ok())
+}
+
+fn modified_at(path: &Path) -> Option<String> {
+    let modified = path.metadata().ok()?.modified().ok()?;
+    Some(chrono::DateTime::<chrono::Utc>::from(modified).to_rfc3339())
 }
 
 pub fn stamp(path: &Path) -> Option<String> {
@@ -18,40 +23,36 @@ pub fn stamp(path: &Path) -> Option<String> {
     Some(format!("{}:{:?}", m.len(), m.modified().ok()))
 }
 
-/// ISO-8601 filesystem modification time for sorting and display. Failure to
-/// read the timestamp is non-fatal; the previous value remains useful.
-pub fn modified_at(path: &Path) -> Option<String> {
-    let metadata = path.metadata().ok()?;
-    let modified = metadata.modified().ok()?;
-    Some(chrono::DateTime::<chrono::Utc>::from(modified).to_rfc3339())
-}
-
 pub fn mark_missing(conn: &Connection, id: i64) -> Result<()> {
     conn.execute("UPDATE media SET missing=1, downloaded=0, file_size_bytes=NULL, nsfw_state='missing' WHERE id=?1 AND downloaded=1", [id])?;
     Ok(())
 }
 
-#[cfg(test)]
+#[allow(dead_code)]
 pub fn reconcile(pool: &crate::db::DbPool, library: &Path) -> Result<usize> {
     reconcile_cancellable(pool, library, None)
 }
 
+/// Reconcile physical files without treating database-only virtual clips as
+/// missing.  A cancellation means the next startup resumes from the durable
+/// database state; it is never an error or a reason to erase annotations.
 pub fn reconcile_cancellable(
     pool: &crate::db::DbPool,
     library: &Path,
-    cancel: Option<&tokio_util::sync::CancellationToken>,
+    shutdown: Option<&tokio_util::sync::CancellationToken>,
 ) -> Result<usize> {
     let mut after = 0;
     let mut missing = 0;
     loop {
-        if cancel.is_some_and(|token| token.is_cancelled()) {
+        if shutdown.is_some_and(|token| token.is_cancelled()) {
             break;
         }
         let rows = {
             let conn = pool.get()?;
             let mut stmt = conn.prepare(
                 "SELECT id, filepath, file_stamp, missing FROM media
-                WHERE id>?1 AND clip_start_secs IS NULL AND (downloaded=1 OR missing=1) ORDER BY id LIMIT 256",
+                WHERE id>?1 AND clip_start_secs IS NULL
+                  AND (downloaded=1 OR missing=1) ORDER BY id LIMIT 256",
             )?;
             let rows = stmt
                 .query_map([after], |r| {
@@ -75,13 +76,17 @@ pub fn reconcile_cancellable(
             let path = library.join(filepath);
             if let Some(current) = stamp(&path) {
                 tx.execute(
-                    "UPDATE media SET file_size_bytes=?1 WHERE id=?2 AND file_size_bytes IS NOT ?1",
+                    "UPDATE media SET file_size_bytes=?1
+                     WHERE id=?2 AND file_size_bytes IS NOT ?1",
                     params![file_size(&path), id],
                 )?;
                 if old_stamp.as_ref() != Some(&current) || was_missing {
                     tx.execute("UPDATE media SET downloaded=1, missing=0, file_stamp=?1,
                         modified_at=COALESCE(?2,modified_at),downloaded_at=COALESCE(downloaded_at,?3),
                         nsfw_state='pending', nsfw_attempts=0, nsfw_retry_at=0, duration_attempted=0,
+                        action_rating=0,action_model=NULL,action_model_version=NULL,action_score=NULL,action_evidence=NULL,
+                        classifier_model=NULL,classifier_version=NULL,classifier_score=NULL,classifier_evidence=NULL,
+                        classification_label='unclassified',manual_review_required=0,manual_review_reason=NULL,
                         duration_secs=CASE WHEN file_stamp IS NULL THEN duration_secs ELSE NULL END WHERE id=?4",
                         params![current,modified_at(&path),crate::db::now_iso(),id])?;
                 }
@@ -100,7 +105,22 @@ pub fn reconcile_cancellable(
         tx.commit()?;
     }
     let conn = pool.get()?;
-    conn.execute("UPDATE media AS clip SET downloaded=CASE WHEN EXISTS(SELECT 1 FROM media parent WHERE parent.id=clip.clip_parent_id AND parent.downloaded=1 AND parent.missing=0) THEN 1 ELSE 0 END, missing=CASE WHEN EXISTS(SELECT 1 FROM media parent WHERE parent.id=clip.clip_parent_id AND parent.downloaded=1 AND parent.missing=0) THEN 0 ELSE 1 END WHERE clip.clip_start_secs IS NOT NULL", [])?;
+    // Virtual clips are playable ranges in their parent's file.  Their
+    // availability is derived from that parent rather than from a synthetic
+    // filepath that reconciliation would otherwise (correctly) not find.
+    conn.execute(
+        "UPDATE media AS clip
+         SET downloaded=CASE WHEN EXISTS(
+               SELECT 1 FROM media parent
+               WHERE parent.id=clip.clip_parent_id AND parent.downloaded=1 AND parent.missing=0
+             ) THEN 1 ELSE 0 END,
+             missing=CASE WHEN EXISTS(
+               SELECT 1 FROM media parent
+               WHERE parent.id=clip.clip_parent_id AND parent.downloaded=1 AND parent.missing=0
+             ) THEN 0 ELSE 1 END
+         WHERE clip.clip_start_secs IS NOT NULL",
+        [],
+    )?;
     conn.execute("UPDATE sources SET item_count=(SELECT COUNT(*) FROM media WHERE source_id=sources.id AND downloaded=1)", [])?;
     Ok(missing)
 }

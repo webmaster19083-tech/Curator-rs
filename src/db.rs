@@ -31,16 +31,16 @@ fn default_theme() -> String {
 fn default_export_reminder_days() -> u32 {
     30
 }
-fn default_goon_default_interval() -> f64 {
+fn default_ch_default_interval() -> f64 {
     5.0
 }
-fn default_goon_default_limit() -> u32 {
+fn default_ch_default_limit() -> u32 {
     200
 }
-fn default_goon_default_shuffle() -> bool {
+fn default_ch_default_shuffle() -> bool {
     true
 }
-fn default_goon_default_media_type() -> String {
+fn default_ch_default_media_type() -> String {
     "image".into()
 }
 fn default_max_clip_length_secs() -> u32 {
@@ -52,9 +52,54 @@ fn default_last_play_mode() -> String {
 fn default_keep_running_in_tray() -> bool {
     true
 }
+fn default_library_layout() -> String {
+    "grid".into()
+}
+fn default_search_providers() -> Vec<String> {
+    // Search is intentionally opt-in per provider.  "local" does not make
+    // a network request; the other five are the useful discovery defaults.
+    vec![
+        "local".into(),
+        "balbums".into(),
+        "kemono".into(),
+        "erome".into(),
+        "redgifs".into(),
+        "deviantart".into(),
+    ]
+}
+fn default_goon_persona() -> String {
+    "neutral".into()
+}
+fn default_tts_rate() -> f64 {
+    1.0
+}
+fn default_tts_pitch() -> f64 {
+    1.0
+}
+fn default_tts_volume() -> f64 {
+    1.0
+}
+fn default_metronome_volume() -> f64 {
+    0.55
+}
+fn default_soundtrack_provider() -> String {
+    "local".into()
+}
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Settings {
+    #[serde(default = "default_max_clip_length_secs")]
+    pub max_clip_length_secs: u32,
+    #[serde(default = "default_ch_default_limit")]
+    pub goon_default_limit: u32,
+    #[serde(default)]
+    pub goon_log_sessions: bool,
+    #[serde(default)]
+    pub start_with_windows: bool,
+    #[serde(default = "default_keep_running_in_tray")]
+    pub keep_running_in_tray: bool,
+    #[serde(default = "default_last_play_mode")]
+    pub last_play_mode: String,
     #[serde(default = "default_max_concurrent")]
     pub max_concurrent: u32,
 
@@ -76,50 +121,21 @@ pub struct Settings {
     pub last_export_at: Option<String>,
     pub export_reminder_snoozed_until: Option<String>,
 
-    // Curator-native interactive-session defaults. `alias` keeps existing
-    // settings files readable while new writes shed the legacy feature name.
-    #[serde(default, alias = "ch_log_sessions")]
-    pub goon_log_sessions: bool,
-
-    #[serde(
-        default = "default_goon_default_interval",
-        alias = "ch_default_interval"
-    )]
-    pub goon_default_interval: f64,
-
-    #[serde(default = "default_goon_default_limit", alias = "ch_default_limit")]
-    pub goon_default_limit: u32,
-
-    #[serde(default = "default_goon_default_shuffle", alias = "ch_default_shuffle")]
-    pub goon_default_shuffle: bool,
-
-    #[serde(
-        default = "default_goon_default_media_type",
-        alias = "ch_default_media_type"
-    )]
-    pub goon_default_media_type: String,
-
-    /// A video at or below this duration is classified as a short clip in
-    /// views and short-form workflows. The source file itself is never
-    /// changed when this value moves.
-    #[serde(default = "default_max_clip_length_secs")]
-    pub max_clip_length_secs: u32,
-
-    /// The primary Play button reopens the last mode the person used. Keep
-    /// this in the same durable settings document as the other play defaults
-    /// so it survives both desktop and headless restarts.
-    #[serde(default = "default_last_play_mode")]
-    pub last_play_mode: String,
-
-    /// Per-user Windows Run registration. The actual registry write happens
-    /// through the shared Settings/OOBE path, not in the frontend.
+    // Tier 3 — Cock Hero settings
     #[serde(default)]
-    pub start_with_windows: bool,
+    pub ch_log_sessions: bool,
 
-    /// Closing the main window normally hides it and leaves the background
-    /// server, downloads, and tray controls alive.
-    #[serde(default = "default_keep_running_in_tray")]
-    pub keep_running_in_tray: bool,
+    #[serde(default = "default_ch_default_interval")]
+    pub ch_default_interval: f64,
+
+    #[serde(default = "default_ch_default_limit")]
+    pub ch_default_limit: u32,
+
+    #[serde(default = "default_ch_default_shuffle")]
+    pub ch_default_shuffle: bool,
+
+    #[serde(default = "default_ch_default_media_type")]
+    pub ch_default_media_type: String,
 
     // NSFW auto-rating (opt-in, requires the Python worker's dependencies
     // to be installed — see nsfw_worker.py). Enabling/disabling takes effect
@@ -128,6 +144,35 @@ pub struct Settings {
     // automation changes the effective rating only until a human reviews it.
     #[serde(default)]
     pub nsfw_filter_enabled: bool,
+
+    /// Library presentation is a preference, not a capability.  Grid is the
+    /// default while Table remains useful for large collections and keyboard
+    /// selection.
+    #[serde(default = "default_library_layout")]
+    pub library_layout: String,
+
+    /// Explicit discovery providers.  An empty list means "local only";
+    /// Curator never silently fans out to every extractor installed by
+    /// gallery-dl.
+    #[serde(default = "default_search_providers")]
+    pub search_providers: Vec<String>,
+
+    #[serde(default)]
+    pub metronome_enabled: bool,
+    #[serde(default = "default_metronome_volume")]
+    pub metronome_volume: f64,
+    #[serde(default = "default_goon_persona")]
+    pub goon_persona: String,
+    #[serde(default)]
+    pub tts_voice: Option<String>,
+    #[serde(default = "default_tts_rate")]
+    pub tts_rate: f64,
+    #[serde(default = "default_tts_pitch")]
+    pub tts_pitch: f64,
+    #[serde(default = "default_tts_volume")]
+    pub tts_volume: f64,
+    #[serde(default = "default_soundtrack_provider")]
+    pub soundtrack_provider: String,
 
     // First-run OOBE (out-of-box setup wizard — see oobe.rs). `false` here
     // means "show the wizard instead of the normal UI". This field alone is
@@ -141,6 +186,12 @@ pub struct Settings {
 impl Default for Settings {
     fn default() -> Self {
         Self {
+            max_clip_length_secs: default_max_clip_length_secs(),
+            goon_default_limit: default_ch_default_limit(),
+            goon_log_sessions: false,
+            start_with_windows: false,
+            keep_running_in_tray: default_keep_running_in_tray(),
+            last_play_mode: default_last_play_mode(),
             max_concurrent: default_max_concurrent(),
             default_slideshow_speed: default_slideshow_speed(),
             default_slideshow_loop: default_slideshow_loop(),
@@ -149,16 +200,22 @@ impl Default for Settings {
             export_reminder_days: default_export_reminder_days(),
             last_export_at: None,
             export_reminder_snoozed_until: None,
-            goon_log_sessions: false,
-            goon_default_interval: default_goon_default_interval(),
-            goon_default_limit: default_goon_default_limit(),
-            goon_default_shuffle: default_goon_default_shuffle(),
-            goon_default_media_type: default_goon_default_media_type(),
-            max_clip_length_secs: default_max_clip_length_secs(),
-            last_play_mode: default_last_play_mode(),
-            start_with_windows: false,
-            keep_running_in_tray: default_keep_running_in_tray(),
+            ch_log_sessions: false,
+            ch_default_interval: default_ch_default_interval(),
+            ch_default_limit: default_ch_default_limit(),
+            ch_default_shuffle: default_ch_default_shuffle(),
+            ch_default_media_type: default_ch_default_media_type(),
             nsfw_filter_enabled: false,
+            library_layout: default_library_layout(),
+            search_providers: default_search_providers(),
+            metronome_enabled: false,
+            metronome_volume: default_metronome_volume(),
+            goon_persona: default_goon_persona(),
+            tts_voice: None,
+            tts_rate: default_tts_rate(),
+            tts_pitch: default_tts_pitch(),
+            tts_volume: default_tts_volume(),
+            soundtrack_provider: default_soundtrack_provider(),
             // A brand new Settings::default() (no settings.json on disk at
             // all) means a genuinely fresh install — OOBE should run. See
             // load_settings for how an *existing* settings.json that
@@ -282,6 +339,23 @@ pub fn run_migrations(conn: &Connection) -> Result<()> {
     if !src_cols.contains("retry_at") {
         conn.execute_batch("ALTER TABLE sources ADD COLUMN retry_at INTEGER NOT NULL DEFAULT 0;")?;
     }
+    // Source-level activity survives process restarts.  `known_total` stays
+    // NULL until gallery-dl's placeholder listing can establish a count; a
+    // NULL is intentionally displayed as indeterminate rather than a made-up
+    // percentage.
+    for (name, definition) in [
+        ("known_total", "INTEGER CHECK(known_total >= 0)"),
+        ("completed_count", "INTEGER NOT NULL DEFAULT 0"),
+        ("current_filename", "TEXT"),
+        ("queued_at", "TEXT"),
+        ("started_at", "TEXT"),
+        ("completed_at", "TEXT"),
+        ("progress_updated_at", "TEXT"),
+    ] {
+        if !src_cols.contains(name) {
+            conn.execute_batch(&format!("ALTER TABLE sources ADD COLUMN {name} {definition};"))?;
+        }
+    }
 
     // ── media ─────────────────────────────────────────────────────────────────
     conn.execute_batch(
@@ -316,17 +390,12 @@ pub fn run_migrations(conn: &Connection) -> Result<()> {
     }
 
     for (name, definition) in [
-        ("file_size_bytes", "INTEGER CHECK(file_size_bytes >= 0)"),
-        ("clip_start_secs", "REAL CHECK(clip_start_secs >= 0)"),
-        (
-            "clip_end_secs",
-            "REAL CHECK(clip_end_secs > clip_start_secs)",
-        ),
         ("missing", "INTEGER NOT NULL DEFAULT 0"),
         ("file_stamp", "TEXT"),
-        // Timestamps are retained independently: importing/reindexing a
-        // file must not rewrite its original download date just because its
-        // metadata was refreshed.
+        // Keep the filesystem facts independently from the ingest state.  In
+        // particular, these fields let Activity distinguish a listed
+        // placeholder from a completed, indexed file after a restart.
+        ("file_size_bytes", "INTEGER CHECK(file_size_bytes >= 0)"),
         ("downloaded_at", "TEXT"),
         ("modified_at", "TEXT"),
         ("nsfw_state", "TEXT NOT NULL DEFAULT 'pending'"),
@@ -337,17 +406,32 @@ pub fn run_migrations(conn: &Connection) -> Result<()> {
             "clip_parent_id",
             "INTEGER REFERENCES media(id) ON DELETE SET NULL",
         ),
+        ("clip_start_secs", "REAL CHECK(clip_start_secs >= 0)"),
+        ("clip_end_secs", "REAL CHECK(clip_end_secs > clip_start_secs)"),
         ("auto_rating", "INTEGER NOT NULL DEFAULT 0"),
         ("auto_rating_score", "REAL"),
-        // NULL means that no human has reviewed this item. Zero clears a
-        // prior human decision, so persisted human ratings are 1..5 only.
-        (
-            "human_rating",
-            "INTEGER CHECK(human_rating BETWEEN 1 AND 5)",
-        ),
+        ("human_rating", "INTEGER CHECK(human_rating BETWEEN 1 AND 5)"),
         ("rating_source", "TEXT NOT NULL DEFAULT 'none'"),
         ("rating_reviewed", "INTEGER NOT NULL DEFAULT 0"),
         ("rating_reviewed_at", "TEXT"),
+        // NudeNet provenance is kept separately from the compatibility
+        // `auto_rating_score` field so a reviewer can see exactly which model
+        // and anatomical evidence produced a 1-3 suggestion.
+        ("classifier_model", "TEXT"),
+        ("classifier_version", "TEXT"),
+        ("classifier_score", "REAL"),
+        ("classifier_evidence", "TEXT"),
+        // P-HAR is a separate, optional temporal model.  It can suggest
+        // Fast (4) only; Cum is never inferred automatically.
+        ("action_model", "TEXT"),
+        ("action_model_version", "TEXT"),
+        ("action_score", "REAL"),
+        ("action_evidence", "TEXT"),
+        ("action_rating", "INTEGER NOT NULL DEFAULT 0 CHECK(action_rating BETWEEN 0 AND 4)"),
+        ("classification_label", "TEXT NOT NULL DEFAULT 'unclassified'"),
+        ("manual_review_required", "INTEGER NOT NULL DEFAULT 0"),
+        ("manual_review_reason", "TEXT"),
+        ("classification_updated_at", "TEXT"),
     ] {
         if !media_cols.contains(name) {
             conn.execute_batch(&format!(
@@ -355,18 +439,6 @@ pub fn run_migrations(conn: &Connection) -> Result<()> {
             ))?;
         }
     }
-    conn.execute_batch(
-        "CREATE INDEX IF NOT EXISTS idx_groups_parent ON groups(parent_id);
-        CREATE INDEX IF NOT EXISTS idx_sources_group ON sources(group_id);
-        CREATE INDEX IF NOT EXISTS idx_sources_retry ON sources(retry_at, retry_attempts);
-        CREATE INDEX IF NOT EXISTS idx_media_size ON media(file_size_bytes);",
-    )?;
-    // Backfill upgraded databases with a stable approximation. New imports
-    // use the actual completed-download and filesystem-modified timestamps.
-    conn.execute_batch(
-        "UPDATE media SET downloaded_at=COALESCE(downloaded_at,added_at) WHERE downloaded=1;
-         UPDATE media SET modified_at=COALESCE(modified_at,added_at);",
-    )?;
     conn.execute_batch("CREATE TABLE IF NOT EXISTS clip_jobs (
         id INTEGER PRIMARY KEY AUTOINCREMENT, media_id INTEGER NOT NULL REFERENCES media(id) ON DELETE CASCADE,
         seconds INTEGER NOT NULL, status TEXT NOT NULL, clip_count INTEGER NOT NULL DEFAULT 0,
@@ -375,9 +447,6 @@ pub fn run_migrations(conn: &Connection) -> Result<()> {
     conn.execute_batch(
         "CREATE INDEX IF NOT EXISTS idx_media_review ON media(rating_reviewed, auto_rating, id);",
     )?;
-    if !column_names(conn, "clip_jobs").contains("virtual") {
-        conn.execute_batch("ALTER TABLE clip_jobs ADD COLUMN virtual INTEGER NOT NULL DEFAULT 0;")?;
-    }
     conn.execute_batch("CREATE TABLE IF NOT EXISTS placeholder_scans (
         source_id INTEGER PRIMARY KEY REFERENCES sources(id) ON DELETE CASCADE,
         url TEXT NOT NULL, retry_at INTEGER NOT NULL);
@@ -385,6 +454,8 @@ pub fn run_migrations(conn: &Connection) -> Result<()> {
         CREATE INDEX IF NOT EXISTS idx_media_probe ON media(duration_attempted, downloaded, type, id);
         CREATE INDEX IF NOT EXISTS idx_media_filename ON media(filename COLLATE NOCASE, id);
         CREATE INDEX IF NOT EXISTS idx_media_rating_id ON media(rating DESC, id ASC);
+        CREATE INDEX IF NOT EXISTS idx_media_manual_review ON media(manual_review_required, rating_reviewed, id);
+        CREATE INDEX IF NOT EXISTS idx_sources_activity ON sources(status, queued_at, retry_at, id);
         CREATE TRIGGER IF NOT EXISTS media_count_insert AFTER INSERT ON media WHEN NEW.downloaded=1 BEGIN
           UPDATE sources SET item_count=item_count+1 WHERE id=NEW.source_id;
         END;
@@ -410,13 +481,23 @@ pub fn run_migrations(conn: &Connection) -> Result<()> {
             tag_id   INTEGER NOT NULL REFERENCES tags(id) ON DELETE CASCADE,
             PRIMARY KEY (media_id, tag_id)
         );
+        -- A tag can be supplied by an import, an adapter, or a person.  Keep
+        -- that provenance without changing the compact media_tags junction
+        -- used by filtering queries.
+        CREATE TABLE IF NOT EXISTS media_tag_provenance (
+            media_id   INTEGER NOT NULL REFERENCES media(id) ON DELETE CASCADE,
+            tag_id     INTEGER NOT NULL REFERENCES tags(id) ON DELETE CASCADE,
+            provenance TEXT NOT NULL DEFAULT 'legacy',
+            added_at   TEXT NOT NULL,
+            PRIMARY KEY (media_id, tag_id)
+        );
         CREATE TABLE IF NOT EXISTS group_tags (
             group_id INTEGER NOT NULL REFERENCES groups(id) ON DELETE CASCADE,
             tag_id   INTEGER NOT NULL REFERENCES tags(id) ON DELETE CASCADE,
             PRIMARY KEY (group_id, tag_id)
         );
-        -- A source may still have a default group, while individual media can
-        -- belong to additional organization groups without moving files.
+        -- A source's group is its default home. Individual media may also
+        -- appear in other collections without moving the file or source.
         CREATE TABLE IF NOT EXISTS media_groups (
             media_id INTEGER NOT NULL REFERENCES media(id) ON DELETE CASCADE,
             group_id INTEGER NOT NULL REFERENCES groups(id) ON DELETE CASCADE,
@@ -427,16 +508,16 @@ pub fn run_migrations(conn: &Connection) -> Result<()> {
     ",
     )?;
 
-    // Raw metadata is intentionally separate from the curated tag relation:
-    // source metadata is evidence, not a user-visible decision. The review
-    // table lets an installation retain it even when a tag is skipped.
+    // Extractor sidecars are evidence rather than automatic user-visible
+    // tags. Keep their original shape so people can review or correct an
+    // adapter's metadata without losing it on a later refresh.
     conn.execute_batch(
         "
         CREATE TABLE IF NOT EXISTS source_metadata (
             id          INTEGER PRIMARY KEY AUTOINCREMENT,
             media_id    INTEGER NOT NULL REFERENCES media(id) ON DELETE CASCADE,
             provider    TEXT NOT NULL DEFAULT '',
-            source_url  TEXT,
+            source_url  TEXT NOT NULL DEFAULT '',
             raw_json    TEXT NOT NULL,
             creator     TEXT,
             title       TEXT,
@@ -456,19 +537,8 @@ pub fn run_migrations(conn: &Connection) -> Result<()> {
             added_at            TEXT NOT NULL,
             UNIQUE(media_id, provider, raw_name)
         );
-        CREATE TABLE IF NOT EXISTS media_tag_provenance (
-            id            INTEGER PRIMARY KEY AUTOINCREMENT,
-            media_id      INTEGER NOT NULL REFERENCES media(id) ON DELETE CASCADE,
-            tag_id        INTEGER NOT NULL REFERENCES tags(id) ON DELETE CASCADE,
-            source_tag_id INTEGER REFERENCES source_tags(id) ON DELETE SET NULL,
-            provenance    TEXT NOT NULL CHECK(provenance IN ('human','human_edited','source_approved','automatic','legacy')),
-            added_at      TEXT NOT NULL,
-            UNIQUE(media_id, tag_id, provenance, source_tag_id)
-        );
         CREATE TABLE IF NOT EXISTS source_tag_rules (
             id              INTEGER PRIMARY KEY AUTOINCREMENT,
-            -- Empty string is the global scope. Avoid NULL here because
-            -- SQLite considers NULL values distinct in a UNIQUE constraint.
             provider        TEXT NOT NULL DEFAULT '',
             raw_name        TEXT NOT NULL COLLATE NOCASE,
             action          TEXT NOT NULL CHECK(action IN ('add','normalize','skip')),
@@ -485,26 +555,69 @@ pub fn run_migrations(conn: &Connection) -> Result<()> {
         ",
     )?;
 
-    // `last_used_at` is only a presentation aid for quick tag buttons. It is
-    // nullable for existing tags, which preserves their original timestamps.
-    let tag_cols: HashSet<String> = column_names(conn, "tags");
-    if !tag_cols.contains("last_used_at") {
-        conn.execute_batch("ALTER TABLE tags ADD COLUMN last_used_at TEXT;")?;
-    }
-
-    // ── Curator interactive-session log (opt-in) ─────────────────────────────
+    // ── Cock Hero session log (Tier 3, opt-in) ────────────────────────────────
     conn.execute_batch(
         "
-        CREATE TABLE IF NOT EXISTS interactive_sessions (
+        CREATE TABLE IF NOT EXISTS ch_sessions (
             id          INTEGER PRIMARY KEY AUTOINCREMENT,
             started_at  TEXT NOT NULL,
             duration_s  INTEGER NOT NULL,
             item_count  INTEGER NOT NULL,
-            plan        TEXT,
-            events      TEXT,
-            ended_state TEXT NOT NULL DEFAULT 'completed'
+            filters     TEXT,
+            notes       TEXT
         );
     ",
+    )?;
+    // This is the durable cross-mode session log.  It predates the GOON
+    // additions below, so create the base table before probing/adding its
+    // optional columns on both fresh and upgraded databases.
+    conn.execute_batch(
+        "CREATE TABLE IF NOT EXISTS interactive_sessions (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            started_at TEXT NOT NULL,
+            duration_s INTEGER NOT NULL,
+            item_count INTEGER NOT NULL,
+            plan TEXT,
+            events TEXT,
+            ended_state TEXT NOT NULL DEFAULT 'completed'
+        );",
+    )?;
+    let session_cols: HashSet<String> = column_names(conn, "interactive_sessions");
+    for (name, definition) in [
+        ("soundtrack_provider", "TEXT"),
+        ("bpm", "REAL"),
+        ("beat_offset_secs", "REAL"),
+        ("timing_corrections", "TEXT"),
+        ("rating_phases", "TEXT"),
+    ] {
+        if !session_cols.contains(name) {
+            conn.execute_batch(&format!("ALTER TABLE interactive_sessions ADD COLUMN {name} {definition};"))?;
+        }
+    }
+    conn.execute_batch(
+        "CREATE TABLE IF NOT EXISTS goon_playlists (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            name TEXT NOT NULL,
+            provider TEXT NOT NULL,
+            source_url TEXT,
+            tracks TEXT NOT NULL DEFAULT '[]',
+            added_at TEXT NOT NULL,
+            updated_at TEXT NOT NULL
+         );
+         CREATE TABLE IF NOT EXISTS beat_maps (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            playlist_id INTEGER REFERENCES goon_playlists(id) ON DELETE CASCADE,
+            track_key TEXT NOT NULL,
+            bpm REAL NOT NULL,
+            beat_offset_secs REAL NOT NULL DEFAULT 0,
+            confidence REAL NOT NULL DEFAULT 0,
+            markers TEXT NOT NULL DEFAULT '[]',
+            confirmed INTEGER NOT NULL DEFAULT 0,
+            added_at TEXT NOT NULL,
+            updated_at TEXT NOT NULL,
+            UNIQUE(playlist_id,track_key)
+         );
+         CREATE INDEX IF NOT EXISTS idx_beat_maps_track ON beat_maps(track_key);",
     )?;
 
     // ── Indexes ───────────────────────────────────────────────────────────────
@@ -512,11 +625,8 @@ pub fn run_migrations(conn: &Connection) -> Result<()> {
         "
         CREATE INDEX IF NOT EXISTS idx_media_source    ON media(source_id);
         CREATE INDEX IF NOT EXISTS idx_media_rating    ON media(rating);
-        CREATE INDEX IF NOT EXISTS idx_media_effective_rating ON media(human_rating, auto_rating, id);
         CREATE INDEX IF NOT EXISTS idx_media_added_at  ON media(added_at);
         CREATE INDEX IF NOT EXISTS idx_media_duration  ON media(duration_secs);
-        CREATE INDEX IF NOT EXISTS idx_media_downloaded_at ON media(downloaded_at);
-        CREATE INDEX IF NOT EXISTS idx_media_modified_at ON media(modified_at);
         CREATE UNIQUE INDEX IF NOT EXISTS idx_media_source_origin
             ON media(source_id, origin_url) WHERE origin_url IS NOT NULL;
         CREATE INDEX IF NOT EXISTS idx_groups_parent   ON groups(parent_id);
@@ -543,15 +653,34 @@ pub fn run_migrations(conn: &Connection) -> Result<()> {
         repair_slug_names(c)
     })?;
 
-    // One-time policy change: all pre-review-era effective ratings are
-    // automated recommendations. Later explicit reviews remain protected.
+    // One-time policy change: legacy effective ratings become provisional
+    // automatic recommendations, but an install that already recorded an
+    // explicit human review must keep that decision.  Older builds used the
+    // overloaded `rating` column together with either `rating_reviewed` or a
+    // human `rating_source`; preserve both signals until migration 0003 can
+    // copy the value into `human_rating`.
     run_migration_once(conn, "0002_existing_ratings_are_automated", |c| {
         c.execute_batch(
             "UPDATE media SET
-            auto_rating_score=CASE WHEN rating=0 OR rating=auto_rating THEN auto_rating_score ELSE NULL END,
-            auto_rating=CASE WHEN rating>0 THEN rating ELSE auto_rating END,
-            rating_source=CASE WHEN rating>0 OR auto_rating>0 THEN 'auto' ELSE 'none' END,
-            rating_reviewed=0, rating_reviewed_at=NULL;",
+            auto_rating=CASE
+                WHEN rating_reviewed=1 OR rating_source IN ('human','human_edited','manual')
+                    THEN auto_rating
+                WHEN rating>0 THEN rating
+                ELSE auto_rating
+            END,
+            rating_source=CASE
+                WHEN rating_reviewed=1 OR rating_source IN ('human','human_edited','manual') THEN 'human'
+                WHEN rating>0 OR auto_rating>0 THEN 'auto'
+                ELSE 'none'
+            END,
+            rating_reviewed=CASE
+                WHEN rating_reviewed=1 OR rating_source IN ('human','human_edited','manual') THEN 1
+                ELSE 0
+            END,
+            rating_reviewed_at=CASE
+                WHEN rating_reviewed=1 OR rating_source IN ('human','human_edited','manual') THEN rating_reviewed_at
+                ELSE NULL
+            END;",
         )?;
         Ok(())
     })?;
@@ -601,6 +730,43 @@ pub fn run_migrations(conn: &Connection) -> Result<()> {
                  SELECT id,started_at,duration_s,item_count,filters,notes,'completed' FROM ch_sessions;",
             )?;
         }
+        Ok(())
+    })?;
+
+    // The old five-star scale used 1 for merely-safe media.  In the current
+    // policy 1 is deliberately SFW and excluded from sexual playback, so
+    // promote every existing non-5 decision before any new classifier result
+    // is allowed to replace it.  Human values remain human values; automatic
+    // values are retained as a provisional fallback and requeued even when a
+    // human override sits above them.
+    run_migration_once(conn, "0005_media_scale_and_classifier_provenance", |c| {
+        c.execute_batch(
+            "UPDATE media
+                SET human_rating=CASE WHEN human_rating BETWEEN 1 AND 4 THEN human_rating+1 ELSE human_rating END,
+                    auto_rating=CASE WHEN auto_rating BETWEEN 1 AND 4 THEN auto_rating+1 ELSE auto_rating END;
+              UPDATE media
+                SET rating=CASE
+                    WHEN human_rating BETWEEN 1 AND 5 THEN human_rating
+                    WHEN auto_rating BETWEEN 1 AND 5 THEN auto_rating
+                    WHEN rating BETWEEN 1 AND 4 THEN rating+1
+                    ELSE rating
+                END,
+                rating_source=CASE
+                    WHEN human_rating BETWEEN 1 AND 5 THEN 'human'
+                    WHEN auto_rating BETWEEN 1 AND 5 THEN 'auto'
+                    ELSE 'none'
+                END,
+                rating_reviewed=CASE WHEN human_rating BETWEEN 1 AND 5 THEN 1 ELSE 0 END;
+              UPDATE media
+                SET nsfw_state='pending', nsfw_attempts=0, nsfw_retry_at=0,
+                    classifier_model=NULL, classifier_version=NULL, classifier_score=NULL,
+                    classifier_evidence=NULL, action_model=NULL, action_model_version=NULL,
+                    action_score=NULL, action_evidence=NULL, action_rating=0,
+                    classification_label='legacy_pending', manual_review_required=0,
+                    manual_review_reason=NULL
+                WHERE downloaded=1 AND missing=0
+                  AND (auto_rating BETWEEN 1 AND 5 OR rating_source='auto');",
+        )?;
         Ok(())
     })?;
 
@@ -787,27 +953,27 @@ pub fn now_iso() -> String {
 // ─── Group tag cache helpers ──────────────────────────────────────────────────
 
 /// group_id → [itself, parent, grandparent, ...] up to root
-pub fn build_group_ancestry_map(conn: &Connection) -> rusqlite::Result<HashMap<i64, Vec<i64>>> {
+pub fn build_group_ancestry_map(conn: &Connection) -> HashMap<i64, Vec<i64>> {
     struct G {
         id: i64,
         parent_id: Option<i64>,
     }
     let rows: Vec<G> = {
-        let mut stmt = conn.prepare("SELECT id, parent_id FROM groups")?;
-        let rows = stmt
-            .query_map([], |r| {
-                Ok(G {
-                    id: r.get(0)?,
-                    parent_id: r.get(1)?,
-                })
-            })?
-            .collect::<rusqlite::Result<Vec<_>>>()?;
-        rows
+        let mut stmt = conn.prepare("SELECT id, parent_id FROM groups").unwrap();
+        stmt.query_map([], |r| {
+            Ok(G {
+                id: r.get(0)?,
+                parent_id: r.get(1)?,
+            })
+        })
+        .unwrap()
+        .filter_map(|r| r.ok())
+        .collect()
     };
 
     let parents: HashMap<i64, Option<i64>> = rows.iter().map(|g| (g.id, g.parent_id)).collect();
 
-    Ok(parents
+    parents
         .keys()
         .map(|&gid| {
             let mut chain = vec![gid];
@@ -823,39 +989,38 @@ pub fn build_group_ancestry_map(conn: &Connection) -> rusqlite::Result<HashMap<i
             }
             (gid, chain)
         })
-        .collect())
+        .collect()
 }
 
 /// group_id → set of tag names (group's own name + explicit tags + all ancestors' names+tags)
-pub fn build_group_effective_tags_map(
-    conn: &Connection,
-) -> rusqlite::Result<HashMap<i64, HashSet<String>>> {
-    let ancestry = build_group_ancestry_map(conn)?;
+pub fn build_group_effective_tags_map(conn: &Connection) -> HashMap<i64, HashSet<String>> {
+    let ancestry = build_group_ancestry_map(conn);
 
     let names: HashMap<i64, String> = {
-        let mut stmt = conn.prepare("SELECT id, name FROM groups")?;
-        let rows = stmt
-            .query_map([], |r| Ok((r.get::<_, i64>(0)?, r.get::<_, String>(1)?)))?
-            .collect::<rusqlite::Result<Vec<_>>>()?;
-        rows.into_iter()
+        let mut stmt = conn.prepare("SELECT id, name FROM groups").unwrap();
+        stmt.query_map([], |r| Ok((r.get::<_, i64>(0)?, r.get::<_, String>(1)?)))
+            .unwrap()
+            .filter_map(|r| r.ok())
             .map(|(id, name)| (id, name.trim().to_lowercase()))
             .collect()
     };
 
     let mut own_tags: HashMap<i64, HashSet<String>> = HashMap::new();
     {
-        let mut stmt = conn.prepare(
-            "SELECT gt.group_id, t.name FROM group_tags gt JOIN tags t ON t.id = gt.tag_id",
-        )?;
-        let rows = stmt
-            .query_map([], |r| Ok((r.get::<_, i64>(0)?, r.get::<_, String>(1)?)))?
-            .collect::<rusqlite::Result<Vec<_>>>()?;
-        for (gid, tag) in rows {
-            own_tags.entry(gid).or_default().insert(tag);
-        }
+        let mut stmt = conn
+            .prepare(
+                "SELECT gt.group_id, t.name FROM group_tags gt JOIN tags t ON t.id = gt.tag_id",
+            )
+            .unwrap();
+        stmt.query_map([], |r| Ok((r.get::<_, i64>(0)?, r.get::<_, String>(1)?)))
+            .unwrap()
+            .filter_map(|r| r.ok())
+            .for_each(|(gid, tag)| {
+                own_tags.entry(gid).or_default().insert(tag);
+            });
     }
 
-    Ok(ancestry
+    ancestry
         .into_iter()
         .map(|(gid, chain)| {
             let mut tags = HashSet::new();
@@ -871,7 +1036,7 @@ pub fn build_group_effective_tags_map(
             }
             (gid, tags)
         })
-        .collect())
+        .collect()
 }
 
 #[cfg(test)]
@@ -899,10 +1064,10 @@ mod tests {
                 conn.query_row("SELECT COUNT(*) FROM _migrations", [], |r| r
                     .get::<_, i64>(0))
                     .unwrap(),
-                // Current schema has four durable, one-time migrations. The
+                // Current schema has five durable, one-time migrations. The
                 // important part of this regression test is that a second
                 // startup does not duplicate any of them.
-                4
+                5
             );
         }
     }
@@ -1002,7 +1167,7 @@ mod tests {
 #[cfg(test)]
 mod rating_migration_tests {
     #[test]
-    fn existing_provenance_is_reset_once_and_future_reviews_survive() {
+    fn existing_human_provenance_survives_legacy_normalization() {
         let conn = rusqlite::Connection::open_in_memory().unwrap();
         super::run_migrations(&conn).unwrap();
         conn.execute_batch("DELETE FROM _migrations WHERE name='0002_existing_ratings_are_automated';
@@ -1011,7 +1176,7 @@ mod rating_migration_tests {
             VALUES(1,1,'a','a','image','2026',3,4,0.72,'human',1,'2026');").unwrap();
         super::run_migrations(&conn).unwrap();
         let row: (i64,i64,Option<f64>,String,bool,Option<String>) = conn.query_row("SELECT rating,auto_rating,auto_rating_score,rating_source,rating_reviewed,rating_reviewed_at FROM media", [], |r| Ok((r.get(0)?,r.get(1)?,r.get(2)?,r.get(3)?,r.get(4)?,r.get(5)?))).unwrap();
-        assert_eq!(row, (3, 3, None, "auto".into(), false, None));
+        assert_eq!(row, (3, 4, Some(0.72), "human".into(), true, Some("2026".into())));
         conn.execute_batch("UPDATE media SET rating=2,rating_source='human',rating_reviewed=1,rating_reviewed_at='2027';").unwrap();
         super::run_migrations(&conn).unwrap();
         assert!(conn
@@ -1027,7 +1192,9 @@ mod rating_migration_tests {
             INSERT INTO media VALUES(1,1,'a','a','image','2026',3),(2,1,'b','b','image','2026',0);").unwrap();
         super::run_migrations(&conn).unwrap();
         let row: (i64,String,bool,Option<String>) = conn.query_row("SELECT rating,rating_source,rating_reviewed,rating_reviewed_at FROM media WHERE id=1", [], |r| Ok((r.get(0)?,r.get(1)?,r.get(2)?,r.get(3)?))).unwrap();
-        assert_eq!(row, (3, "auto".into(), false, None));
+        // Legacy 3-star automatic content is promoted to 4 stars so it
+        // cannot silently become the new SFW 1-star class.
+        assert_eq!(row, (4, "auto".into(), false, None));
         conn.execute(
             "UPDATE media SET rating=4,auto_rating=3,rating_source='human',rating_reviewed=1,rating_reviewed_at='2026' WHERE id=2",
             [],
@@ -1040,5 +1207,27 @@ mod rating_migration_tests {
                 0
             ))
             .unwrap());
+    }
+
+    #[test]
+    fn scale_migration_promotes_human_and_nested_automatic_values_without_loss() {
+        let conn = rusqlite::Connection::open_in_memory().unwrap();
+        super::run_migrations(&conn).unwrap();
+        conn.execute_batch("DELETE FROM _migrations WHERE name='0005_media_scale_and_classifier_provenance';
+            INSERT INTO sources(id,name,url,slug,added_at) VALUES(1,'test','test','test','2026');
+            INSERT INTO media(id,source_id,filepath,filename,type,added_at,downloaded,rating,auto_rating,human_rating,rating_source,rating_reviewed)
+            VALUES(1,1,'a','a','image','2026',1,1,1,1,'human',1),
+                   (2,1,'b','b','image','2026',1,5,5,NULL,'auto',0);").unwrap();
+        super::run_migrations(&conn).unwrap();
+        let human: (i64, i64, i64, String, bool, String) = conn.query_row(
+            "SELECT rating,auto_rating,human_rating,rating_source,rating_reviewed,nsfw_state FROM media WHERE id=1",
+            [], |row| Ok((row.get(0)?,row.get(1)?,row.get(2)?,row.get(3)?,row.get(4)?,row.get(5)?)),
+        ).unwrap();
+        assert_eq!(human, (2, 2, 2, "human".into(), true, "pending".into()));
+        let five: (i64, i64, Option<i64>) = conn.query_row(
+            "SELECT rating,auto_rating,human_rating FROM media WHERE id=2", [],
+            |row| Ok((row.get(0)?,row.get(1)?,row.get(2)?)),
+        ).unwrap();
+        assert_eq!(five, (5, 5, None));
     }
 }

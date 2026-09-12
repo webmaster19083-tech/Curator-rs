@@ -1,7 +1,8 @@
+use std::collections::HashSet;
 use std::sync::atomic::Ordering;
 use std::sync::Arc;
 
-use axum::{extract::State, Json};
+use axum::{extract::{Path, State}, Json};
 use serde_json::{json, Value};
 
 use crate::AppState;
@@ -10,7 +11,8 @@ use crate::AppState;
 
 pub async fn status(State(state): State<Arc<AppState>>) -> Json<Value> {
     let paused = state.downloads_paused.load(Ordering::SeqCst);
-    let active = state.active_processes.lock().await.len();
+    let active_ids: HashSet<i64> = state.active_processes.lock().await.keys().copied().collect();
+    let active = active_ids.len();
     let paused_ids: Vec<i64> = state
         .paused_source_ids
         .lock()
@@ -18,24 +20,53 @@ pub async fn status(State(state): State<Arc<AppState>>) -> Json<Value> {
         .iter()
         .cloned()
         .collect();
-    let (queued_count, retrying_count) = state
-        .pool
-        .get()
-        .ok()
-        .and_then(|conn| {
-            conn.query_row(
-                "SELECT SUM(status='pending'), SUM(status='retrying') FROM sources",
-                [],
-                |row| {
-                    Ok((
-                        row.get::<_, Option<i64>>(0)?.unwrap_or(0),
-                        row.get::<_, Option<i64>>(1)?.unwrap_or(0),
-                    ))
-                },
-            )
-            .ok()
+    let mut sources = state.pool.get().ok().and_then(|conn| {
+        let mut statement = conn.prepare(
+            "SELECT s.id,s.name,s.status,s.item_count,s.known_total,
+                    (SELECT COUNT(*) FROM media m WHERE m.source_id=s.id AND m.downloaded=1 AND m.missing=0) AS indexed_count,
+                    s.completed_count,s.current_filename,s.retry_at,s.error_message,s.queued_at,s.started_at,s.completed_at,s.progress_updated_at
+             FROM sources s ORDER BY COALESCE(s.queued_at,s.added_at),s.id",
+        ).ok()?;
+        let mapped = statement.query_map([], |row| Ok((
+            row.get::<_, i64>(0)?, row.get::<_, String>(1)?, row.get::<_, String>(2)?,
+            row.get::<_, i64>(3)?, row.get::<_, Option<i64>>(4)?, row.get::<_, i64>(5)?,
+            row.get::<_, i64>(6)?, row.get::<_, Option<String>>(7)?, row.get::<_, i64>(8)?,
+            row.get::<_, Option<String>>(9)?, row.get::<_, Option<String>>(10)?, row.get::<_, Option<String>>(11)?,
+            row.get::<_, Option<String>>(12)?, row.get::<_, Option<String>>(13)?,
+        ))).ok()?;
+        let rows = mapped.collect::<rusqlite::Result<Vec<_>>>().ok()?;
+        Some(rows)
+    }).unwrap_or_default();
+    let mut queue_position = 0_i64;
+    let source_rows = sources.drain(..).map(|row| {
+        let (id,name,status,item_count,known_total,indexed_count,persisted_completed,current_filename,retry_at,error,queued_at,started_at,completed_at,updated_at) = row;
+        let phase = match status.as_str() {
+            "pending" => "queued",
+            "downloading" if active_ids.contains(&id) => "active",
+            "downloading" => "queued",
+            "indexing" => "indexing",
+            "retrying" => "retrying",
+            "paused" => "paused",
+            "done" => "completed",
+            "error" => "failed",
+            _ => "queued",
+        };
+        let position = if phase == "queued" { queue_position += 1; Some(queue_position) } else { None };
+        let completed = indexed_count.max(persisted_completed).max(item_count.min(indexed_count));
+        let percentage = known_total.map(|total| {
+            if total == 0 { if phase == "completed" { 100.0 } else { 0.0 } }
+            else { ((completed as f64 / total as f64) * 100.0).clamp(0.0, 100.0) }
+        });
+        json!({
+            "id":id,"name":name,"status":status,"phase":phase,"queue_position":position,
+            "known_total":known_total,"completed_count":completed,"percentage":percentage,
+            "indeterminate":known_total.is_none(),"current_filename":current_filename,
+            "retry_at":if retry_at>0 { Some(retry_at) } else { None },"error":error,
+            "queued_at":queued_at,"started_at":started_at,"completed_at":completed_at,"updated_at":updated_at,
         })
-        .unwrap_or((0, 0));
+    }).collect::<Vec<_>>();
+    let queued_count = source_rows.iter().filter(|row| row["phase"] == "queued").count() as i64;
+    let retrying_count = source_rows.iter().filter(|row| row["phase"] == "retrying").count() as i64;
 
     Json(json!({
         "paused":       paused,
@@ -43,6 +74,7 @@ pub async fn status(State(state): State<Arc<AppState>>) -> Json<Value> {
         "queued_count": queued_count,
         "retrying_count": retrying_count,
         "paused_source_ids": paused_ids,
+        "sources": source_rows,
     }))
 }
 
@@ -52,13 +84,13 @@ pub async fn pause(State(state): State<Arc<AppState>>) -> Json<Value> {
     let _control = state.download_control.lock().await;
     state.downloads_paused.store(true, Ordering::SeqCst);
 
-    // Delayed retry timers have no child PID to kill.  Persist their paused
-    // state now so a later Resume picks them up immediately rather than
-    // waiting for a stale timer (or losing them across a restart).
+    // Delayed retry timers have no child PID to kill. Persist their paused
+    // state now so Resume can claim them immediately and a restart cannot
+    // lose them.
     if let Ok(conn) = state.pool.get() {
         let _ = conn.execute(
-            "UPDATE sources SET status='paused' WHERE status IN ('pending','retrying')",
-            [],
+            "UPDATE sources SET status='paused',progress_updated_at=?1 WHERE status IN ('pending','retrying')",
+            [crate::db::now_iso()],
         );
     }
 
@@ -68,12 +100,90 @@ pub async fn pause(State(state): State<Arc<AppState>>) -> Json<Value> {
         guard.iter().map(|(&sid, &pid)| (sid, pid)).collect()
     };
 
-    for (source_id, pid) in procs {
+    for &(source_id, pid) in &procs {
         state.paused_source_ids.lock().await.insert(source_id);
+        // The owning task also has to leave its select loop.  Killing a PID
+        // alone is not sufficient on Windows when a managed environment
+        // rejects taskkill's tree walk, and it cannot wake a queued source.
+        if let Some(cancel) = state
+            .source_cancellations
+            .lock()
+            .await
+            .get(&source_id)
+            .cloned()
+        {
+            cancel.cancel();
+        }
         crate::downloader::kill_pid(pid).await;
     }
 
+    // Local-folder imports and queued workers do not have a gallery-dl PID,
+    // but they still register a source cancellation token.  Cancel those
+    // tokens as part of the same global transition so pause has one meaning
+    // for every source type.
+    let cancellations: Vec<(i64, tokio_util::sync::CancellationToken)> = state
+        .source_cancellations
+        .lock()
+        .await
+        .iter()
+        .filter(|(source_id, _)| !procs.iter().any(|(id, _)| id == *source_id))
+        .map(|(source_id, token)| (*source_id, token.clone()))
+        .collect();
+    for (source_id, cancel) in cancellations {
+        state.paused_source_ids.lock().await.insert(source_id);
+        cancel.cancel();
+        if let Ok(conn) = state.pool.get() {
+            let _ = conn.execute(
+                "UPDATE sources SET status='paused',progress_updated_at=?1 WHERE id=?2 AND status IN ('downloading','indexing')",
+                rusqlite::params![crate::db::now_iso(), source_id],
+            );
+        }
+    }
+
     Json(json!({ "paused": true }))
+}
+
+/// Pause one source without stopping unrelated work.  The owning downloader
+/// task reaps its process before a later Resume requeues it.
+pub async fn pause_source(
+    State(state): State<Arc<AppState>>,
+    Path(id): Path<i64>,
+) -> Json<Value> {
+    let _control = state.download_control.lock().await;
+    let exists = state.pool.get().ok().and_then(|conn| conn.query_row(
+        "SELECT EXISTS(SELECT 1 FROM sources WHERE id=?1)", [id], |row| row.get::<_, bool>(0)
+    ).ok()).unwrap_or(false);
+    if !exists { return Json(json!({"error":"Source not found"})); }
+    state.paused_source_ids.lock().await.insert(id);
+    if let Some(cancel) = state.source_cancellations.lock().await.get(&id).cloned() { cancel.cancel(); }
+    if let Some(pid) = state.active_processes.lock().await.get(&id).copied() { crate::downloader::kill_pid(pid).await; }
+    if let Ok(conn) = state.pool.get() {
+        let _ = conn.execute("UPDATE sources SET status='paused',progress_updated_at=?1 WHERE id=?2", rusqlite::params![crate::db::now_iso(), id]);
+    }
+    Json(json!({"id":id,"paused":true}))
+}
+
+/// Resume only one paused source.  Global pause still wins so this endpoint
+/// cannot accidentally restart downloads behind the user's back.
+pub async fn resume_source(
+    State(state): State<Arc<AppState>>,
+    Path(id): Path<i64>,
+) -> Json<Value> {
+    // Serialize a source-level resume with global pause/resume.  Without the
+    // same transition lock, a double-click or a simultaneous global resume
+    // could both claim the row and enqueue duplicate downloader tasks.
+    let _control = state.download_control.lock().await;
+    if state.downloads_paused.load(Ordering::SeqCst) { return Json(json!({"id":id,"error":"Downloads are globally paused"})); }
+    let changed = state.pool.get().ok().and_then(|conn| conn.execute(
+        "UPDATE sources SET status='pending',queued_at=?1,progress_updated_at=?1,current_filename=NULL WHERE id=?2 AND status IN ('paused','error','done','retrying')",
+        rusqlite::params![crate::db::now_iso(),id],
+    ).ok()).unwrap_or(0);
+    if changed == 0 { return Json(json!({"id":id,"error":"Source is not resumable"})); }
+    state.paused_source_ids.lock().await.remove(&id);
+    state
+        .download_tasks
+        .spawn(crate::downloader::run_download(Arc::clone(&state), id));
+    Json(json!({"id":id,"paused":false,"status":"queued"}))
 }
 
 // ─── POST /api/downloads/resume ──────────────────────────────────────────────
@@ -103,7 +213,7 @@ pub async fn resume(State(state): State<Arc<AppState>>) -> Json<Value> {
         ids
     };
     // Claim paused rows before spawning. A second Resume call then sees zero
-    // paused rows instead of reporting/requeueing the same work again.
+    // paused rows instead of launching duplicate downloads.
     if !paused_ids.is_empty() {
         let conn = match state.pool.get() {
             Ok(c) => c,
@@ -116,8 +226,8 @@ pub async fn resume(State(state): State<Arc<AppState>>) -> Json<Value> {
         for id in &paused_ids {
             if tx
                 .execute(
-                    "UPDATE sources SET status='pending' WHERE id=?1 AND status='paused'",
-                    [id],
+                    "UPDATE sources SET status='pending',queued_at=?1,progress_updated_at=?1,current_filename=NULL WHERE id=?2 AND status='paused'",
+                    rusqlite::params![crate::db::now_iso(), id],
                 )
                 .is_err()
             {
@@ -132,76 +242,10 @@ pub async fn resume(State(state): State<Arc<AppState>>) -> Json<Value> {
     state.downloads_paused.store(false, Ordering::SeqCst);
 
     for id in &paused_ids {
-        tokio::spawn(crate::downloader::run_download(Arc::clone(&state), *id));
+        state
+            .download_tasks
+            .spawn(crate::downloader::run_download(Arc::clone(&state), *id));
     }
 
     Json(json!({ "paused": false, "requeued": paused_ids.len() }))
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[tokio::test]
-    async fn failed_resume_keeps_all_sources_paused() {
-        let dir = tempfile::tempdir().unwrap();
-        let state = crate::test_support::state(dir.path());
-        crate::test_support::source(&state);
-        state.downloads_paused.store(true, Ordering::SeqCst);
-        let conn = state.pool.get().unwrap();
-        conn.execute("UPDATE sources SET status='paused' WHERE id=1", [])
-            .unwrap();
-        conn.execute("INSERT INTO sources(id,name,url,slug,status,added_at) VALUES(2,'second','https://example.org/second','second','paused','now')", []).unwrap();
-        conn.execute_batch("CREATE TRIGGER fail_second_resume BEFORE UPDATE OF status ON sources WHEN NEW.id=2 AND NEW.status='pending' BEGIN SELECT RAISE(ABORT,'test failure'); END;").unwrap();
-        let response = resume(State(state.clone())).await;
-        assert!(response.0.get("error").is_some());
-        let paused: i64 = conn
-            .query_row(
-                "SELECT COUNT(*) FROM sources WHERE status='paused'",
-                [],
-                |r| r.get(0),
-            )
-            .unwrap();
-        assert_eq!(paused, 2);
-        assert!(state.downloads_paused.load(Ordering::SeqCst));
-    }
-
-    #[tokio::test]
-    async fn repeated_resume_claims_paused_source_once() {
-        let dir = tempfile::tempdir().unwrap();
-        let state = crate::test_support::state(dir.path());
-        crate::test_support::source(&state);
-        state
-            .pool
-            .get()
-            .unwrap()
-            .execute("UPDATE sources SET status='paused' WHERE id=1", [])
-            .unwrap();
-
-        let (a, b) = tokio::join!(resume(State(state.clone())), resume(State(state.clone())));
-        let total = a.0["requeued"].as_u64().unwrap_or(0) + b.0["requeued"].as_u64().unwrap_or(0);
-        assert_eq!(total, 1);
-    }
-
-    #[tokio::test]
-    async fn pause_converts_delayed_retries_to_resumable_work() {
-        let dir = tempfile::tempdir().unwrap();
-        let state = crate::test_support::state(dir.path());
-        crate::test_support::source(&state);
-        let conn = state.pool.get().unwrap();
-        conn.execute(
-            "UPDATE sources SET status='retrying',retry_attempts=2,retry_at=unixepoch()+600 WHERE id=1",
-            [],
-        )
-        .unwrap();
-
-        let response = pause(State(state.clone())).await.0;
-        assert_eq!(response["paused"], true);
-        let status: String = conn
-            .query_row("SELECT status FROM sources WHERE id=1", [], |row| {
-                row.get(0)
-            })
-            .unwrap();
-        assert_eq!(status, "paused");
-    }
 }

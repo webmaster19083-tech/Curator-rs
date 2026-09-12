@@ -23,11 +23,11 @@ use serde::Serialize;
 /// the NSFW worker's Python environment).
 #[derive(Debug, Clone, Serialize)]
 pub struct DependencyStatus {
-    pub found: bool,
+    pub found:   bool,
     pub version: Option<String>,
     /// Human-readable explanation — set when `found` is false, or when a
     /// version string couldn't be parsed even though the executable ran.
-    pub detail: Option<String>,
+    pub detail:  Option<String>,
     /// The path/command actually probed, so the UI can show what it tested.
     pub checked: String,
 }
@@ -62,10 +62,10 @@ pub fn sanitize_path_input(raw: &str) -> Result<PathBuf, String> {
 fn humanize_io_error(context: &str, e: &std::io::Error) -> String {
     use std::io::ErrorKind::*;
     match e.kind() {
-        NotFound => format!("{context}: no such file or directory."),
+        NotFound        => format!("{context}: no such file or directory."),
         PermissionDenied => format!("{context}: permission denied."),
-        AlreadyExists => format!("{context}: already exists."),
-        _ => format!("{context}: {e}"),
+        AlreadyExists   => format!("{context}: already exists."),
+        _               => format!("{context}: {e}"),
     }
 }
 
@@ -89,10 +89,7 @@ pub fn check_writable_dir(path: &Path) -> Result<(), String> {
 /// injection surface here regardless of what `bin` contains.
 pub fn check_executable(bin: &str, version_arg: &str) -> DependencyStatus {
     let checked = bin.to_string();
-    match crate::process::output_timeout(
-        Command::new(bin).arg(version_arg),
-        Duration::from_secs(10),
-    ) {
+    match Command::new(bin).arg(version_arg).output() {
         Ok(out) if out.status.success() => {
             let text = String::from_utf8_lossy(&out.stdout);
             let version = text
@@ -100,27 +97,14 @@ pub fn check_executable(bin: &str, version_arg: &str) -> DependencyStatus {
                 .next()
                 .map(|l| l.trim().to_string())
                 .filter(|l| !l.is_empty());
-            DependencyStatus {
-                found: true,
-                version,
-                detail: None,
-                checked,
-            }
+            DependencyStatus { found: true, version, detail: None, checked }
         }
         Ok(out) => DependencyStatus {
-            found: false,
+            found:   false,
             version: None,
-            detail: Some(format!(
-                "'{bin}' ran but reported an error (exit code {}). {}",
-                out.status
-                    .code()
-                    .map(|c| c.to_string())
-                    .unwrap_or_else(|| "unknown".into()),
-                String::from_utf8_lossy(&out.stderr)
-                    .trim()
-                    .chars()
-                    .take(2000)
-                    .collect::<String>()
+            detail:  Some(format!(
+                "'{bin}' ran but reported an error (exit code {}).",
+                out.status.code().map(|c| c.to_string()).unwrap_or_else(|| "unknown".into())
             )),
             checked,
         },
@@ -134,12 +118,7 @@ pub fn check_executable(bin: &str, version_arg: &str) -> DependencyStatus {
                 }
                 _ => format!("Couldn't run '{bin}': {e}"),
             };
-            DependencyStatus {
-                found: false,
-                version: None,
-                detail: Some(detail),
-                checked,
-            }
+            DependencyStatus { found: false, version: None, detail: Some(detail), checked }
         }
     }
 }
@@ -157,7 +136,7 @@ pub fn detect_ffprobe(bin: &str) -> DependencyStatus {
     check_executable(bin, "-version")
 }
 
-/// Best-effort check for the optional NSFW classifier's Python environment.
+/// Best-effort check for the optional NudeNet classifier's Python environment.
 /// Only checks that the interpreter and its packages *import* cleanly — it
 /// deliberately does not load the ONNX model itself (that happens lazily on
 /// first real use in nsfw_worker.py and can take a few seconds), so this
@@ -165,14 +144,11 @@ pub fn detect_ffprobe(bin: &str) -> DependencyStatus {
 /// this mirrors.
 pub fn detect_nsfw_env(python_bin: &str) -> DependencyStatus {
     let checked = python_bin.to_string();
-    let probe = "import numpy, PIL, onnxruntime, opennsfw_onnx";
+    let probe = "import nudenet";
     match Command::new(python_bin).args(["-c", probe]).output() {
-        Ok(out) if out.status.success() => DependencyStatus {
-            found: true,
-            version: None,
-            detail: None,
-            checked,
-        },
+        Ok(out) if out.status.success() => {
+            DependencyStatus { found: true, version: None, detail: None, checked }
+        }
         Ok(out) => {
             let stderr = String::from_utf8_lossy(&out.stderr);
             let missing = stderr
@@ -180,10 +156,10 @@ pub fn detect_nsfw_env(python_bin: &str) -> DependencyStatus {
                 .find(|l| l.contains("ModuleNotFoundError") || l.contains("ImportError"))
                 .map(|l| l.trim().to_string());
             DependencyStatus {
-                found: false,
+                found:   false,
                 version: None,
                 detail: Some(missing.unwrap_or_else(|| {
-                    "Required Python packages for NSFW classification aren't installed.".into()
+                    "The optional NudeNet Python package isn't installed.".into()
                 })),
                 checked,
             }
@@ -195,12 +171,7 @@ pub fn detect_nsfw_env(python_bin: &str) -> DependencyStatus {
                 }
                 _ => format!("Couldn't run '{python_bin}': {e}"),
             };
-            DependencyStatus {
-                found: false,
-                version: None,
-                detail: Some(detail),
-                checked,
-            }
+            DependencyStatus { found: false, version: None, detail: Some(detail), checked }
         }
     }
 }
@@ -261,10 +232,7 @@ mod tests {
 
     #[test]
     fn sanitize_path_input_accepts_normal_path() {
-        assert_eq!(
-            sanitize_path_input("/home/user/Curator").unwrap(),
-            PathBuf::from("/home/user/Curator")
-        );
+        assert_eq!(sanitize_path_input("/home/user/Curator").unwrap(), PathBuf::from("/home/user/Curator"));
     }
 
     #[test]
@@ -287,10 +255,7 @@ mod tests {
         assert!(result.is_err());
         let msg = result.unwrap_err();
         // Must be plain English, not a Debug-formatted Os error.
-        assert!(
-            !msg.contains("Os {"),
-            "error should be human-readable, got: {msg}"
-        );
+        assert!(!msg.contains("Os {"), "error should be human-readable, got: {msg}");
     }
 
     #[test]
@@ -298,10 +263,7 @@ mod tests {
         let status = check_executable("definitely-not-a-real-binary-xyz123", "--version");
         assert!(!status.found);
         let detail = status.detail.expect("missing binary should explain why");
-        assert!(
-            !detail.contains("Os {"),
-            "error should be human-readable, got: {detail}"
-        );
+        assert!(!detail.contains("Os {"), "error should be human-readable, got: {detail}");
         assert!(detail.contains("was not found"));
     }
 
@@ -310,12 +272,7 @@ mod tests {
         // Mirrors the existing skip-if-absent pattern used by
         // downloader.rs's own ffmpeg-dependent tests, since ffprobe isn't
         // guaranteed to be installed on every machine running this suite.
-        if Command::new("ffprobe")
-            .arg("-version")
-            .output()
-            .map(|o| o.status.success())
-            .unwrap_or(false)
-        {
+        if Command::new("ffprobe").arg("-version").output().map(|o| o.status.success()).unwrap_or(false) {
             let status = detect_ffprobe("ffprobe");
             assert!(status.found);
             assert!(status.version.is_some());

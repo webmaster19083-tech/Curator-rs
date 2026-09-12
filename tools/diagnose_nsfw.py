@@ -17,8 +17,8 @@ missed:
     C:\\Users\\...\\AppData\\Local\\Packages\\PythonSoftwareFoundation.Python.3.13_qbz5n2kfra8p0\\...
     which is the Microsoft Store Python package path, not a normal
     python.org install.
-  - From "A": also runs the actual model-load step (NSFWClassifier() +
-    warmup()), not just `import` — a corrupt/missing ONNX model file
+  - From "A": also runs the actual NudeNet model-load step
+    (NudeDetector()), not just `import` — a corrupt/missing model file
     passes the import check but fails here.
   - From "A": --fix flag that offers to pip-install the right packages
     into the exact interpreter Curator will launch.
@@ -38,8 +38,8 @@ import sys
 import textwrap
 from pathlib import Path
 
-REQUIRED_PACKAGES = ["opennsfw-onnx"]
-REQUIRED_MODULES = ["numpy", "PIL", "onnxruntime", "opennsfw_onnx"]
+REQUIRED_PACKAGES = ["nudenet"]
+REQUIRED_MODULES = ["nudenet"]
 
 # Run inside the TARGET interpreter (not this script's own) so results
 # reflect exactly what Curator's worker would see.
@@ -53,10 +53,10 @@ for m in mods:
         out["modules"][m] = {"ok": True, "version": getattr(mod, "__version__", None)}
     except Exception as e:
         out["modules"][m] = {"ok": False, "error": f"{type(e).__name__}: {e}"}
-if out["modules"].get("opennsfw_onnx", {}).get("ok"):
+if out["modules"].get("nudenet", {}).get("ok"):
     try:
-        from opennsfw_onnx import NSFWClassifier
-        NSFWClassifier().warmup()
+        from nudenet import NudeDetector
+        NudeDetector()
         out["model_load"] = {"ok": True}
     except Exception as e:
         out["model_load"] = {"ok": False, "error": f"{type(e).__name__}: {e}"}

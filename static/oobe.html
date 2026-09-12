@@ -1,11 +1,13 @@
 <!doctype html>
 <html lang="en">
 <head>
-<script src="/desktop.js"></script>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>Set up Curator</title>
 <link rel="icon" href="data:,">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Space+Grotesk:wght@500;600;700&family=IBM+Plex+Sans:wght@400;500;600&family=IBM+Plex+Mono:wght@400;500&display=swap" rel="stylesheet">
 <link rel="stylesheet" href="/style.css">
 <link rel="stylesheet" href="/oobe.css">
 </head>
@@ -129,17 +131,6 @@
       per-source archive already skips files it's downloaded before — both happen
       automatically, no extra setup needed here.
     </p>
-    <label class="settings-field mono small">
-      maximum clip length
-      <input type="number" class="oobe-input" id="max-clip-length-input" min="5" max="3600" step="1"> seconds
-    </label>
-    <p class="oobe-help">Videos at or below this duration appear as Clips. You can change it later without altering files.</p>
-    <label class="settings-checkbox mono small">
-      <input type="checkbox" id="start-with-windows-input"> Start Curator when Windows starts
-    </label>
-    <label class="settings-checkbox mono small">
-      <input type="checkbox" id="keep-running-in-tray-input" checked> Keep Curator running in the system tray when the window is closed
-    </label>
   </section>
 
   <!-- ── Step 6 — Optional content classification ────────────────────── -->

@@ -62,7 +62,9 @@ mod tests {
     #[test]
     fn startup_command_is_quoted() {
         assert_eq!(
-            run_value(std::path::Path::new(r"C:\Program Files\Curator\Curator.exe")),
+            run_value(std::path::Path::new(
+                r"C:\Program Files\Curator\Curator.exe"
+            )),
             r#""C:\Program Files\Curator\Curator.exe" --background"#,
         );
     }

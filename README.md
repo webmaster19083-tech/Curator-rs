@@ -20,9 +20,9 @@ any rating/tag you set early sticks. A dismissible sidebar reminder nudges
 you to export your source list every so often, since that's the one thing
 here that's genuinely hard to recreate if lost.
 
-It's a single self-contained Rust binary (Axum + SQLite) that drives the
-real `gallery-dl` CLI, and a plain HTML/CSS/JS front-end. Everything runs
-on your machine; nothing is uploaded anywhere.
+Curator is a Tauri desktop application backed by one local Rust/Axum + SQLite
+service. The same service remains available in a normal browser as a fallback;
+everything runs on your machine and nothing is uploaded anywhere.
 
 ## Requirements
 
@@ -38,10 +38,10 @@ one binary.
 
 ## Setup & run
 
-**Windows:** download the latest `curator-windows-x86_64.zip` from the
-[Releases page], unzip it anywhere, and run `curator.exe` (double-click, or
-from a terminal). Keep `curator.exe` and the `static/` folder next to each
-other — the app looks for `static/` alongside the executable.
+**Windows:** download the Curator installer (`.msi` or NSIS `.exe`) from the
+[Releases page], install it, then open **Curator** from the Start menu. The
+desktop app starts its backend and library automatically; no browser, terminal,
+or working-directory setup is needed.
 
 **macOS / Linux:** no pre-built binary is published yet — build from source
 with [Rust](https://rustup.rs) installed:
@@ -53,11 +53,10 @@ cargo build --release
 ./target/release/curator
 ```
 
-Either way, Curator opens its own app window automatically at
-**http://127.0.0.1:8642** (a borderless Edge/Chrome window — not a regular
-browser tab). Leave it running in the background; that's your local server.
-Use `curator --no-window` instead if you'd rather it not open a window (for
-headless/server setups, or to open the address yourself in a normal tab).
+The browser fallback is served at **http://127.0.0.1:42168** while Curator is
+running. Closing the desktop window can leave Curator running in the system
+tray, so its local browser fallback and downloads continue until you choose
+**Quit Curator**.
 
 **First launch:** Curator opens a short local setup wizard instead of the
 normal browser UI — it checks for `gallery-dl` (and optionally `ffmpeg`),
@@ -78,8 +77,8 @@ it again."
 
 ## Everything else
 
-This file stays short on purpose. For the full reference — remote/phone
-access, moving your data directory, groups & tags, ratings, themes,
+This file stays short on purpose. For the full reference — Tailscale-only
+remote access, moving your data directory, groups & tags, ratings, themes,
 speeding up downloads, gallery-dl login/cookies, troubleshooting, all of
 it — run:
 

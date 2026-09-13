@@ -63,9 +63,11 @@ pub async fn endpoint(
     axum::extract::State(state): axum::extract::State<std::sync::Arc<crate::AppState>>,
 ) -> Result<axum::Json<Value>, (axum::http::StatusCode, axum::Json<Value>)> {
     let pool = state.pool.clone();
-    tokio::task::spawn_blocking(move || summary(&*pool.get()?))
+    let mut value = tokio::task::spawn_blocking(move || summary(&*pool.get()?))
         .await
         .map_err(crate::routes::media::db_err)?
-        .map(axum::Json)
-        .map_err(crate::routes::media::db_err)
+        .map_err(crate::routes::media::db_err)?;
+    value["size_backfill"] =
+        serde_json::to_value(state.size_backfill.read().await.clone()).unwrap_or(Value::Null);
+    Ok(axum::Json(value))
 }

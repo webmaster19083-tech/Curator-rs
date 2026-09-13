@@ -2,7 +2,10 @@ use std::collections::HashSet;
 use std::sync::atomic::Ordering;
 use std::sync::Arc;
 
-use axum::{extract::{Path, State}, Json};
+use axum::{
+    extract::{Path, State},
+    Json,
+};
 use serde_json::{json, Value};
 
 use crate::AppState;
@@ -11,7 +14,13 @@ use crate::AppState;
 
 pub async fn status(State(state): State<Arc<AppState>>) -> Json<Value> {
     let paused = state.downloads_paused.load(Ordering::SeqCst);
-    let active_ids: HashSet<i64> = state.active_processes.lock().await.keys().copied().collect();
+    let active_ids: HashSet<i64> = state
+        .active_processes
+        .lock()
+        .await
+        .keys()
+        .copied()
+        .collect();
     let active = active_ids.len();
     let paused_ids: Vec<i64> = state
         .paused_source_ids
@@ -65,8 +74,14 @@ pub async fn status(State(state): State<Arc<AppState>>) -> Json<Value> {
             "queued_at":queued_at,"started_at":started_at,"completed_at":completed_at,"updated_at":updated_at,
         })
     }).collect::<Vec<_>>();
-    let queued_count = source_rows.iter().filter(|row| row["phase"] == "queued").count() as i64;
-    let retrying_count = source_rows.iter().filter(|row| row["phase"] == "retrying").count() as i64;
+    let queued_count = source_rows
+        .iter()
+        .filter(|row| row["phase"] == "queued")
+        .count() as i64;
+    let retrying_count = source_rows
+        .iter()
+        .filter(|row| row["phase"] == "retrying")
+        .count() as i64;
 
     Json(json!({
         "paused":       paused,
@@ -145,40 +160,57 @@ pub async fn pause(State(state): State<Arc<AppState>>) -> Json<Value> {
 
 /// Pause one source without stopping unrelated work.  The owning downloader
 /// task reaps its process before a later Resume requeues it.
-pub async fn pause_source(
-    State(state): State<Arc<AppState>>,
-    Path(id): Path<i64>,
-) -> Json<Value> {
+pub async fn pause_source(State(state): State<Arc<AppState>>, Path(id): Path<i64>) -> Json<Value> {
     let _control = state.download_control.lock().await;
-    let exists = state.pool.get().ok().and_then(|conn| conn.query_row(
-        "SELECT EXISTS(SELECT 1 FROM sources WHERE id=?1)", [id], |row| row.get::<_, bool>(0)
-    ).ok()).unwrap_or(false);
-    if !exists { return Json(json!({"error":"Source not found"})); }
+    let exists = state
+        .pool
+        .get()
+        .ok()
+        .and_then(|conn| {
+            conn.query_row(
+                "SELECT EXISTS(SELECT 1 FROM sources WHERE id=?1)",
+                [id],
+                |row| row.get::<_, bool>(0),
+            )
+            .ok()
+        })
+        .unwrap_or(false);
+    if !exists {
+        return Json(json!({"error":"Source not found"}));
+    }
     state.paused_source_ids.lock().await.insert(id);
-    if let Some(cancel) = state.source_cancellations.lock().await.get(&id).cloned() { cancel.cancel(); }
-    if let Some(pid) = state.active_processes.lock().await.get(&id).copied() { crate::downloader::kill_pid(pid).await; }
+    if let Some(cancel) = state.source_cancellations.lock().await.get(&id).cloned() {
+        cancel.cancel();
+    }
+    if let Some(pid) = state.active_processes.lock().await.get(&id).copied() {
+        crate::downloader::kill_pid(pid).await;
+    }
     if let Ok(conn) = state.pool.get() {
-        let _ = conn.execute("UPDATE sources SET status='paused',progress_updated_at=?1 WHERE id=?2", rusqlite::params![crate::db::now_iso(), id]);
+        let _ = conn.execute(
+            "UPDATE sources SET status='paused',progress_updated_at=?1 WHERE id=?2",
+            rusqlite::params![crate::db::now_iso(), id],
+        );
     }
     Json(json!({"id":id,"paused":true}))
 }
 
 /// Resume only one paused source.  Global pause still wins so this endpoint
 /// cannot accidentally restart downloads behind the user's back.
-pub async fn resume_source(
-    State(state): State<Arc<AppState>>,
-    Path(id): Path<i64>,
-) -> Json<Value> {
+pub async fn resume_source(State(state): State<Arc<AppState>>, Path(id): Path<i64>) -> Json<Value> {
     // Serialize a source-level resume with global pause/resume.  Without the
     // same transition lock, a double-click or a simultaneous global resume
     // could both claim the row and enqueue duplicate downloader tasks.
     let _control = state.download_control.lock().await;
-    if state.downloads_paused.load(Ordering::SeqCst) { return Json(json!({"id":id,"error":"Downloads are globally paused"})); }
+    if state.downloads_paused.load(Ordering::SeqCst) {
+        return Json(json!({"id":id,"error":"Downloads are globally paused"}));
+    }
     let changed = state.pool.get().ok().and_then(|conn| conn.execute(
         "UPDATE sources SET status='pending',queued_at=?1,progress_updated_at=?1,current_filename=NULL WHERE id=?2 AND status IN ('paused','error','done','retrying')",
         rusqlite::params![crate::db::now_iso(),id],
     ).ok()).unwrap_or(0);
-    if changed == 0 { return Json(json!({"id":id,"error":"Source is not resumable"})); }
+    if changed == 0 {
+        return Json(json!({"id":id,"error":"Source is not resumable"}));
+    }
     state.paused_source_ids.lock().await.remove(&id);
     state
         .download_tasks

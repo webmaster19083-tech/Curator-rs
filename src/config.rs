@@ -21,7 +21,7 @@ use serde::{Deserialize, Serialize};
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct Config {
-    pub data_dir:       Option<String>,
+    pub data_dir: Option<String>,
     pub gallery_dl_bin: Option<String>,
     pub python_bin: Option<String>,
     pub ffprobe_bin: Option<String>,
@@ -61,8 +61,7 @@ pub fn load_config() -> Config {
 /// + this).
 pub fn save_config(cfg: &Config) -> std::io::Result<()> {
     let path = config_path();
-    let text = serde_json::to_string_pretty(cfg)
-        .map_err(std::io::Error::other)?;
+    let text = serde_json::to_string_pretty(cfg).map_err(std::io::Error::other)?;
     std::fs::write(path, text)
 }
 
@@ -113,7 +112,10 @@ mod tests {
         // Isolate from whatever the real environment/config might have —
         // this only asserts precedence, not the literal default path.
         std::env::set_var("CURATOR_DATA_DIR", "/tmp/curator-env-test-dir");
-        let cfg = Config { data_dir: Some("/tmp/curator-config-test-dir".into()), ..Default::default() };
+        let cfg = Config {
+            data_dir: Some("/tmp/curator-config-test-dir".into()),
+            ..Default::default()
+        };
         let resolved = resolve_data_dir(&cfg);
         std::env::remove_var("CURATOR_DATA_DIR");
         assert_eq!(resolved, PathBuf::from("/tmp/curator-env-test-dir"));

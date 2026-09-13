@@ -688,12 +688,24 @@ pub async fn populate_placeholders(state: Arc<AppState>, source_id: i64) {
     };
     let now = now_iso();
 
-    let _ = conn.execute("BEGIN", []);
+    let tx = match conn.unchecked_transaction() {
+        Ok(tx) => tx,
+        Err(error) => {
+            warn!("Placeholder pre-scan for source {source_id} could not start a transaction: {error}");
+            return;
+        }
+    };
     {
-        let mut stmt = match conn.prepare(
+        let mut stmt = match tx.prepare(
             "INSERT OR IGNORE INTO media (source_id, filepath, filename, type, added_at, origin_url, downloaded)
              VALUES (?1, ?2, ?3, ?4, ?5, ?6, 0)"
-        ) { Ok(s) => s, Err(_) => { let _ = conn.execute("ROLLBACK", []); return; } };
+        ) {
+            Ok(statement) => statement,
+            Err(error) => {
+                warn!("Placeholder pre-scan for source {source_id} could not prepare inserts: {error}");
+                return;
+            }
+        };
 
         for item in &items {
             let fname = item
@@ -711,12 +723,16 @@ pub async fn populate_placeholders(state: Arc<AppState>, source_id: i64) {
                 fname
             };
             let fp = pending_filepath(source_id, &item.url);
-            let _ = stmt.execute(rusqlite::params![
+            if let Err(error) = stmt.execute(rusqlite::params![
                 source_id, fp, fname, item.kind, now, item.url
-            ]);
+            ]) {
+                // This scan is intentionally best-effort; one malformed
+                // listing item must not hide every other placeholder.
+                warn!("Placeholder pre-scan for source {source_id} skipped one item: {error}");
+            }
         }
     }
-    if let Err(error) = conn.execute("COMMIT", []) {
+    if let Err(error) = tx.commit() {
         warn!("Placeholder pre-scan for source {source_id} could not commit: {error}");
         return;
     }
@@ -785,16 +801,12 @@ async fn run_download_impl(
     // Rate-limited providers remain queued without taking a gallery-dl permit.
     // Local folder imports do not use gallery-dl and therefore have no remote
     // provider cooldown to observe.
-    let provider = state
-        .pool
-        .get()
+    let provider = state.pool.get().ok().and_then(|conn| {
+        conn.query_row("SELECT url FROM sources WHERE id=?1", [source_id], |row| {
+            row.get::<_, String>(0)
+        })
         .ok()
-        .and_then(|conn| {
-            conn.query_row("SELECT url FROM sources WHERE id=?1", [source_id], |row| {
-                row.get::<_, String>(0)
-            })
-            .ok()
-        });
+    });
     let Some(provider_url) = provider else {
         return;
     };
@@ -915,7 +927,11 @@ async fn run_download_inner(
             )
         })
         .await;
-        if cancel.is_cancelled() || state.downloads_paused.load(std::sync::atomic::Ordering::SeqCst) {
+        if cancel.is_cancelled()
+            || state
+                .downloads_paused
+                .load(std::sync::atomic::Ordering::SeqCst)
+        {
             state.paused_source_ids.lock().await.insert(source_id);
             if let Ok(conn) = state.pool.get() {
                 let _ = conn.execute(
@@ -1425,7 +1441,10 @@ mod tests {
 
     #[test]
     fn provider_key_does_not_include_credentials_or_paths() {
-        assert_eq!(provider_key("https://user:pass@example.test/a"), "example.test");
+        assert_eq!(
+            provider_key("https://user:pass@example.test/a"),
+            "example.test"
+        );
         assert_eq!(provider_key("https://example.test/a"), "example.test");
         assert_eq!(provider_key("local:C:\\media"), "local");
     }
@@ -1529,9 +1548,9 @@ mod tests {
         .unwrap();
         state.shutdown.cancel();
         tokio::time::timeout(std::time::Duration::from_secs(10), task)
-        .await
-        .unwrap()
-        .unwrap();
+            .await
+            .unwrap()
+            .unwrap();
         assert!(state.active_processes.lock().await.is_empty());
         assert_eq!(
             state

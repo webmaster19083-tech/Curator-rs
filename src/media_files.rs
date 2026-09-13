@@ -1,13 +1,173 @@
 //! Persistent filesystem reconciliation. Missing rows retain their identity and annotations.
 use anyhow::Result;
 use rusqlite::{params, Connection};
-use std::path::Path;
+use serde::Serialize;
+use std::path::{Path, PathBuf};
+use std::sync::Arc;
+use tokio::sync::RwLock;
 
 pub fn file_size(path: &Path) -> Option<i64> {
     path.metadata()
         .ok()
         .filter(|metadata| metadata.is_file())
         .and_then(|metadata| i64::try_from(metadata.len()).ok())
+}
+
+/// Durable rows are processed in short background batches after startup.
+/// Completed means inspected, not necessarily populated: unreadable and
+/// absent files intentionally retain NULL so a later reconciliation can retry.
+#[derive(Debug, Clone, Default, Serialize)]
+pub struct SizeBackfillProgress {
+    pub running: bool,
+    pub completed: u64,
+    pub total: u64,
+    pub updated: u64,
+    pub unavailable: u64,
+    pub error: Option<String>,
+}
+
+fn count_missing_sizes(pool: &crate::db::DbPool) -> Result<u64> {
+    let conn = pool.get()?;
+    let count = conn.query_row(
+        "SELECT COUNT(*) FROM media
+         WHERE downloaded=1 AND missing=0 AND clip_start_secs IS NULL
+           AND file_size_bytes IS NULL",
+        [],
+        |row| row.get::<_, i64>(0),
+    )?;
+    Ok(count.max(0) as u64)
+}
+
+/// Inspect at most limit rows without holding a SQLite transaction across
+/// filesystem metadata calls. It is public for deterministic migration tests.
+pub fn backfill_size_batch(
+    pool: &crate::db::DbPool,
+    library: &Path,
+    after_id: i64,
+    limit: usize,
+) -> Result<(i64, u64, u64, u64, bool)> {
+    let rows = {
+        let conn = pool.get()?;
+        let mut statement = conn.prepare(
+            "SELECT id,filepath FROM media
+             WHERE id>?1 AND downloaded=1 AND missing=0
+               AND clip_start_secs IS NULL AND file_size_bytes IS NULL
+             ORDER BY id LIMIT ?2",
+        )?;
+        let rows = statement
+            .query_map(params![after_id, limit as i64], |row| {
+                Ok((row.get::<_, i64>(0)?, row.get::<_, String>(1)?))
+            })?
+            .collect::<rusqlite::Result<Vec<_>>>()?;
+        rows
+    };
+    if rows.is_empty() {
+        return Ok((after_id, 0, 0, 0, true));
+    }
+
+    let inspected = rows.len() as u64;
+    let next_after_id = rows.last().map(|(id, _)| *id).unwrap_or(after_id);
+    let measured: Vec<(i64, Option<i64>)> = rows
+        .into_iter()
+        .map(|(id, filepath)| (id, file_size(&library.join(filepath))))
+        .collect();
+    let unavailable = measured.iter().filter(|(_, size)| size.is_none()).count() as u64;
+    let updated = measured.iter().filter(|(_, size)| size.is_some()).count() as u64;
+
+    let conn = pool.get()?;
+    let tx = conn.unchecked_transaction()?;
+    for (id, size) in measured {
+        if let Some(size) = size {
+            tx.execute(
+                "UPDATE media SET file_size_bytes=?1
+                 WHERE id=?2 AND file_size_bytes IS NULL",
+                params![size, id],
+            )?;
+        }
+    }
+    tx.commit()?;
+    Ok((next_after_id, inspected, updated, unavailable, false))
+}
+
+/// Start a resumable, interruptible size backfill. It deliberately does not
+/// run during migrations and it never treats a failed metadata lookup as a
+/// missing-file verdict.
+pub async fn backfill_missing_file_sizes(
+    pool: crate::db::DbPool,
+    library: PathBuf,
+    shutdown: tokio_util::sync::CancellationToken,
+    progress: Arc<RwLock<SizeBackfillProgress>>,
+) {
+    {
+        let mut status = progress.write().await;
+        *status = SizeBackfillProgress {
+            running: true,
+            ..SizeBackfillProgress::default()
+        };
+    }
+    let total = match tokio::task::spawn_blocking({
+        let pool = pool.clone();
+        move || count_missing_sizes(&pool)
+    })
+    .await
+    {
+        Ok(Ok(total)) => total,
+        Ok(Err(error)) => {
+            let mut status = progress.write().await;
+            status.running = false;
+            status.error = Some(error.to_string());
+            return;
+        }
+        Err(error) => {
+            let mut status = progress.write().await;
+            status.running = false;
+            status.error = Some(format!("Size backfill worker stopped: {error}"));
+            return;
+        }
+    };
+    progress.write().await.total = total;
+
+    let mut after_id = 0;
+    loop {
+        if shutdown.is_cancelled() {
+            progress.write().await.running = false;
+            return;
+        }
+        let batch = tokio::task::spawn_blocking({
+            let pool = pool.clone();
+            let library = library.clone();
+            move || backfill_size_batch(&pool, &library, after_id, 128)
+        })
+        .await;
+        let (next, inspected, updated, unavailable, done) = match batch {
+            Ok(Ok(batch)) => batch,
+            Ok(Err(error)) => {
+                let mut status = progress.write().await;
+                status.running = false;
+                status.error = Some(error.to_string());
+                return;
+            }
+            Err(error) => {
+                let mut status = progress.write().await;
+                status.running = false;
+                status.error = Some(format!("Size backfill worker stopped: {error}"));
+                return;
+            }
+        };
+        {
+            let mut status = progress.write().await;
+            status.completed += inspected;
+            status.updated += updated;
+            status.unavailable += unavailable;
+            if done {
+                status.running = false;
+            }
+        }
+        if done {
+            return;
+        }
+        after_id = next;
+    }
 }
 
 fn modified_at(path: &Path) -> Option<String> {
@@ -128,6 +288,45 @@ pub fn reconcile_cancellable(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn size_backfill_is_batched_and_leaves_unavailable_rows_null() {
+        let root = tempfile::tempdir().unwrap();
+        let state = crate::test_support::state(root.path());
+        crate::test_support::source(&state);
+        std::fs::write(state.library_dir.join("test/present.jpg"), b"12345").unwrap();
+        let conn = state.pool.get().unwrap();
+        conn.execute_batch(
+            "INSERT INTO media(id,source_id,filepath,filename,type,added_at,downloaded) VALUES
+             (1,1,'test/present.jpg','present.jpg','image','now',1),
+             (2,1,'test/absent.jpg','absent.jpg','image','now',1)",
+        )
+        .unwrap();
+        let (after, inspected, updated, unavailable, done) =
+            backfill_size_batch(&state.pool, &state.library_dir, 0, 1).unwrap();
+        assert_eq!(
+            (after, inspected, updated, unavailable, done),
+            (1, 1, 1, 0, false)
+        );
+        let (_, inspected, updated, unavailable, done) =
+            backfill_size_batch(&state.pool, &state.library_dir, after, 1).unwrap();
+        assert_eq!((inspected, updated, unavailable, done), (1, 0, 1, false));
+        assert_eq!(
+            conn.query_row("SELECT file_size_bytes FROM media WHERE id=1", [], |row| {
+                row.get::<_, Option<i64>>(0)
+            })
+            .unwrap(),
+            Some(5)
+        );
+        assert_eq!(
+            conn.query_row("SELECT file_size_bytes FROM media WHERE id=2", [], |row| {
+                row.get::<_, Option<i64>>(0)
+            })
+            .unwrap(),
+            None
+        );
+    }
+
     #[test]
     fn missing_is_persistent_and_restoration_preserves_annotations() {
         let root = tempfile::tempdir().unwrap();

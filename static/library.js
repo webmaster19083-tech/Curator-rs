@@ -30,6 +30,7 @@ const explorer = {
   sourceCollapsed: new Set(),
   activityTimer: null,
   goon: null,
+  sizeBackfillRequest: false,
 };
 
 try {
@@ -50,6 +51,7 @@ function supportsPlayMode(mode) {
 function updatePlayCapabilities() {
   explorerAll('[data-play-mode="feed"]').forEach((button) => { button.hidden = !supportsPlayMode('feed'); });
   explorerAll('[data-play-mode="portrait"]').forEach((button) => { button.hidden = !supportsPlayMode('portrait'); });
+  explorerAll('[data-play-mode="vr"]').forEach((button) => { button.hidden = !supportsPlayMode('vr'); });
   const vr = explorerEl('#vr-btn'); if (vr && !supportsPlayMode('vr')) vr.hidden = true;
   if (!supportsPlayMode(explorer.playMode)) setPlayMode('slideshow', false);
 }
@@ -138,8 +140,12 @@ function updateNavigation() {
   if (!explorer.installed) return;
   renderExplorerSourceHierarchy();
   explorerAll('[data-nav]').forEach((button) => button.classList.toggle('active', button.dataset.nav === explorer.nav));
+  const category = ['search', 'sources', 'creators'].includes(explorer.nav) ? 'discover'
+    : ['groups', 'tags', 'ratings', 'review'].includes(explorer.nav) ? 'organization'
+      : ['downloads', 'recent'].includes(explorer.nav) ? 'activity' : 'library';
+  explorerAll('[data-top-nav]').forEach((button) => button.classList.toggle('active', button.dataset.topNav === category));
   const activeDownloads = state.sources.filter((source) => source.status === 'pending' || source.status === 'downloading').length;
-  const badge = explorerEl('#sidebar-download-count');
+  const badge = explorerEl('#topnav-download-count');
   if (badge) {
     badge.hidden = activeDownloads === 0;
     badge.textContent = activeDownloads ? String(activeDownloads) : '';
@@ -148,6 +154,31 @@ function updateNavigation() {
   if (stats) {
     const items = state.sources.reduce((sum, source) => sum + Number(source.item_count || 0), 0);
     stats.textContent = `${state.sources.length} sources · ${items.toLocaleString()} items`;
+  }
+}
+
+async function refreshExplorerSizeBackfill() {
+  const label = explorerEl('#explorer-size-backfill');
+  if (!label || explorer.sizeBackfillRequest) return;
+  explorer.sizeBackfillRequest = true;
+  try {
+    const summary = await api('/api/library/summary');
+    const progress = summary.size_backfill;
+    if (!progress) return;
+    if (progress.running) {
+      label.hidden = false;
+      label.textContent = 'Calculating file sizes… ' + Number(progress.completed || 0).toLocaleString() + ' / ' + Number(progress.total || 0).toLocaleString();
+    } else if (progress.error) {
+      label.hidden = false;
+      label.textContent = 'File-size backfill paused: ' + progress.error;
+    } else {
+      label.hidden = true;
+    }
+  } catch (_) {
+    // Size totals are supplementary; media browsing must stay usable during a
+    // transient diagnostics failure.
+  } finally {
+    explorer.sizeBackfillRequest = false;
   }
 }
 
@@ -341,6 +372,7 @@ async function explorerLoadView() {
   if (explorer.active !== 'media') return renderExplorerPanel(explorer.active);
   setExplorerVisible(true);
   const result = await explorerLegacy.loadView();
+  void refreshExplorerSizeBackfill();
   if (explorer.searchQuery.trim()) {
     state.currentItems = state.currentItems.filter((item) => localMediaMatch(item, explorer.searchQuery));
     state.renderedCount = 0;
@@ -498,7 +530,7 @@ function launchSlideshowItems(items) {
 }
 
 function setPlayMode(mode, persist = true) {
-  const names = { feed: 'Mobile Feed', slideshow: 'Slideshow', portrait: 'Portrait Wall', review: 'Review', goon: 'GOON' };
+  const names = { feed: 'Mobile Feed', slideshow: 'Slideshow', portrait: 'Portrait Wall', review: 'Review', goon: 'GOON', vr: 'VR' };
   mode = normalizePlayMode(mode);
   explorer.playMode = names[mode] ? mode : 'slideshow'; localStorage.setItem('curator-last-play-mode', explorer.playMode);
   const primary = explorerEl('#explorer-play-primary'); if (primary) primary.textContent = `Play · ${names[explorer.playMode]}`;
@@ -520,13 +552,14 @@ async function restorePlayMode() {
 }
 
 function launchPlayMode(mode = explorer.playMode, items = null) {
-  if (!supportsPlayMode(mode)) { toast(`${mode === 'feed' ? 'Mobile Feed' : 'Portrait Wall'} is unavailable on this device.`); return; }
+  if (!supportsPlayMode(mode)) { toast(`${mode === 'feed' ? 'Mobile Feed' : mode === 'vr' ? 'VR' : 'Portrait Wall'} is unavailable on this device.`); return; }
   setPlayMode(mode); const list = items?.length ? items : state.currentItems;
   if (mode === 'feed') startFeed(false, items?.length ? items : null);
   else if (mode === 'slideshow') launchSlideshowItems(list);
   else if (mode === 'portrait') startPortraitWall(items?.length ? items : null);
   else if (mode === 'review') startFeed(true, items?.length ? items : null);
   else if (mode === 'goon') startGoonSession(list);
+  else if (mode === 'vr') startVRMode();
 }
 
 // GOON is intentionally driven by one Web Audio timebase.  UI animation,
@@ -838,7 +871,11 @@ async function renderSearchPanel(panel) {
     const check = document.createElement('input'); check.type = 'checkbox'; check.value = provider.id; check.checked = selected.has(provider.id); check.disabled = provider.availability === 'unavailable';
     check.addEventListener('change', () => { const values = explorerAll('#discover-providers input:checked').map((input) => input.value); api('/api/settings', { method: 'PATCH', body: JSON.stringify({ search_providers: values }) }).catch(() => {}); });
     const text = document.createElement('span'); text.textContent = provider.name || provider.id;
-    const status = document.createElement('small'); status.textContent = provider.authentication_required ? 'auth required' : provider.availability || (provider.generated ? 'experimental' : 'available');
+    const status = document.createElement('small');
+    status.textContent = provider.authentication_required ? 'auth required'
+      : (provider.capabilities || []).includes('search')
+        ? (provider.availability || (provider.generated ? 'experimental' : 'available'))
+        : 'direct URL only';
     label.append(check, text, status); providerList.append(label);
   });
   const bulk = document.createElement('div'); bulk.className = 'discover-bulk'; bulk.innerHTML = '<label><input id="discover-select-all" type="checkbox"> Select all</label><span id="discover-selection-count">0 selected</span>';
@@ -1020,21 +1057,48 @@ function installExplorerUi() {
   const brandRoute = explorerEl('.explorer-brand > span:nth-child(2)', navigation); if (brandRoute) { brandRoute.id = 'explorer-route-label'; brandRoute.textContent = 'CURATOR / Library'; }
   const tools = explorerEl('.explorer-navigation', navigation);
   tools.innerHTML = '<details class="explorer-tools" open><summary>Tools</summary><section><h2>Library</h2><button data-nav="all" type="button">Library</button></section><section><h2>Discover</h2><button data-nav="search" type="button">Discover</button><button data-nav="sources" type="button">Sources</button><button data-nav="creators" type="button">Creators</button></section><section><h2>Organization</h2><button data-nav="groups" type="button">Groups</button><button data-nav="tags" type="button">Tags</button><button data-nav="ratings" type="button">Ratings</button><button data-nav="review" type="button">Review</button></section><section><h2>Activity</h2><button data-nav="downloads" type="button">Activity <span id="sidebar-download-count" class="nav-count" hidden></span></button><button data-nav="recent" type="button">Recent</button></section><section class="explorer-tool-actions"><h2>Actions</h2><button id="explorer-add-source" type="button">Add Source</button><button id="explorer-resync-all" type="button">Sync all</button><button id="explorer-pause-downloads" type="button">Pause / resume</button><button id="explorer-settings" type="button">Settings</button><button id="explorer-export" type="button">Export</button><button id="explorer-import" type="button">Import</button><a href="/api/log" target="_blank" rel="noopener noreferrer">View log</a></section></details><section class="explorer-source-tree"><h2>Source hierarchy</h2><div id="explorer-source-hierarchy"></div></section>';
+  // Primary navigation belongs at the top of the main window. Keep only the
+  // hierarchy section from the compatibility container so the sidebar stays
+  // dedicated to groups and sources.
+  const sourceTree = explorerEl('.explorer-source-tree', tools);
+  tools.replaceWith(sourceTree);
   explorerEl('.explorer-sidebar-content > footer', navigation).hidden = true;
   sidebar.prepend(navigation);
   explorerAll('[data-nav]', navigation).forEach((button) => button.addEventListener('click', () => navigateTo(button.dataset.nav)));
   explorerEl('#explorer-add-source', navigation).addEventListener('click', () => explorerEl('#add-source-btn')?.click());
   explorerEl('#explorer-settings', navigation).addEventListener('click', openSettingsModal);
-  explorerEl('#explorer-resync-all', navigation).addEventListener('click', () => explorerEl('#resync-all-btn')?.click());
-  explorerEl('#explorer-pause-downloads', navigation).addEventListener('click', () => explorerEl('#pause-downloads-btn')?.click());
-  explorerEl('#explorer-export', navigation).addEventListener('click', () => explorerEl('#export-btn')?.click());
-  explorerEl('#explorer-import', navigation).addEventListener('click', () => triggerImportPicker());
   explorerEl('.explorer-sidebar-close', navigation).addEventListener('click', closeSidebarDrawer);
 
   legacyToolbar.hidden = true; legacyToolbar.classList.add('legacy-toolbar');
   const toolbar = document.createElement('header'); toolbar.className = 'explorer-toolbar';
   toolbar.innerHTML = '<div class="explorer-toolbar-top"><div><p class="explorer-kicker">Library</p><h1 id="explorer-location">All Media</h1></div><div class="explorer-toolbar-actions"><button id="explorer-add-source-main" class="btn btn-ghost" type="button">+ Add source</button><label class="explorer-search"><span class="sr-only">Search library</span><input id="explorer-library-search" type="search" placeholder="Search library" autocomplete="off"></label><div class="explorer-play-split"><button id="explorer-play-primary" class="btn btn-accent" type="button">Play</button><button id="explorer-play-toggle" class="btn btn-accent" type="button" aria-label="Choose play mode" aria-haspopup="menu" aria-expanded="false">▾</button><div id="explorer-play-menu" role="menu" hidden><button type="button" data-play-mode="feed">Mobile Feed</button><button type="button" data-play-mode="slideshow">Slideshow</button><button type="button" data-play-mode="portrait">Portrait Wall</button><button type="button" data-play-mode="review">Review</button><button type="button" data-play-mode="goon">GOON</button></div></div></div></div><div class="explorer-toolbar-filters"><div class="explorer-type-buttons"><button type="button" data-type="all" class="explorer-type-filter active">All</button><button type="button" data-type="image" class="explorer-type-filter">Images</button><button type="button" data-type="clip" class="explorer-type-filter">Clips</button><button type="button" data-type="video" class="explorer-type-filter">Videos</button></div><select id="explorer-sort" aria-label="Sort media"><option value="default">Sort: default</option><optgroup label="Name"><option value="filename_asc">Name (A–Z)</option><option value="filename_desc">Name (Z–A)</option></optgroup><optgroup label="Date"><option value="date_desc">Date added (newest)</option><option value="date_asc">Date added (oldest)</option><option value="downloaded_desc">Date downloaded (newest)</option><option value="downloaded_asc">Date downloaded (oldest)</option><option value="modified_desc">Date modified (newest)</option><option value="modified_asc">Date modified (oldest)</option></optgroup><optgroup label="Media"><option value="duration_desc">Duration (longest)</option><option value="duration_asc">Duration (shortest)</option><option value="size_desc">File size (largest)</option><option value="size_asc">File size (smallest)</option><option value="rating_desc">Rating (highest)</option><option value="rating_asc">Rating (lowest)</option></optgroup><optgroup label="Source"><option value="creator_asc">Creator (A–Z)</option><option value="creator_desc">Creator (Z–A)</option><option value="source_asc">Source (A–Z)</option><option value="source_desc">Source (Z–A)</option></optgroup><option value="shuffle">Random</option></select><select id="explorer-tag-filter" aria-label="Filter by tag"><option value="">All tags</option></select><select id="explorer-max-rating" aria-label="Maximum rating"><option value="">All ratings</option><option value="4">Up to 4 stars</option><option value="3">Up to 3 stars</option><option value="2">Up to 2 stars</option><option value="1">Up to 1 star</option></select><select id="explorer-rating-status" aria-label="Rating status"><option value="">All review states</option><option value="unrated">Unrated</option><option value="auto">Auto rated</option><option value="needs_review">Needs review</option><option value="reviewed">Human reviewed</option></select></div><div id="explorer-bulk-bar" hidden><span id="explorer-selection-count" class="mono small"></span><button type="button" data-bulk="add-group">Add to Group</button><button type="button" data-bulk="add-tag">Add Tag</button><button type="button" data-bulk="set-rating">Set Rating</button><button type="button" data-bulk="move">Move</button><button type="button" data-bulk="delete" class="danger">Delete</button><button type="button" data-bulk="review">Review</button><button type="button" data-bulk="play">Play Selected</button><button type="button" data-bulk="refresh">Refresh Metadata</button><button type="button" data-bulk="open-source">Open Source</button><button type="button" data-bulk="clear">Clear</button></div>';
   legacyToolbar.before(toolbar);
+  const topNavigation = document.createElement('nav');
+  topNavigation.className = 'explorer-top-navigation';
+  topNavigation.setAttribute('aria-label', 'Primary navigation');
+  topNavigation.innerHTML = '<button type="button" data-top-nav="library">Library</button><button type="button" data-top-nav="discover">Discover</button><button type="button" data-top-nav="organization">Organization</button><button type="button" data-top-nav="activity">Activity <span id="topnav-download-count" class="nav-count" hidden></span></button><button type="button" data-top-nav="settings">Settings</button>';
+  explorerEl('.explorer-toolbar-top', toolbar).after(topNavigation);
+  const topDestinations = { library: 'all', discover: 'search', organization: 'groups', activity: 'downloads' };
+  explorerAll('[data-top-nav]', topNavigation).forEach((button) => button.addEventListener('click', () => {
+    const destination = button.dataset.topNav;
+    if (destination === 'settings') { openSettingsModal(); return; }
+    navigateTo(topDestinations[destination] || 'all');
+  }));
+  const sizeBackfill = document.createElement('small');
+  sizeBackfill.id = 'explorer-size-backfill';
+  sizeBackfill.className = 'muted mono';
+  sizeBackfill.hidden = true;
+  explorerEl('.explorer-toolbar-top', toolbar).append(sizeBackfill);
+  const sizeFilter = document.createElement('select');
+  const vrPlayButton = document.createElement('button');
+  vrPlayButton.type = 'button';
+  vrPlayButton.dataset.playMode = 'vr';
+  vrPlayButton.textContent = 'VR';
+  explorerEl('#explorer-play-menu', toolbar).append(vrPlayButton);
+  sizeFilter.id = 'explorer-size-filter';
+  sizeFilter.setAttribute('aria-label', 'Filter by file size');
+  sizeFilter.innerHTML = '<option value="">Any size</option><option value="under-10mb">Under 10 MB</option><option value="10mb-100mb">10–100 MB</option><option value="100mb-1gb">100 MB–1 GB</option><option value="over-1gb">Over 1 GB</option><option value="unknown">Unknown size</option>';
+  explorerEl('.explorer-toolbar-filters', toolbar).append(sizeFilter);
   const layoutControls = document.createElement('div'); layoutControls.className = 'explorer-layout-controls';
   layoutControls.setAttribute('role', 'group'); layoutControls.setAttribute('aria-label', 'Library layout');
   layoutControls.innerHTML = '<button type="button" data-library-layout="grid" aria-pressed="false">Grid</button><button type="button" data-library-layout="table" aria-pressed="false">Table</button>';
@@ -1051,6 +1115,7 @@ function installExplorerUi() {
   }));
   explorerEl('#explorer-sort').addEventListener('change', (event) => { state.sortOrder = event.target.value; gridShuffleSeed = state.sortOrder === 'shuffle' ? 1 + Math.floor(Math.random() * 2147483645) : null; explorerLoadView(); });
   explorerEl('#explorer-tag-filter').addEventListener('change', (event) => { state.tagFilter = event.target.value; explorerLoadView(); });
+  sizeFilter.addEventListener('change', (event) => { state.sizeFilter = event.target.value; explorerLoadView(); });
   explorerEl('#explorer-max-rating').addEventListener('change', (event) => { state.maxRatingFilter = event.target.value; explorerLoadView(); });
   explorerEl('#explorer-rating-status').addEventListener('change', (event) => { state.ratingStatus = event.target.value; explorerLoadView(); });
   explorerAll('[data-library-layout]', layoutControls).forEach((button) => button.addEventListener('click', () => setExplorerLayout(button.dataset.libraryLayout)));

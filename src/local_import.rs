@@ -4,11 +4,7 @@ use anyhow::Result;
 use rusqlite::OptionalExtension;
 use std::path::Path;
 
-pub fn import_folder(
-    state: &crate::AppState,
-    folder: &Path,
-    group_id: Option<i64>,
-) -> Result<i64> {
+pub fn import_folder(state: &crate::AppState, folder: &Path, group_id: Option<i64>) -> Result<i64> {
     let folder = dunce::canonicalize(folder)?;
     anyhow::ensure!(folder.is_dir(), "Select a folder");
     let library = dunce::canonicalize(&state.library_dir)?;
@@ -19,7 +15,9 @@ pub fn import_folder(
     let url = format!("local:{}", folder.to_string_lossy());
     let conn = state.pool.get()?;
     let existing: Option<i64> = conn
-        .query_row("SELECT id FROM sources WHERE url=?1", [&url], |row| row.get(0))
+        .query_row("SELECT id FROM sources WHERE url=?1", [&url], |row| {
+            row.get(0)
+        })
         .optional()?;
     let id = if let Some(id) = existing {
         id
@@ -51,10 +49,13 @@ pub fn sync_folder_with_cancel(
     folder: &Path,
     cancel: Option<tokio_util::sync::CancellationToken>,
 ) -> Result<()> {
-    let slug: String = state
-        .pool
-        .get()?
-        .query_row("SELECT slug FROM sources WHERE id=?1", [id], |row| row.get(0))?;
+    let slug: String =
+        state
+            .pool
+            .get()?
+            .query_row("SELECT slug FROM sources WHERE id=?1", [id], |row| {
+                row.get(0)
+            })?;
     let destination = state.library_dir.join(slug);
     std::fs::create_dir_all(&destination)?;
     let result = (|| -> Result<()> {

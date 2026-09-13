@@ -36,50 +36,50 @@ struct ManifestEntry {
 
 #[derive(Serialize)]
 struct Manifest {
-    version:            &'static str,
-    name:               String,
-    author:             String,
-    description:        String,
-    preview:            &'static str,
-    unlock_cost:        i64,
+    version: &'static str,
+    name: String,
+    author: String,
+    description: String,
+    preview: &'static str,
+    unlock_cost: i64,
     required_challenge: &'static str,
-    patreon_exclusive:  bool,
-    media:              Vec<ManifestEntry>,
-    social_links:       SocialLinks,
+    patreon_exclusive: bool,
+    media: Vec<ManifestEntry>,
+    social_links: SocialLinks,
 }
 
 #[derive(Serialize, Default)]
 struct SocialLinks {
-    onlyfans:     String,
-    fansly:       String,
-    twitter:      String,
-    linktree:     String,
-    manyvids:     String,
-    redgifs:      String,
-    discord:      String,
-    patreon:      String,
+    onlyfans: String,
+    fansly: String,
+    twitter: String,
+    linktree: String,
+    manyvids: String,
+    redgifs: String,
+    discord: String,
+    patreon: String,
     subscribestar: String,
-    kofi:         String,
+    kofi: String,
 }
 
 // ─── Media row for export ─────────────────────────────────────────────────────
 
 pub struct ExportRow {
     pub filepath: String,
-    pub kind:     String,   // "image" or "video"
-    pub rating:   i64,
-    pub tags:     Vec<String>,
+    pub kind: String, // "image" or "video"
+    pub rating: i64,
+    pub tags: Vec<String>,
 }
 
 // ─── build_chpack ─────────────────────────────────────────────────────────────
 // Streams files directly into a NamedTempFile — no full-library RAM bomb.
 
 pub fn build_chpack(
-    pack_name:   String,
-    author:      String,
+    pack_name: String,
+    author: String,
     description: String,
     unlock_cost: i64,
-    rows:        Vec<ExportRow>,
+    rows: Vec<ExportRow>,
     library_dir: &Path,
 ) -> Result<NamedTempFile> {
     let tmp = NamedTempFile::new().context("creating temp file for .chpack")?;
@@ -95,9 +95,12 @@ pub fn build_chpack(
 
     for row in &rows {
         let src_path = dunce::simplified(&library_dir.join(&row.filepath)).to_path_buf();
-        if !src_path.exists() { continue; }
+        if !src_path.exists() {
+            continue;
+        }
 
-        let ext = src_path.extension()
+        let ext = src_path
+            .extension()
             .and_then(|e| e.to_str())
             .map(|e| format!(".{}", e.to_lowercase()))
             .unwrap_or_default();
@@ -105,7 +108,9 @@ pub fn build_chpack(
         let speed_tag = rating_to_speed(row.rating);
 
         // Strip curator tags that would collide with speed tag names
-        let own_tags: Vec<String> = row.tags.iter()
+        let own_tags: Vec<String> = row
+            .tags
+            .iter()
             .filter(|t| !is_speed_tag(t.as_str()))
             .cloned()
             .collect();
@@ -114,12 +119,19 @@ pub fn build_chpack(
         let arc_path = format!("media/{}", archive_filename);
 
         zip.start_file(&arc_path, options)?;
-        let mut f = std::fs::File::open(&src_path)
-            .with_context(|| format!("opening {:?}", src_path))?;
+        let mut f =
+            std::fs::File::open(&src_path).with_context(|| format!("opening {:?}", src_path))?;
         std::io::copy(&mut f, &mut zip)?;
 
-        let file_kind = if row.kind == "video" { "video" } else { "image" };
-        media_entries.push(ManifestEntry { file: archive_filename, kind: file_kind.to_string() });
+        let file_kind = if row.kind == "video" {
+            "video"
+        } else {
+            "image"
+        };
+        media_entries.push(ManifestEntry {
+            file: archive_filename,
+            kind: file_kind.to_string(),
+        });
 
         idx += 1;
     }
@@ -129,16 +141,16 @@ pub fn build_chpack(
     }
 
     let manifest = Manifest {
-        version:            "0.02a",
-        name:               pack_name,
+        version: "0.02a",
+        name: pack_name,
         author,
         description,
-        preview:            "",
+        preview: "",
         unlock_cost,
         required_challenge: "",
-        patreon_exclusive:  false,
-        media:              media_entries,
-        social_links:       SocialLinks::default(),
+        patreon_exclusive: false,
+        media: media_entries,
+        social_links: SocialLinks::default(),
     };
 
     zip.start_file("manifest.json", options)?;
@@ -166,9 +178,16 @@ pub fn safe_pack_filename(name: &str) -> String {
 /// tag is folded into the same sort rather than appended last, so a file
 /// tagged e.g. "thighs" + "cum" round-trips to the same filename
 /// (`cum_thighs`, not `thighs_cum`) either tool would produce.
-fn build_archive_filename(idx: usize, own_tags: &[String], speed_tag: Option<&str>, ext: &str) -> String {
+fn build_archive_filename(
+    idx: usize,
+    own_tags: &[String],
+    speed_tag: Option<&str>,
+    ext: &str,
+) -> String {
     let mut tag_parts: Vec<String> = own_tags.to_vec();
-    if let Some(spd) = speed_tag { tag_parts.push(spd.to_string()); }
+    if let Some(spd) = speed_tag {
+        tag_parts.push(spd.to_string());
+    }
     tag_parts.sort();
 
     let mut parts = vec![idx.to_string()];

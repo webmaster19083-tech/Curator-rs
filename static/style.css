@@ -1112,8 +1112,8 @@ button {
   max-width: 80vw;
   text-align: center;
 }
-#vr-container { flex: 1; }
-#vr-container canvas { width: 100%; height: 100%; display: block; }
+#vr-container { flex: 1; display: grid; place-items: center; overflow: hidden; }
+#vr-container img { max-width: 100%; max-height: 100%; object-fit: contain; display: block; }
 .feed-scroll {
   flex: 1;
   overflow-y: scroll;
@@ -1381,6 +1381,9 @@ body.explorer-ready .legacy-toolbar { display: none !important; }
 .explorer-toolbar { position: sticky; top: 0; z-index: 8; padding: 20px 24px 12px; border-bottom: 1px solid var(--line-soft); background: color-mix(in srgb, var(--bg-void) 93%, transparent); backdrop-filter: blur(14px); }
 .explorer-toolbar-top, .explorer-toolbar-actions, .explorer-toolbar-filters, .explorer-type-buttons, .explorer-play-split, #explorer-bulk-bar { display: flex; align-items: center; gap: 8px; }
 .explorer-toolbar-top { justify-content: space-between; gap: 18px; }
+.explorer-top-navigation { display: flex; align-items: center; gap: 3px; overflow-x: auto; margin-top: 13px; padding: 3px; border: 1px solid var(--line-soft); border-radius: 8px; background: var(--bg-elevated); scrollbar-width: thin; }
+.explorer-top-navigation button { display: inline-flex; align-items: center; justify-content: center; gap: 6px; min-height: 31px; padding: 5px 10px; border: 0; border-radius: 6px; color: var(--text-muted); background: transparent; font: 600 12px var(--font-body); white-space: nowrap; cursor: pointer; }
+.explorer-top-navigation button:hover, .explorer-top-navigation button.active { color: var(--accent-text); background: var(--accent); }
 .explorer-kicker { margin: 0 0 3px; color: var(--text-dim); font: 11px var(--font-mono); text-transform: uppercase; letter-spacing: .1em; }
 .explorer-toolbar h1 { font-size: 24px; }
 .explorer-search input { width: min(28vw, 280px); min-height: 35px; padding: 0 11px; border: 1px solid var(--line); border-radius: 8px; color: var(--text-primary); background: var(--bg-elevated); }
@@ -1404,7 +1407,7 @@ body.explorer-ready .legacy-toolbar { display: none !important; }
 #explorer-bulk-bar span { min-width: 78px; color: var(--accent-hover); }
 #explorer-bulk-bar .danger { color: var(--err); }
 .explorer-columns, .explorer-row { display: grid; grid-template-columns: 34px minmax(220px,2.2fr) minmax(100px,1fr) minmax(110px,1fr) 78px 88px 74px 110px; align-items: center; column-gap: 10px; }
-.explorer-columns { position: sticky; top: 128px; z-index: 7; min-height: 34px; padding: 0 24px; border-bottom: 1px solid var(--line-soft); color: var(--text-dim); background: var(--bg-panel); font: 10px var(--font-mono); text-transform: uppercase; letter-spacing: .06em; }
+.explorer-columns { position: sticky; top: 174px; z-index: 7; min-height: 34px; padding: 0 24px; border-bottom: 1px solid var(--line-soft); color: var(--text-dim); background: var(--bg-panel); font: 10px var(--font-mono); text-transform: uppercase; letter-spacing: .06em; }
 .explorer-columns button { padding: 0; border: 0; color: inherit; background: none; text-align: left; font: inherit; cursor: pointer; }
 .explorer-rows { display: block; padding: 0 14px 30px; }
 .explorer-rows.explorer-grid-layout { display: grid; grid-template-columns: repeat(auto-fill, minmax(180px, 1fr)); gap: 12px; padding: 18px 24px 34px; }
@@ -1498,7 +1501,7 @@ body.explorer-ready .legacy-toolbar { display: none !important; }
   .explorer-columns > :nth-child(3), .explorer-columns > :nth-child(4), .explorer-columns > :nth-child(5), .explorer-columns > :nth-child(8),
   .explorer-row > .explorer-creator, .explorer-row > .explorer-source, .explorer-row > .explorer-duration, .explorer-row > .explorer-date { display: none; }
   .explorer-toolbar { padding: 16px 14px 10px 52px; }
-  .explorer-columns { top: 130px; padding: 0 14px; }
+  .explorer-columns { top: 176px; padding: 0 14px; }
   .explorer-rows { padding: 0 8px 20px; }
   .explorer-rows.explorer-grid-layout { grid-template-columns: repeat(auto-fill, minmax(145px, 1fr)); gap: 8px; padding: 12px; }
   .explorer-grid-layout .explorer-thumb { height: 175px; }

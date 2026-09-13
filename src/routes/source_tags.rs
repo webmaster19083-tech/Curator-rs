@@ -72,11 +72,19 @@ pub async fn review(
             "skip" => "skip",
             "edit" => "normalize",
             "add" => "add",
-            _ => return Err((StatusCode::BAD_REQUEST, Json(json!({"error":"Review action must be add, edit, or skip"})))),
+            _ => {
+                return Err((
+                    StatusCode::BAD_REQUEST,
+                    Json(json!({"error":"Review action must be add, edit, or skip"})),
+                ))
+            }
         };
         let scope = body.scope.as_deref().unwrap_or("provider");
         if !matches!(scope, "provider" | "global") {
-            return Err((StatusCode::BAD_REQUEST, Json(json!({"error":"Rule scope must be provider or global"}))));
+            return Err((
+                StatusCode::BAD_REQUEST,
+                Json(json!({"error":"Rule scope must be provider or global"})),
+            ));
         }
         Some(
             provenance::upsert_rule(
@@ -100,7 +108,9 @@ pub async fn list_rules(
     State(state): State<Arc<AppState>>,
 ) -> Result<Json<Value>, (StatusCode, Json<Value>)> {
     let conn = state.pool.get().map_err(db_err)?;
-    Ok(Json(json!({"rules":provenance::list_rules(&conn).map_err(db_err)?})))
+    Ok(Json(
+        json!({"rules":provenance::list_rules(&conn).map_err(db_err)?}),
+    ))
 }
 
 pub async fn save_rule(
@@ -108,7 +118,9 @@ pub async fn save_rule(
     Json(input): Json<provenance::RuleInput>,
 ) -> Result<Json<Value>, (StatusCode, Json<Value>)> {
     let conn = state.pool.get().map_err(db_err)?;
-    Ok(Json(json!({"rule":provenance::upsert_rule(&conn, &input).map_err(db_err)?})))
+    Ok(Json(
+        json!({"rule":provenance::upsert_rule(&conn, &input).map_err(db_err)?}),
+    ))
 }
 
 pub async fn delete_rule(
@@ -117,7 +129,10 @@ pub async fn delete_rule(
 ) -> Result<Json<Value>, (StatusCode, Json<Value>)> {
     let conn = state.pool.get().map_err(db_err)?;
     if !provenance::delete_rule(&conn, id).map_err(db_err)? {
-        return Err((StatusCode::NOT_FOUND, Json(json!({"error":"Tag rule not found"}))));
+        return Err((
+            StatusCode::NOT_FOUND,
+            Json(json!({"error":"Tag rule not found"})),
+        ));
     }
     Ok(Json(json!({"status":"deleted"})))
 }

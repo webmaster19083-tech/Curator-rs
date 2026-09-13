@@ -1,0 +1,20 @@
+// Merge this example into your Tailnet policy after replacing every placeholder.
+// Curator has no application login: each allowed source is a full Curator
+// administrator. Keep this group limited to your own devices/users.
+{
+  "groups": {
+    "group:curator-owners": ["you@example.com"],
+  },
+
+  "tagOwners": {
+    "tag:curator-host": ["group:curator-owners"],
+  },
+
+  "grants": [
+    {
+      "src": ["group:curator-owners"],
+      "dst": ["tag:curator-host"],
+      "ip": ["tcp:42168"],
+    },
+  ],
+}

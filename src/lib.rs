@@ -2,6 +2,8 @@ mod beat;
 mod chpack;
 mod config;
 mod db;
+#[cfg(test)]
+mod desktop_tests;
 mod downloader;
 mod duration;
 mod hierarchy;
@@ -18,6 +20,7 @@ mod startup;
 #[cfg(test)]
 mod test_support;
 mod thumb_worker;
+pub mod url_guard;
 mod virtual_clips;
 
 use std::collections::{HashMap, HashSet, VecDeque};
@@ -83,14 +86,18 @@ pub struct AppState {
     /// Provider-wide cooldowns complement persisted source retries. They are
     /// process-local by design; source-level retry timestamps survive restart.
     pub download_cooldowns: Arc<Mutex<HashMap<String, Instant>>>,
-    /// Tracks the one process-owned HTTP listener used by desktop, LAN, and
-    /// Tailscale clients.
+    /// Tracks the one process-owned HTTP listener used by the desktop shell,
+    /// loopback browser fallback, and explicitly bound Tailscale addresses.
     pub remote_server: Arc<remote::ServerStatus>,
     /// A small cross-mode history makes a freshly randomized session avoid
     /// picking the item that just played. It is intentionally ephemeral: media
     /// is not private activity telemetry and a restart begins a new session.
     pub playback_history: Arc<Mutex<VecDeque<i64>>>,
     pub settings: Arc<RwLock<db::Settings>>,
+    /// Live, UI-visible progress for the cheap post-startup size backfill.
+    /// This is not migration state: an interrupted run safely restarts from
+    /// rows that still have NULL file_size_bytes.
+    pub size_backfill: Arc<RwLock<media_files::SizeBackfillProgress>>,
     /// Version-aware discovery registry built once at process startup.
     pub search_registry: Arc<routes::search::ProviderRegistry>,
     pub data_dir: PathBuf,
@@ -237,7 +244,10 @@ pub async fn initialize() -> Result<AppState> {
     }
     let action_worker_path = data_dir.join("action_worker.py");
     if let Err(e) = std::fs::write(&action_worker_path, ACTION_WORKER_PY) {
-        warn!("Could not write action_worker.py to {:?}: {}", action_worker_path, e);
+        warn!(
+            "Could not write action_worker.py to {:?}: {}",
+            action_worker_path, e
+        );
     }
     let nsfw_classifier = if settings.nsfw_filter_enabled {
         info!("NSFW auto-rating enabled — starting classifier worker");
@@ -327,6 +337,7 @@ pub async fn initialize() -> Result<AppState> {
         remote_server: Arc::new(remote::ServerStatus::new(remote::DEFAULT_SERVER_PORT)),
         playback_history: Arc::new(Mutex::new(VecDeque::with_capacity(24))),
         settings: Arc::new(RwLock::new(settings)),
+        size_backfill: Arc::new(RwLock::new(media_files::SizeBackfillProgress::default())),
         search_registry,
         data_dir: data_dir.clone(),
         library_dir: library_dir.clone(),
@@ -342,6 +353,20 @@ pub async fn initialize() -> Result<AppState> {
         action_classifier,
         action_model_path,
     };
+
+    // File size migration is schema-only. Reading metadata for legacy rows is
+    // deferred to a bounded background job so startup stays responsive and
+    // the Explorer can show real progress rather than a blocked window.
+    let size_backfill_state = state.clone();
+    state.download_tasks.spawn(async move {
+        media_files::backfill_missing_file_sizes(
+            size_backfill_state.pool.clone(),
+            size_backfill_state.library_dir.clone(),
+            size_backfill_state.shutdown.clone(),
+            size_backfill_state.size_backfill.clone(),
+        )
+        .await;
+    });
 
     // Recover completed files whose final event was lost before a crash.
     let startup_state = state.clone();
@@ -430,7 +455,10 @@ impl AppState {
 
 pub async fn library_summary(state: &AppState) -> Result<serde_json::Value> {
     let pool = state.pool.clone();
-    tokio::task::spawn_blocking(move || hierarchy::summary(&*pool.get()?)).await?
+    let mut summary =
+        tokio::task::spawn_blocking(move || hierarchy::summary(&*pool.get()?)).await??;
+    summary["size_backfill"] = serde_json::to_value(state.size_backfill.read().await.clone())?;
+    Ok(summary)
 }
 
 pub fn media_path(state: &AppState, id: i64) -> Result<PathBuf> {

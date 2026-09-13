@@ -56,16 +56,10 @@ fn default_library_layout() -> String {
     "grid".into()
 }
 fn default_search_providers() -> Vec<String> {
-    // Search is intentionally opt-in per provider.  "local" does not make
-    // a network request; the other five are the useful discovery defaults.
-    vec![
-        "local".into(),
-        "balbums".into(),
-        "kemono".into(),
-        "erome".into(),
-        "redgifs".into(),
-        "deviantart".into(),
-    ]
+    // Search is intentionally opt-in per provider. The only current remote
+    // free-text adapter is Balbums; the other registry entries are exposed
+    // honestly as direct-URL-only until they gain a real adapter.
+    vec!["local".into(), "balbums".into()]
 }
 fn default_goon_persona() -> String {
     "neutral".into()
@@ -353,7 +347,9 @@ pub fn run_migrations(conn: &Connection) -> Result<()> {
         ("progress_updated_at", "TEXT"),
     ] {
         if !src_cols.contains(name) {
-            conn.execute_batch(&format!("ALTER TABLE sources ADD COLUMN {name} {definition};"))?;
+            conn.execute_batch(&format!(
+                "ALTER TABLE sources ADD COLUMN {name} {definition};"
+            ))?;
         }
     }
 
@@ -407,10 +403,16 @@ pub fn run_migrations(conn: &Connection) -> Result<()> {
             "INTEGER REFERENCES media(id) ON DELETE SET NULL",
         ),
         ("clip_start_secs", "REAL CHECK(clip_start_secs >= 0)"),
-        ("clip_end_secs", "REAL CHECK(clip_end_secs > clip_start_secs)"),
+        (
+            "clip_end_secs",
+            "REAL CHECK(clip_end_secs > clip_start_secs)",
+        ),
         ("auto_rating", "INTEGER NOT NULL DEFAULT 0"),
         ("auto_rating_score", "REAL"),
-        ("human_rating", "INTEGER CHECK(human_rating BETWEEN 1 AND 5)"),
+        (
+            "human_rating",
+            "INTEGER CHECK(human_rating BETWEEN 1 AND 5)",
+        ),
         ("rating_source", "TEXT NOT NULL DEFAULT 'none'"),
         ("rating_reviewed", "INTEGER NOT NULL DEFAULT 0"),
         ("rating_reviewed_at", "TEXT"),
@@ -427,8 +429,14 @@ pub fn run_migrations(conn: &Connection) -> Result<()> {
         ("action_model_version", "TEXT"),
         ("action_score", "REAL"),
         ("action_evidence", "TEXT"),
-        ("action_rating", "INTEGER NOT NULL DEFAULT 0 CHECK(action_rating BETWEEN 0 AND 4)"),
-        ("classification_label", "TEXT NOT NULL DEFAULT 'unclassified'"),
+        (
+            "action_rating",
+            "INTEGER NOT NULL DEFAULT 0 CHECK(action_rating BETWEEN 0 AND 4)",
+        ),
+        (
+            "classification_label",
+            "TEXT NOT NULL DEFAULT 'unclassified'",
+        ),
         ("manual_review_required", "INTEGER NOT NULL DEFAULT 0"),
         ("manual_review_reason", "TEXT"),
         ("classification_updated_at", "TEXT"),
@@ -445,7 +453,8 @@ pub fn run_migrations(conn: &Connection) -> Result<()> {
         error TEXT, added_at TEXT NOT NULL);
         UPDATE clip_jobs SET status='failed',error='Interrupted by restart; original preserved' WHERE status='running';")?;
     conn.execute_batch(
-        "CREATE INDEX IF NOT EXISTS idx_media_review ON media(rating_reviewed, auto_rating, id);",
+        "CREATE INDEX IF NOT EXISTS idx_media_review ON media(rating_reviewed, auto_rating, id);
+         CREATE INDEX IF NOT EXISTS idx_media_size ON media(file_size_bytes, id);",
     )?;
     conn.execute_batch("CREATE TABLE IF NOT EXISTS placeholder_scans (
         source_id INTEGER PRIMARY KEY REFERENCES sources(id) ON DELETE CASCADE,
@@ -591,7 +600,9 @@ pub fn run_migrations(conn: &Connection) -> Result<()> {
         ("rating_phases", "TEXT"),
     ] {
         if !session_cols.contains(name) {
-            conn.execute_batch(&format!("ALTER TABLE interactive_sessions ADD COLUMN {name} {definition};"))?;
+            conn.execute_batch(&format!(
+                "ALTER TABLE interactive_sessions ADD COLUMN {name} {definition};"
+            ))?;
         }
     }
     conn.execute_batch(
@@ -953,27 +964,25 @@ pub fn now_iso() -> String {
 // ─── Group tag cache helpers ──────────────────────────────────────────────────
 
 /// group_id → [itself, parent, grandparent, ...] up to root
-pub fn build_group_ancestry_map(conn: &Connection) -> HashMap<i64, Vec<i64>> {
+pub fn build_group_ancestry_map(conn: &Connection) -> rusqlite::Result<HashMap<i64, Vec<i64>>> {
     struct G {
         id: i64,
         parent_id: Option<i64>,
     }
     let rows: Vec<G> = {
-        let mut stmt = conn.prepare("SELECT id, parent_id FROM groups").unwrap();
-        stmt.query_map([], |r| {
+        let mut stmt = conn.prepare("SELECT id, parent_id FROM groups")?;
+        let rows = stmt.query_map([], |r| {
             Ok(G {
                 id: r.get(0)?,
                 parent_id: r.get(1)?,
             })
-        })
-        .unwrap()
-        .filter_map(|r| r.ok())
-        .collect()
+        })?;
+        rows.collect::<rusqlite::Result<Vec<_>>>()?
     };
 
     let parents: HashMap<i64, Option<i64>> = rows.iter().map(|g| (g.id, g.parent_id)).collect();
 
-    parents
+    Ok(parents
         .keys()
         .map(|&gid| {
             let mut chain = vec![gid];
@@ -989,38 +998,38 @@ pub fn build_group_ancestry_map(conn: &Connection) -> HashMap<i64, Vec<i64>> {
             }
             (gid, chain)
         })
-        .collect()
+        .collect())
 }
 
 /// group_id → set of tag names (group's own name + explicit tags + all ancestors' names+tags)
-pub fn build_group_effective_tags_map(conn: &Connection) -> HashMap<i64, HashSet<String>> {
-    let ancestry = build_group_ancestry_map(conn);
+pub fn build_group_effective_tags_map(
+    conn: &Connection,
+) -> rusqlite::Result<HashMap<i64, HashSet<String>>> {
+    let ancestry = build_group_ancestry_map(conn)?;
 
     let names: HashMap<i64, String> = {
-        let mut stmt = conn.prepare("SELECT id, name FROM groups").unwrap();
-        stmt.query_map([], |r| Ok((r.get::<_, i64>(0)?, r.get::<_, String>(1)?)))
-            .unwrap()
-            .filter_map(|r| r.ok())
+        let mut stmt = conn.prepare("SELECT id, name FROM groups")?;
+        let rows = stmt.query_map([], |r| Ok((r.get::<_, i64>(0)?, r.get::<_, String>(1)?)))?;
+        rows.collect::<rusqlite::Result<Vec<_>>>()?
+            .into_iter()
             .map(|(id, name)| (id, name.trim().to_lowercase()))
             .collect()
     };
 
     let mut own_tags: HashMap<i64, HashSet<String>> = HashMap::new();
     {
-        let mut stmt = conn
-            .prepare(
-                "SELECT gt.group_id, t.name FROM group_tags gt JOIN tags t ON t.id = gt.tag_id",
-            )
-            .unwrap();
-        stmt.query_map([], |r| Ok((r.get::<_, i64>(0)?, r.get::<_, String>(1)?)))
-            .unwrap()
-            .filter_map(|r| r.ok())
+        let mut stmt = conn.prepare(
+            "SELECT gt.group_id, t.name FROM group_tags gt JOIN tags t ON t.id = gt.tag_id",
+        )?;
+        let rows = stmt.query_map([], |r| Ok((r.get::<_, i64>(0)?, r.get::<_, String>(1)?)))?;
+        rows.collect::<rusqlite::Result<Vec<_>>>()?
+            .into_iter()
             .for_each(|(gid, tag)| {
                 own_tags.entry(gid).or_default().insert(tag);
             });
     }
 
-    ancestry
+    Ok(ancestry
         .into_iter()
         .map(|(gid, chain)| {
             let mut tags = HashSet::new();
@@ -1036,7 +1045,7 @@ pub fn build_group_effective_tags_map(conn: &Connection) -> HashMap<i64, HashSet
             }
             (gid, tags)
         })
-        .collect()
+        .collect())
 }
 
 #[cfg(test)]
@@ -1176,7 +1185,10 @@ mod rating_migration_tests {
             VALUES(1,1,'a','a','image','2026',3,4,0.72,'human',1,'2026');").unwrap();
         super::run_migrations(&conn).unwrap();
         let row: (i64,i64,Option<f64>,String,bool,Option<String>) = conn.query_row("SELECT rating,auto_rating,auto_rating_score,rating_source,rating_reviewed,rating_reviewed_at FROM media", [], |r| Ok((r.get(0)?,r.get(1)?,r.get(2)?,r.get(3)?,r.get(4)?,r.get(5)?))).unwrap();
-        assert_eq!(row, (3, 4, Some(0.72), "human".into(), true, Some("2026".into())));
+        assert_eq!(
+            row,
+            (3, 4, Some(0.72), "human".into(), true, Some("2026".into()))
+        );
         conn.execute_batch("UPDATE media SET rating=2,rating_source='human',rating_reviewed=1,rating_reviewed_at='2027';").unwrap();
         super::run_migrations(&conn).unwrap();
         assert!(conn
@@ -1224,10 +1236,13 @@ mod rating_migration_tests {
             [], |row| Ok((row.get(0)?,row.get(1)?,row.get(2)?,row.get(3)?,row.get(4)?,row.get(5)?)),
         ).unwrap();
         assert_eq!(human, (2, 2, 2, "human".into(), true, "pending".into()));
-        let five: (i64, i64, Option<i64>) = conn.query_row(
-            "SELECT rating,auto_rating,human_rating FROM media WHERE id=2", [],
-            |row| Ok((row.get(0)?,row.get(1)?,row.get(2)?)),
-        ).unwrap();
+        let five: (i64, i64, Option<i64>) = conn
+            .query_row(
+                "SELECT rating,auto_rating,human_rating FROM media WHERE id=2",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+            )
+            .unwrap();
         assert_eq!(five, (5, 5, None));
     }
 }

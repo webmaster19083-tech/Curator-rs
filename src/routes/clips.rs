@@ -9,7 +9,7 @@ use axum::{
 use rusqlite::OptionalExtension;
 use serde::Deserialize;
 use serde_json::{json, Value};
-use std::{path::PathBuf, sync::Arc};
+use std::sync::Arc;
 
 type ApiResult = Result<Json<Value>, (StatusCode, Json<Value>)>;
 static CLIP_SLOT: once_cell::sync::Lazy<Arc<tokio::sync::Semaphore>> =
@@ -25,10 +25,13 @@ pub async fn create(
     Path(id): Path<i64>,
     Json(body): Json<ClipBody>,
 ) -> ApiResult {
-    if !(15..=60).contains(&body.seconds) {
+    let max_clip_length_secs = state.settings.read().await.max_clip_length_secs;
+    if !(15..=max_clip_length_secs).contains(&body.seconds) {
         return Err((
             StatusCode::BAD_REQUEST,
-            Json(json!({"error":"Clip length must be 15 to 60 seconds"})),
+            Json(
+                json!({"error":format!("Clip length must be 15 to {max_clip_length_secs} seconds")}),
+            ),
         ));
     }
     let permit = CLIP_SLOT.clone().try_acquire_owned().map_err(|_| {
@@ -60,7 +63,15 @@ pub async fn create(
     let worker = state.clone();
     state.download_tasks.spawn(async move {
         let _permit = permit;
-        let result = split_video(worker.clone(), id, job_id, filepath, body.seconds).await;
+        let result = split_video(
+            worker.clone(),
+            id,
+            job_id,
+            filepath,
+            body.seconds,
+            max_clip_length_secs,
+        )
+        .await;
         if let Ok(conn) = worker.pool.get() {
             match result {
                 Ok(count) => {
@@ -88,26 +99,13 @@ pub async fn status(State(state): State<Arc<AppState>>, Path(id): Path<i64>) -> 
     })))).map_err(|e| if matches!(e,rusqlite::Error::QueryReturnedNoRows) {(StatusCode::NOT_FOUND,Json(json!({"error":"Clip job not found"})))} else {db_err(e)})
 }
 
-fn ffmpeg_path(probe: &str) -> PathBuf {
-    let name = if cfg!(windows) {
-        "ffmpeg.exe"
-    } else {
-        "ffmpeg"
-    };
-    let sibling = std::path::Path::new(probe).with_file_name(name);
-    if sibling.is_file() {
-        sibling
-    } else {
-        PathBuf::from(name)
-    }
-}
-
 async fn split_video(
     state: Arc<AppState>,
     id: i64,
     job: i64,
     filepath: String,
     seconds: u32,
+    max_clip_length_secs: u32,
 ) -> anyhow::Result<i64> {
     let library = state.library_dir.canonicalize()?;
     let original = library.join(&filepath).canonicalize()?;
@@ -123,8 +121,9 @@ async fn split_video(
     .await?
     .ok_or_else(|| anyhow::anyhow!("Could not read video duration with ffprobe"))?;
     anyhow::ensure!(
-        duration > 90.0,
-        "Only videos longer than 90 seconds need splitting"
+        duration > f64::from(max_clip_length_secs),
+        "Only videos longer than {} seconds need splitting",
+        max_clip_length_secs
     );
     let original_stamp = crate::media_files::stamp(&original);
     let staging = tempfile::Builder::new()
@@ -132,7 +131,7 @@ async fn split_video(
         .tempdir_in(&state.data_dir)?;
     let output_pattern = staging.path().join("clip-%04d.mp4");
     let log = tempfile::tempfile()?;
-    let mut child = tokio::process::Command::new(ffmpeg_path(&state.ffprobe_bin))
+    let mut child = tokio::process::Command::new(&state.ffmpeg_bin)
         .args(["-nostdin", "-hide_banner", "-loglevel", "error", "-n", "-i"])
         .arg(&original)
         .args([
@@ -199,7 +198,10 @@ async fn split_video(
         for clip in &clips {
             let duration = crate::downloader::probe_video_duration(&state.ffprobe_bin, &clip.path())
                 .ok_or_else(|| anyhow::anyhow!("Could not verify generated clip"))?;
-            anyhow::ensure!(duration > 0.0 && duration <= 90.0, "Generated clip exceeds the clip category limit");
+            anyhow::ensure!(
+                duration > 0.0 && duration <= f64::from(max_clip_length_secs),
+                "Generated clip exceeds the configured clip category limit"
+            );
             durations.push(duration);
         }
         let destination = original.parent().unwrap().join(format!("curator-clips-{id}-{job}"));
@@ -236,9 +238,18 @@ mod tests {
         let root = tempfile::tempdir().unwrap();
         let mut state = crate::test_support::state(root.path());
         Arc::get_mut(&mut state).unwrap().ffprobe_bin = probe.clone();
+        let ffmpeg = std::path::Path::new(&probe)
+            .with_file_name(if cfg!(windows) {
+                "ffmpeg.exe"
+            } else {
+                "ffmpeg"
+            })
+            .to_string_lossy()
+            .into_owned();
+        Arc::get_mut(&mut state).unwrap().ffmpeg_bin = ffmpeg.clone();
         crate::test_support::source(&state);
         let original = state.library_dir.join("test/original.mp4");
-        let generated = std::process::Command::new(ffmpeg_path(&probe))
+        let generated = std::process::Command::new(&ffmpeg)
             .args([
                 "-nostdin",
                 "-v",

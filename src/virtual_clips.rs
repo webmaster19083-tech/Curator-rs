@@ -10,6 +10,16 @@ pub fn create(
     filepath: String,
     seconds: u32,
 ) -> anyhow::Result<i64> {
+    let max_clip_length_secs = state
+        .settings
+        .try_read()
+        .map(|settings| settings.max_clip_length_secs)
+        .unwrap_or(60);
+    anyhow::ensure!(
+        (15..=max_clip_length_secs).contains(&seconds),
+        "Clip length must be 15 to {} seconds",
+        max_clip_length_secs
+    );
     let root = dunce::canonicalize(&state.library_dir)?;
     let original = dunce::canonicalize(root.join(&filepath))?;
     anyhow::ensure!(
@@ -28,8 +38,9 @@ pub fn create(
             anyhow::anyhow!("Duration is unknown; play the video once or install ffprobe")
         })?;
     anyhow::ensure!(
-        duration.is_finite() && duration > 90.0,
-        "Only videos longer than 90 seconds need clips"
+        duration.is_finite() && duration > f64::from(max_clip_length_secs),
+        "Only videos longer than {} seconds need clips",
+        max_clip_length_secs
     );
     let count = (duration / f64::from(seconds)).ceil() as i64;
     anyhow::ensure!(

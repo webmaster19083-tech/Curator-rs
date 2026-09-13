@@ -87,8 +87,8 @@ function mediaMatchesTypeFilter(item, typeFilter) {
   // Unknown durations stay visible under Videos until metadata is available.
   if (item.duration_secs == null) return typeFilter === 'video';
   return typeFilter === 'clip'
-    ? item.duration_secs <= CLIP_MAX_SECONDS
-    : item.duration_secs > CLIP_MAX_SECONDS;
+    ? item.duration_secs <= clipMaxSeconds()
+    : item.duration_secs > clipMaxSeconds();
 }
 
 function reportVideoDuration(video, item) {
@@ -168,6 +168,7 @@ const state = {
   typeFilter: 'all',       // 'all' | 'image' | 'clip' | 'video' — applied client-side in loadView(), see mediaMatchesTypeFilter
   sortOrder: 'default',    // one of _MEDIA_SORT_ORDERS' keys server-side
   tagFilter: '',           // tag name, or '' for no filter
+  sizeFilter: '',          // Explorer bucket; mapped to byte query params in loadView()
   maxRatingFilter: '',     // '' for no filter, else '1'..'4' — hide rating > this (0/unrated always shown)
   downloadsPaused: false,
   lightboxIndex: -1,
@@ -980,7 +981,8 @@ async function renderRemoteAccessStatus() {
       target.textContent = 'Local server is stopped.';
       return;
     }
-    const urls = [...(info.local_urls || []), ...(info.lan_urls || []), ...(info.tailscale_urls || [])];
+    const urls = [...(info.local_urls || []), ...(info.tailscale_urls || [])];
+    if (info.magicdns_hostname && info.port) urls.push(`http://${info.magicdns_hostname}:${info.port}`);
     target.textContent = urls.length
       ? `Server running · ${urls.join(' · ')}`
       : `Server running on port ${info.port}`;
@@ -1029,14 +1031,13 @@ async function saveSettings() {
   const reminderDays = Number.isFinite(rawReminderDays) ? Math.max(1, Math.min(365, rawReminderDays)) : 30;
   const nsfwFilterEnabled = el('#settings-nsfw-filter-enabled').checked;
   const nsfwFilterChanged = !!appSettings.nsfw_filter_enabled !== nsfwFilterEnabled;
-  const externalToolsChanged = (appSettings.ffmpeg_bin || 'ffmpeg') !== el('#settings-ffmpeg-bin').value.trim()
-    || (appSettings.action_model_path || '') !== el('#settings-action-model-path').value.trim();
+  const externalToolsLocal = appSettings.external_tool_settings_local_only !== true;
+  const externalToolsChanged = externalToolsLocal && ((appSettings.ffmpeg_bin || 'ffmpeg') !== el('#settings-ffmpeg-bin').value.trim()
+    || (appSettings.action_model_path || '') !== el('#settings-action-model-path').value.trim());
   const body = {
     max_concurrent: maxConcurrent,
     max_clip_length_secs: Math.max(5, Math.min(3600, parseInt(el('#settings-max-clip-length').value, 10) || 60)),
     library_layout: el('#settings-library-layout').value,
-    ffmpeg_bin: el('#settings-ffmpeg-bin').value.trim() || 'ffmpeg',
-    action_model_path: el('#settings-action-model-path').value.trim(),
     theme: el('#settings-theme').value,
     default_slideshow_speed: parseInt(el('#settings-default-speed').value, 10),
     default_slideshow_loop: el('#settings-default-loop').checked,
@@ -1054,6 +1055,12 @@ async function saveSettings() {
     start_with_windows: el('#settings-start-with-windows').checked,
     keep_running_in_tray: el('#settings-keep-running-in-tray').checked,
   };
+  // Executable paths are intentionally omitted from Tailnet requests. The
+  // backend only exposes these fields to loopback/in-process clients.
+  if (externalToolsLocal && Object.prototype.hasOwnProperty.call(appSettings, 'ffmpeg_bin')) {
+    body.ffmpeg_bin = el('#settings-ffmpeg-bin').value.trim() || 'ffmpeg';
+    body.action_model_path = el('#settings-action-model-path').value.trim();
+  }
   try {
     const data = await api('/api/settings', { method: 'PATCH', body: JSON.stringify(body) });
     appSettings = { ...appSettings, ...data };
@@ -1443,6 +1450,11 @@ async function loadView() {
   if (state.sortOrder && state.sortOrder !== 'default') params.set('sort', state.sortOrder);
   if (gridShuffleSeed != null) { params.set('sort','shuffle'); params.set('shuffle_seed',gridShuffleSeed); }
   if (state.tagFilter) params.set('tag',state.tagFilter);
+  if (state.sizeFilter === 'under-10mb') params.set('max_size', String(10 * 1024 * 1024 - 1));
+  else if (state.sizeFilter === '10mb-100mb') { params.set('min_size', String(10 * 1024 * 1024)); params.set('max_size', String(100 * 1024 * 1024 - 1)); }
+  else if (state.sizeFilter === '100mb-1gb') { params.set('min_size', String(100 * 1024 * 1024)); params.set('max_size', String(1024 * 1024 * 1024 - 1)); }
+  else if (state.sizeFilter === 'over-1gb') params.set('min_size', String(1024 * 1024 * 1024));
+  else if (state.sizeFilter === 'unknown') params.set('unknown_size', 'true');
   if (state.maxRatingFilter !== '') params.set('max_rating',state.maxRatingFilter);
   if (state.ratingStatus) params.set('rating_status', state.ratingStatus);
   const page = {url:'/api/media?'+params, cursor:null, more:false, pending:null};
@@ -1642,7 +1654,7 @@ async function stepLightbox(delta) {
 function renderLightboxItem() {
   const item = state.currentItems[state.lightboxIndex];
   if (!item) return;
-  el('#lightbox-clip-tools').hidden = item.type !== 'video' || item.downloaded === 0 || item.clip_parent_id != null || (item.duration_secs != null && item.duration_secs <= CLIP_MAX_SECONDS);
+  el('#lightbox-clip-tools').hidden = item.type !== 'video' || item.downloaded === 0 || item.clip_parent_id != null || (item.duration_secs != null && item.duration_secs <= clipMaxSeconds());
   const stage = el('#lightbox-stage');
   stage.innerHTML = '';
   const src = mediaFullSrc(item);
@@ -1954,7 +1966,7 @@ function pwCheckAndPrepare(item) {
         // server-backfilled duration_secs, which may not be known yet for
         // this file) so the exclusion is correct immediately, not only
         // once the background backfill has caught up to it.
-        if (v.duration > CLIP_MAX_SECONDS) { resolve(null); return; }
+        if (v.duration > clipMaxSeconds()) { resolve(null); return; }
         resolve(v.videoHeight > v.videoWidth ? { item, el: v } : null);
       };
       v.onerror = () => resolve(null);
@@ -2203,7 +2215,7 @@ function feedBuildItem(item) {
       // duration_secs, which may not be known yet for this file) so the
       // exclusion is correct immediately, not only once the backfill has
       // caught up to it.
-      return ok && !feed.review && mediaEl.duration > CLIP_MAX_SECONDS ? false : ok;
+      return ok && !feed.review && mediaEl.duration > clipMaxSeconds() ? false : ok;
     });
     mediaEl.onloadedmetadata = () => {
       if (mediaEl.videoWidth > mediaEl.videoHeight) wrap.classList.add('rotated');
@@ -2724,28 +2736,16 @@ function feedBuildReviewControls(section, item) {
 }
 
 // ---------------------------------------------------------------------
-// VR — WebXR immersive viewing via Three.js (loaded from CDN in
-// index.html). Images only for now: a video in VR needs a live <video>
-// element wrapped in THREE.VideoTexture, which is meaningfully more
-// complexity on top of something that's already hard to verify without
-// real headset hardware — skipped for this first version. Videos in the
-// current view are just left out of the VR rotation, not shown broken.
-//
-// Honesty note for whoever reads this next: this was written and
-// syntax/logic-tested (texture loading, aspect-ratio math, the flat
-// WebGL fallback path) but never verified on an actual headset — nobody
-// building this had one to test against. If something about the in-VR
-// experience itself is wrong, that's the most likely place.
+// VR gallery fallback. It is intentionally DOM-only so packaged desktop
+// builds stay functional offline. Images rotate full-screen; video remains
+// excluded until a locally packaged WebXR renderer is introduced.
 // ---------------------------------------------------------------------
 
 const vr = {
   active: false,
   items: [],
   index: 0,
-  renderer: null,
-  scene: null,
-  camera: null,
-  plane: null,
+  image: null,
   timer: null,
 };
 
@@ -2765,10 +2765,6 @@ async function vrCheckSupport() {
 }
 
 function startVRMode() {
-  if (typeof THREE === 'undefined') {
-    toast('Could not load the 3D library (offline, or a blocked CDN?) — VR view needs it.', true);
-    return;
-  }
   vr.items = excludeSfwFromPlayback(state.currentItems, 'VR').filter((item) => item.type === 'image');
   if (!vr.items.length) {
     toast("No photos in the current view for VR yet (video isn't supported in VR mode).", true);
@@ -2779,76 +2775,26 @@ function startVRMode() {
 
   const container = el('#vr-container');
   container.innerHTML = '';
-
-  vr.renderer = new THREE.WebGLRenderer({ antialias: true });
-  vr.renderer.setPixelRatio(window.devicePixelRatio);
-  vr.renderer.setSize(container.clientWidth, container.clientHeight);
-  vr.renderer.xr.enabled = true;
-  container.appendChild(vr.renderer.domElement);
-
-  vr.scene = new THREE.Scene();
-  vr.scene.background = new THREE.Color(0x000000);
-  vr.camera = new THREE.PerspectiveCamera(70, container.clientWidth / container.clientHeight, 0.1, 100);
-  vr.camera.position.set(0, 1.6, 0); // roughly standing eye height
-
-  vr.scene.add(new THREE.AmbientLight(0xffffff, 1.0));
-
-  const geometry = new THREE.PlaneGeometry(1, 1);
-  const material = new THREE.MeshBasicMaterial({ color: 0x222222 });
-  vr.plane = new THREE.Mesh(geometry, material);
-  vr.plane.position.set(0, 1.6, -2.5); // a couple meters ahead, eye height
-  vr.scene.add(vr.plane);
+  vr.image = document.createElement('img');
+  vr.image.alt = 'VR gallery image';
+  vr.image.decoding = 'async';
+  container.appendChild(vr.image);
 
   el('#vr-overlay').hidden = false;
-  vr.renderer.setAnimationLoop(() => vr.renderer.render(vr.scene, vr.camera));
-  window.addEventListener('resize', onVRResize);
-
   vrLoadCurrent();
 
-  // The flat view above works regardless; this additionally offers the
-  // real headset session where one's actually available. Desktop Chrome
-  // with no headset attached, for instance, still renders the fallback
-  // fine, it just never leaves the 2D page.
-  navigator.xr.isSessionSupported('immersive-vr').then((supported) => {
-    if (!supported || !vr.active) return;
-    navigator.xr.requestSession('immersive-vr', { optionalFeatures: ['local-floor'] })
-      .then((session) => {
-        vr.renderer.xr.setSession(session);
-        session.addEventListener('end', exitVRMode);
-      })
-      .catch(() => {}); // declined the permission prompt, or nothing available right now
-  }).catch(() => {});
-}
-
-function onVRResize() {
-  if (!vr.active) return;
-  const container = el('#vr-container');
-  vr.camera.aspect = container.clientWidth / container.clientHeight;
-  vr.camera.updateProjectionMatrix();
-  vr.renderer.setSize(container.clientWidth, container.clientHeight);
 }
 
 function vrLoadCurrent() {
   if (vr.timer) { clearTimeout(vr.timer); vr.timer = null; }
   const item = vr.items[vr.index];
-  if (!item) return;
-  new THREE.TextureLoader().load(
-    mediaFullSrc(item),
-    (texture) => {
-      if (!vr.active) return; // exited while this was still loading
-      const img = texture.image;
-      const aspect = (img && img.width && img.height) ? img.width / img.height : 16 / 9;
-      const height = 1.4; // meters — width follows the image's own aspect ratio
-      vr.plane.geometry.dispose();
-      vr.plane.geometry = new THREE.PlaneGeometry(height * aspect, height);
-      vr.plane.material.map = texture;
-      vr.plane.material.color.set(0xffffff);
-      vr.plane.material.needsUpdate = true;
-      vr.timer = setTimeout(vrAdvance, ss.speed);
-    },
-    undefined,
-    () => { if (vr.active) vrAdvance(); }, // failed to load — skip to the next one
-  );
+  if (!item || !vr.image) return;
+  const image = vr.image;
+  image.onload = () => {
+    if (vr.active && image === vr.image) vr.timer = setTimeout(vrAdvance, ss.speed);
+  };
+  image.onerror = () => { if (vr.active && image === vr.image) vrAdvance(); };
+  image.src = mediaFullSrc(item);
 }
 
 function vrAdvance() {
@@ -2860,13 +2806,12 @@ function vrAdvance() {
 function exitVRMode() {
   vr.active = false;
   if (vr.timer) { clearTimeout(vr.timer); vr.timer = null; }
-  window.removeEventListener('resize', onVRResize);
-  if (vr.renderer) {
-    const session = vr.renderer.xr.getSession();
-    if (session) session.end().catch(() => {});
-    vr.renderer.setAnimationLoop(null);
-    vr.renderer.dispose();
+  if (vr.image) {
+    vr.image.onload = null;
+    vr.image.onerror = null;
+    vr.image.removeAttribute('src');
   }
+  vr.image = null;
   el('#vr-container').innerHTML = '';
   el('#vr-overlay').hidden = true;
 }

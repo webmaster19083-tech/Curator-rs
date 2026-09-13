@@ -5,9 +5,6 @@
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>Curator — a gallery-dl browser</title>
 <link rel="icon" href="data:,">
-<link rel="preconnect" href="https://fonts.googleapis.com">
-<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
-<link href="https://fonts.googleapis.com/css2?family=Space+Grotesk:wght@500;600;700&family=IBM+Plex+Sans:wght@400;500;600&family=IBM+Plex+Mono:wght@400;500&display=swap" rel="stylesheet">
 <link rel="stylesheet" href="/style.css">
 </head>
 <body>
@@ -285,7 +282,7 @@
     </label>
 
     <h2 class="settings-subhead">Remote Access</h2>
-    <p class="muted">The same Curator server serves the desktop app, LAN clients, and Tailscale. Addresses refresh while Curator is running.</p>
+    <p class="muted">The same Curator server serves the desktop app, local browser fallback, and approved Tailscale devices. It never listens on ordinary LAN interfaces; addresses refresh while Curator is running.</p>
     <div id="settings-remote-access" class="mono small muted" aria-live="polite">Checking server status…</div>
 
     <h2 class="settings-subhead">Setup</h2>
@@ -385,11 +382,13 @@
 
 <div id="vr-overlay" class="vr-overlay" hidden>
   <button class="vr-exit" id="vr-exit" title="Exit VR view">✕ exit</button>
-  <p class="vr-hint mono small">put on your headset and use its "Enter VR" control — this screen is the fallback flat view</p>
+  <p class="vr-hint mono small">offline full-screen photo rotation · esc exits</p>
   <div id="vr-container"></div>
 </div>
 
-<script src="https://cdnjs.cloudflare.com/ajax/libs/three.js/r128/three.min.js"></script>
+<script src="/desktop.js"></script>
+<script src="/virtual-clips.js"></script>
 <script src="/app.js"></script>
+<script src="/library.js"></script>
 </body>
 </html>

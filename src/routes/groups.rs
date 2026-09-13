@@ -5,6 +5,7 @@ use axum::{
     http::StatusCode,
     Json,
 };
+use rusqlite::TransactionBehavior;
 use serde::Deserialize;
 use serde_json::{json, Value};
 
@@ -144,9 +145,15 @@ pub async fn update(
     // scope, extract a plain (Send) JSON value, then drop the connection
     // before awaiting the cache lock below.
     let group_json: Value = {
-        let conn = state.pool.get().map_err(db_err)?;
+        let mut conn = state.pool.get().map_err(db_err)?;
+        // A deferred transaction allows two simultaneous moves to validate
+        // against the same old tree and then create A -> B -> A. Taking the
+        // writer reservation before the recursive check serializes moves.
+        let tx = conn
+            .transaction_with_behavior(TransactionBehavior::Immediate)
+            .map_err(db_err)?;
 
-        let exists: bool = conn
+        let exists: bool = tx
             .query_row("SELECT COUNT(*) FROM groups WHERE id=?1", [id], |r| {
                 r.get::<_, i64>(0)
             })
@@ -179,7 +186,7 @@ pub async fn update(
             values.push(Box::new(Option::<i64>::None));
         } else if let Some(pid) = body.parent_id {
             // Prevent moving a group into itself or its own descendants
-            if group_is_self_or_descendant(&conn, pid, id) {
+            if group_is_self_or_descendant(&tx, pid, id).map_err(db_err)? {
                 return Err((
                     StatusCode::BAD_REQUEST,
                     Json(
@@ -187,7 +194,7 @@ pub async fn update(
                     ),
                 ));
             }
-            let exists: bool = conn
+            let exists: bool = tx
                 .query_row("SELECT COUNT(*) FROM groups WHERE id=?1", [pid], |r| {
                     r.get::<_, i64>(0)
                 })
@@ -213,10 +220,13 @@ pub async fn update(
         values.push(Box::new(id));
         let sql = format!("UPDATE groups SET {} WHERE id=?", fields.join(", "));
         let refs: Vec<&dyn rusqlite::ToSql> = values.iter().map(|b| b.as_ref()).collect();
-        conn.execute(&sql, refs.as_slice()).map_err(db_err)?;
+        tx.execute(&sql, refs.as_slice()).map_err(db_err)?;
 
-        conn.query_row("SELECT * FROM groups WHERE id=?1", [id], row_to_json)
-            .map_err(db_err)?
+        let row = tx
+            .query_row("SELECT * FROM groups WHERE id=?1", [id], row_to_json)
+            .map_err(db_err)?;
+        tx.commit().map_err(db_err)?;
+        row
     };
 
     *state.group_tag_cache.write().await = None;
@@ -323,22 +333,24 @@ pub async fn remove_tag(
 
 // ─── Helpers ──────────────────────────────────────────────────────────────────
 
-fn group_is_self_or_descendant(conn: &rusqlite::Connection, candidate: i64, of: i64) -> bool {
+fn group_is_self_or_descendant(
+    conn: &rusqlite::Connection,
+    candidate: i64,
+    of: i64,
+) -> rusqlite::Result<bool> {
     if candidate == of {
-        return true;
+        return Ok(true);
     }
-    let children: Vec<i64> = {
-        let mut stmt = conn
-            .prepare("SELECT id FROM groups WHERE parent_id=?1")
-            .unwrap();
-        stmt.query_map([of], |r| r.get(0))
-            .unwrap()
-            .filter_map(|r| r.ok())
-            .collect()
-    };
-    children
-        .iter()
-        .any(|&c| group_is_self_or_descendant(conn, candidate, c))
+    conn.query_row(
+        "WITH RECURSIVE descendants(id) AS (
+             SELECT id FROM groups WHERE parent_id=?1
+             UNION
+             SELECT g.id FROM groups g JOIN descendants d ON g.parent_id=d.id
+         )
+         SELECT EXISTS(SELECT 1 FROM descendants WHERE id=?2)",
+        rusqlite::params![of, candidate],
+        |row| row.get(0),
+    )
 }
 
 fn row_to_json(row: &rusqlite::Row<'_>) -> rusqlite::Result<Value> {

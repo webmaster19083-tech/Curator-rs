@@ -1,26 +1,42 @@
 use std::sync::Arc;
 
 use axum::{
-    extract::State,
+    extract::{ConnectInfo, State},
     http::StatusCode,
     Json,
 };
 use serde::Deserialize;
 use serde_json::{json, Value};
+use std::net::SocketAddr;
 use tokio::sync::Semaphore;
 
-use crate::AppState;
 use crate::db::save_settings;
+use crate::AppState;
 
 /// Shared with `routes::oobe` (the Appearance step reuses the exact same
 /// allow-list rather than re-declaring it) — see "Do not introduce
 /// conflicting configuration systems" in the OOBE build notes.
 pub(crate) const VALID_THEMES: &[&str] = &[
     // Current Explorer palettes.
-    "system", "atelier-dark", "midnight", "ember", "linen", "sage", "aurora", "oled",
+    "system",
+    "atelier-dark",
+    "midnight",
+    "ember",
+    "linen",
+    "sage",
+    "aurora",
+    "oled",
     // Legacy names remain accepted so an older settings.json can be opened
     // and normalized by the browser without becoming an invalid preference.
-    "yotsuba", "yotsuba-b", "futaba", "burichan", "tomorrow", "photon", "light", "oled-dark", "dark",
+    "yotsuba",
+    "yotsuba-b",
+    "futaba",
+    "burichan",
+    "tomorrow",
+    "photon",
+    "light",
+    "oled-dark",
+    "dark",
 ];
 
 #[derive(Deserialize)]
@@ -30,19 +46,19 @@ pub struct PatchSettingsBody {
     pub max_clip_length_secs: Option<u32>,
     pub goon_default_limit: Option<u32>,
     pub goon_log_sessions: Option<bool>,
-    pub max_concurrent:               Option<u32>,
-    pub default_slideshow_speed:      Option<f64>,
-    pub default_slideshow_loop:       Option<bool>,
-    pub default_slideshow_shuffle:    Option<bool>,
-    pub theme:                        Option<String>,
-    pub export_reminder_days:         Option<u32>,
+    pub max_concurrent: Option<u32>,
+    pub default_slideshow_speed: Option<f64>,
+    pub default_slideshow_loop: Option<bool>,
+    pub default_slideshow_shuffle: Option<bool>,
+    pub theme: Option<String>,
+    pub export_reminder_days: Option<u32>,
     pub export_reminder_snoozed_until: Option<String>,
     // Cock Hero settings
-    pub ch_log_sessions:              Option<bool>,
-    pub ch_default_interval:          Option<f64>,
-    pub ch_default_limit:             Option<u32>,
-    pub ch_default_shuffle:           Option<bool>,
-    pub ch_default_media_type:        Option<String>,
+    pub ch_log_sessions: Option<bool>,
+    pub ch_default_interval: Option<f64>,
+    pub ch_default_limit: Option<u32>,
+    pub ch_default_shuffle: Option<bool>,
+    pub ch_default_media_type: Option<String>,
     // NSFW auto-rating
     pub nsfw_filter_enabled: Option<bool>,
     pub library_layout: Option<String>,
@@ -65,14 +81,28 @@ pub struct PatchSettingsBody {
 
 // ─── GET /api/settings ───────────────────────────────────────────────────────
 
-pub async fn get(State(state): State<Arc<AppState>>) -> Json<Value> {
+pub async fn get(
+    State(state): State<Arc<AppState>>,
+    peer: Option<ConnectInfo<SocketAddr>>,
+) -> Json<Value> {
     let s = state.settings.read().await;
     let mut value = serde_json::to_value(&*s).unwrap_or_default();
     let config = crate::config::load_config();
     if let Some(object) = value.as_object_mut() {
-        object.insert("ffmpeg_bin".into(), json!(config.ffmpeg_bin.unwrap_or_else(|| "ffmpeg".into())));
-        object.insert("action_model_path".into(), json!(config.action_model_path));
-        object.insert("external_tool_settings_restart_required".into(), json!(true));
+        let local = peer.as_ref().is_none_or(|peer| peer.0.ip().is_loopback());
+        if local {
+            object.insert(
+                "ffmpeg_bin".into(),
+                json!(config.ffmpeg_bin.unwrap_or_else(|| "ffmpeg".into())),
+            );
+            object.insert("action_model_path".into(), json!(config.action_model_path));
+            object.insert(
+                "external_tool_settings_restart_required".into(),
+                json!(true),
+            );
+        } else {
+            object.insert("external_tool_settings_local_only".into(), json!(true));
+        }
     }
     Json(value)
 }
@@ -81,28 +111,47 @@ pub async fn get(State(state): State<Arc<AppState>>) -> Json<Value> {
 
 pub async fn patch(
     State(state): State<Arc<AppState>>,
-    Json(body):   Json<PatchSettingsBody>,
+    peer: Option<ConnectInfo<SocketAddr>>,
+    Json(body): Json<PatchSettingsBody>,
 ) -> Result<Json<Value>, (StatusCode, Json<Value>)> {
     if body.ffmpeg_bin.is_some() || body.action_model_path.is_some() {
+        if peer.as_ref().is_some_and(|peer| !peer.0.ip().is_loopback()) {
+            return Err((
+                StatusCode::FORBIDDEN,
+                Json(json!({"error":"Executable-path configuration is local-only."})),
+            ));
+        }
         let mut config = crate::config::load_config();
         if let Some(value) = body.ffmpeg_bin.as_deref() {
             let value = value.trim();
             if value.is_empty() || value.len() > 4096 || value.contains('\0') {
-                return Err((StatusCode::BAD_REQUEST, Json(json!({"error":"Invalid ffmpeg executable"}))));
+                return Err((
+                    StatusCode::BAD_REQUEST,
+                    Json(json!({"error":"Invalid ffmpeg executable"})),
+                ));
             }
             config.ffmpeg_bin = Some(value.to_string());
         }
         if let Some(value) = body.action_model_path.as_deref() {
             let value = value.trim();
             if value.len() > 4096 || value.contains('\0') {
-                return Err((StatusCode::BAD_REQUEST, Json(json!({"error":"Invalid action-model path"}))));
+                return Err((
+                    StatusCode::BAD_REQUEST,
+                    Json(json!({"error":"Invalid action-model path"})),
+                ));
             }
-            config.action_model_path = if value.is_empty() { None } else { Some(value.to_string()) };
+            config.action_model_path = if value.is_empty() {
+                None
+            } else {
+                Some(value.to_string())
+            };
         }
-        crate::config::save_config(&config).map_err(|error| (
-            StatusCode::INTERNAL_SERVER_ERROR,
-            Json(json!({"error":format!("Could not save external tool settings: {error}")})),
-        ))?;
+        crate::config::save_config(&config).map_err(|error| {
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(json!({"error":format!("Could not save external tool settings: {error}")})),
+            )
+        })?;
     }
     if let Some(enabled) = body.start_with_windows {
         crate::set_start_with_windows_preference(&state, enabled)
@@ -142,7 +191,10 @@ pub async fn patch(
     }
     if let Some(ref theme) = body.theme {
         if !VALID_THEMES.contains(&theme.as_str()) {
-            return Err((StatusCode::BAD_REQUEST, Json(json!({"error": format!("Unknown theme: {}", theme)}))));
+            return Err((
+                StatusCode::BAD_REQUEST,
+                Json(json!({"error": format!("Unknown theme: {}", theme)})),
+            ));
         }
         settings.theme = theme.clone();
     }
@@ -152,11 +204,21 @@ pub async fn patch(
     if let Some(v) = body.export_reminder_snoozed_until {
         settings.export_reminder_snoozed_until = if v.is_empty() { None } else { Some(v) };
     }
-    if let Some(v) = body.ch_log_sessions        { settings.ch_log_sessions = v; }
-    if let Some(v) = body.ch_default_interval    { settings.ch_default_interval = v; }
-    if let Some(v) = body.ch_default_limit        { settings.ch_default_limit = v; }
-    if let Some(v) = body.ch_default_shuffle      { settings.ch_default_shuffle = v; }
-    if let Some(v) = body.ch_default_media_type  { settings.ch_default_media_type = v; }
+    if let Some(v) = body.ch_log_sessions {
+        settings.ch_log_sessions = v;
+    }
+    if let Some(v) = body.ch_default_interval {
+        settings.ch_default_interval = v;
+    }
+    if let Some(v) = body.ch_default_limit {
+        settings.ch_default_limit = v;
+    }
+    if let Some(v) = body.ch_default_shuffle {
+        settings.ch_default_shuffle = v;
+    }
+    if let Some(v) = body.ch_default_media_type {
+        settings.ch_default_media_type = v;
+    }
     if let Some(v) = body.nsfw_filter_enabled {
         settings.nsfw_filter_enabled = v;
     }
@@ -220,35 +282,63 @@ pub async fn patch(
     }
     if let Some(v) = body.metronome_volume {
         if !v.is_finite() {
-            return Err((StatusCode::BAD_REQUEST, Json(json!({"error":"Invalid metronome volume"}))));
+            return Err((
+                StatusCode::BAD_REQUEST,
+                Json(json!({"error":"Invalid metronome volume"})),
+            ));
         }
         settings.metronome_volume = v.clamp(0.0, 1.0);
     }
     if let Some(v) = body.goon_persona {
         if !["neutral", "mommy", "dom", "brat"].contains(&v.as_str()) {
-            return Err((StatusCode::BAD_REQUEST, Json(json!({"error":"Unknown GOON persona"}))));
+            return Err((
+                StatusCode::BAD_REQUEST,
+                Json(json!({"error":"Unknown GOON persona"})),
+            ));
         }
         settings.goon_persona = v;
     }
     if let Some(v) = body.tts_voice {
         let voice = v.trim();
-        settings.tts_voice = if voice.is_empty() { None } else { Some(voice.chars().take(160).collect()) };
+        settings.tts_voice = if voice.is_empty() {
+            None
+        } else {
+            Some(voice.chars().take(160).collect())
+        };
     }
     if let Some(value) = body.tts_rate {
-        if !value.is_finite() { return Err((StatusCode::BAD_REQUEST, Json(json!({"error":"Invalid TTS rate"})))); }
+        if !value.is_finite() {
+            return Err((
+                StatusCode::BAD_REQUEST,
+                Json(json!({"error":"Invalid TTS rate"})),
+            ));
+        }
         settings.tts_rate = value.clamp(0.5, 2.0);
     }
     if let Some(value) = body.tts_pitch {
-        if !value.is_finite() { return Err((StatusCode::BAD_REQUEST, Json(json!({"error":"Invalid TTS pitch"})))); }
+        if !value.is_finite() {
+            return Err((
+                StatusCode::BAD_REQUEST,
+                Json(json!({"error":"Invalid TTS pitch"})),
+            ));
+        }
         settings.tts_pitch = value.clamp(0.5, 2.0);
     }
     if let Some(value) = body.tts_volume {
-        if !value.is_finite() { return Err((StatusCode::BAD_REQUEST, Json(json!({"error":"Invalid TTS volume"})))); }
+        if !value.is_finite() {
+            return Err((
+                StatusCode::BAD_REQUEST,
+                Json(json!({"error":"Invalid TTS volume"})),
+            ));
+        }
         settings.tts_volume = value.clamp(0.0, 1.0);
     }
     if let Some(v) = body.soundtrack_provider {
         if !["local", "youtube", "soundcloud", "apple_music", "spotify"].contains(&v.as_str()) {
-            return Err((StatusCode::BAD_REQUEST, Json(json!({"error":"Unknown soundtrack provider"}))));
+            return Err((
+                StatusCode::BAD_REQUEST,
+                Json(json!({"error":"Unknown soundtrack provider"})),
+            ));
         }
         settings.soundtrack_provider = v;
     }
@@ -257,9 +347,39 @@ pub async fn patch(
     let mut value = serde_json::to_value(&*settings).unwrap_or_default();
     let config = crate::config::load_config();
     if let Some(object) = value.as_object_mut() {
-        object.insert("ffmpeg_bin".into(), json!(config.ffmpeg_bin.unwrap_or_else(|| "ffmpeg".into())));
-        object.insert("action_model_path".into(), json!(config.action_model_path));
-        object.insert("external_tool_settings_restart_required".into(), json!(true));
+        let local = peer.as_ref().is_none_or(|peer| peer.0.ip().is_loopback());
+        if local {
+            object.insert(
+                "ffmpeg_bin".into(),
+                json!(config.ffmpeg_bin.unwrap_or_else(|| "ffmpeg".into())),
+            );
+            object.insert("action_model_path".into(), json!(config.action_model_path));
+            object.insert(
+                "external_tool_settings_restart_required".into(),
+                json!(true),
+            );
+        } else {
+            object.insert("external_tool_settings_local_only".into(), json!(true));
+        }
     }
     Ok(Json(value))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn remote_settings_do_not_disclose_local_tool_paths() {
+        let root = tempfile::tempdir().unwrap();
+        let state = crate::test_support::state(root.path());
+        let Json(value) = get(
+            State(state),
+            Some(ConnectInfo(SocketAddr::from(([100, 80, 0, 2], 42168)))),
+        )
+        .await;
+        assert!(value.get("ffmpeg_bin").is_none());
+        assert!(value.get("action_model_path").is_none());
+        assert_eq!(value["external_tool_settings_local_only"], true);
+    }
 }

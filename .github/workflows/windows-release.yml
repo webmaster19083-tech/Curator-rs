@@ -1,48 +1,54 @@
-name: Windows Release Build
+name: Windows desktop validation
 
 on:
   push:
-    branches: [ main, master ]
-    tags: [ "v*" ]
-  workflow_dispatch: {}
+    branches: [main, master]
+    tags: ['v*']
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
 
 jobs:
-  build-windows:
+  validate-and-package:
     runs-on: windows-latest
     steps:
       - uses: actions/checkout@v4
-
-      - name: Install Rust
-        uses: dtolnay/rust-toolchain@stable
+      - uses: actions/setup-node@v4
         with:
-          targets: x86_64-pc-windows-msvc
-
-      - name: Cache cargo
-        uses: Swatinem/rust-cache@v2
-
-      - name: Build release
-        run: cargo build --release --target x86_64-pc-windows-msvc
-
-      # curator.exe loads static/ from disk next to it at runtime (it's served
-      # via tower_http::ServeDir, not embedded like DOCS.txt is) — ship the exe
-      # alone and the app opens to a 404. Package both together.
-      - name: Package release
-        shell: pwsh
-        run: |
-          $dest = "dist/curator-windows-x86_64"
-          New-Item -ItemType Directory -Force -Path $dest | Out-Null
-          Copy-Item "target/x86_64-pc-windows-msvc/release/curator.exe" -Destination $dest
-          Copy-Item -Recurse "static" -Destination "$dest/static"
-          Compress-Archive -Path "$dest/*" -DestinationPath "curator-windows-x86_64.zip" -Force
-
-      - name: Upload artifact
-        uses: actions/upload-artifact@v4
+          node-version: 22
+      - uses: dtolnay/rust-toolchain@stable
         with:
-          name: curator-windows-x86_64
-          path: curator-windows-x86_64.zip
-
-      - name: Attach to GitHub Release
-        if: startsWith(github.ref, 'refs/tags/v')
-        uses: softprops/action-gh-release@v2
+          components: rustfmt, clippy
+      - uses: Swatinem/rust-cache@v2
         with:
-          files: curator-windows-x86_64.zip
+          workspaces: |
+            . -> target
+            desktop -> desktop/target
+      - name: Rust format
+        run: cargo fmt --all -- --check
+      - name: Desktop Rust format
+        run: cargo fmt --manifest-path desktop/Cargo.toml -- --check
+      - name: Rust check
+        run: cargo check --all-targets --locked
+      - name: Strict Clippy
+        run: cargo clippy --all-targets --all-features -- -D warnings
+      - name: Locked Rust tests
+        run: cargo test --locked
+      - name: Browser-page and JavaScript tests
+        run: node --test tests/*.test.js
+      - name: Install Tauri CLI
+        run: npm install --global @tauri-apps/cli@2
+      - name: Check desktop host
+        run: cargo check --manifest-path desktop/Cargo.toml --locked
+      - name: Build MSI and NSIS installers
+        working-directory: desktop
+        run: tauri build --bundles nsis,msi
+      - uses: actions/upload-artifact@v4
+        with:
+          name: curator-windows-installers
+          path: |
+            desktop/target/release/bundle/nsis/*.exe
+            desktop/target/release/bundle/msi/*.msi
+          if-no-files-found: error

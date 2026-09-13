@@ -69,6 +69,9 @@ pub struct MediaQuery {
     max_rating: Option<i64>,
     rating_status: Option<String>,
     include_long_videos: Option<bool>,
+    min_size: Option<i64>,
+    max_size: Option<i64>,
+    unknown_size: Option<bool>,
 }
 
 pub async fn list(
@@ -89,6 +92,12 @@ pub async fn list(
         "date_asc" => ("m.added_at".to_string(), false, false),
         "filename_asc" => ("m.filename COLLATE NOCASE".to_string(), false, false),
         "filename_desc" => ("m.filename COLLATE NOCASE".to_string(), true, false),
+        "size_desc" => ("COALESCE(m.file_size_bytes,-1)".to_string(), true, false),
+        "size_asc" => (
+            "COALESCE(m.file_size_bytes,9223372036854775807)".to_string(),
+            false,
+            false,
+        ),
         "shuffle" => (format!("((m.id * {seed}) % 2147483647)"), false, false),
         _ => ("m.id".to_string(), false, false),
     };
@@ -179,6 +188,42 @@ pub async fn list(
             " AND (m.manual_review_required=1 OR m.type<>'video' OR m.duration_secs IS NULL OR m.duration_secs<=?{})",
             params.len()
         ));
+    }
+    if q.unknown_size.unwrap_or(false) {
+        if q.min_size.is_some() || q.max_size.is_some() {
+            return Err((
+                StatusCode::BAD_REQUEST,
+                Json(json!({"error":"unknown_size cannot be combined with min_size or max_size"})),
+            ));
+        }
+        extra.push_str(" AND m.file_size_bytes IS NULL");
+    } else {
+        if let Some(minimum) = q.min_size {
+            if minimum < 0 {
+                return Err((
+                    StatusCode::BAD_REQUEST,
+                    Json(json!({"error":"min_size must be non-negative"})),
+                ));
+            }
+            params.push(minimum.into());
+            extra.push_str(&format!(" AND m.file_size_bytes>=?{}", params.len()));
+        }
+        if let Some(maximum) = q.max_size {
+            if maximum < 0 {
+                return Err((
+                    StatusCode::BAD_REQUEST,
+                    Json(json!({"error":"max_size must be non-negative"})),
+                ));
+            }
+            if q.min_size.is_some_and(|minimum| minimum > maximum) {
+                return Err((
+                    StatusCode::BAD_REQUEST,
+                    Json(json!({"error":"min_size must not exceed max_size"})),
+                ));
+            }
+            params.push(maximum.into());
+            extra.push_str(&format!(" AND m.file_size_bytes<=?{}", params.len()));
+        }
     }
     if let Some(tag) = q.tag.as_deref() {
         extra.push_str(" AND ");
@@ -526,8 +571,7 @@ pub async fn add_tag(
         ));
     }
 
-    provenance::attach_tag(&conn, id, &body.name, provenance::HUMAN, None)
-        .map_err(db_err)?;
+    provenance::attach_tag(&conn, id, &body.name, provenance::HUMAN, None).map_err(db_err)?;
 
     let tags: Vec<String> = {
         let mut stmt = conn.prepare("SELECT t.name FROM media_tags mt JOIN tags t ON t.id=mt.tag_id WHERE mt.media_id=?1 ORDER BY t.name COLLATE NOCASE").map_err(db_err)?;
@@ -872,7 +916,7 @@ pub async fn effective_tags(
     }
     let rebuilt = {
         let conn = state.pool.get().map_err(db_err)?;
-        Arc::new(crate::db::build_group_effective_tags_map(&conn))
+        Arc::new(crate::db::build_group_effective_tags_map(&conn).map_err(db_err)?)
     };
     *cache = Some(rebuilt.clone());
     Ok(rebuilt)
@@ -1126,7 +1170,9 @@ mod tests {
         let cleared = undo_rating(
             State(state.clone()),
             Path(1),
-            Json(UndoRatingBody { rating_reviewed_at: manual["rating_reviewed_at"].as_str().unwrap().to_owned() }),
+            Json(UndoRatingBody {
+                rating_reviewed_at: manual["rating_reviewed_at"].as_str().unwrap().to_owned(),
+            }),
         )
         .await
         .unwrap()

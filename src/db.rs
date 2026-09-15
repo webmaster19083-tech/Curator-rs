@@ -11,6 +11,13 @@ use tracing::{info, warn};
 
 pub type DbPool = Pool<SqliteConnectionManager>;
 
+// WAL permits readers alongside a writer, but SQLite still permits only one
+// writer at a time. Downloads, filesystem indexing, and optional background
+// work can all finish together, so a short default timeout turns a temporary
+// writer handoff into a dropped update. Keep this comfortably below a request
+// timeout while allowing a queued writer to make progress.
+const SQLITE_BUSY_TIMEOUT_MS: u32 = 30_000;
+
 // ─── Settings ────────────────────────────────────────────────────────────────
 
 fn default_max_concurrent() -> u32 {
@@ -261,9 +268,11 @@ pub fn init_pool(data_dir: &Path) -> Result<DbPool> {
     let manager = SqliteConnectionManager::file(&db_path).with_init(|conn| {
         conn.execute_batch(
             "PRAGMA journal_mode=WAL;
-                 PRAGMA busy_timeout=5000;
                  PRAGMA foreign_keys=ON;",
-        )
+        )?;
+        conn.busy_timeout(std::time::Duration::from_millis(u64::from(
+            SQLITE_BUSY_TIMEOUT_MS,
+        )))
     });
     let pool = r2d2::Pool::builder()
         .max_size(8)
@@ -1051,6 +1060,17 @@ pub fn build_group_effective_tags_map(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn pooled_connections_have_a_writer_handoff_timeout() {
+        let dir = tempfile::tempdir().unwrap();
+        let pool = init_pool(dir.path()).unwrap();
+        let conn = pool.get().unwrap();
+        let timeout: u32 = conn
+            .query_row("PRAGMA busy_timeout", [], |row| row.get(0))
+            .unwrap();
+        assert_eq!(timeout, SQLITE_BUSY_TIMEOUT_MS);
+    }
 
     #[test]
     fn repair_preserves_multiple_legacy_tables_and_is_repeatable() {

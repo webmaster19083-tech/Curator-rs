@@ -7,7 +7,7 @@
 
 use std::path::{Path, PathBuf};
 use std::process::Stdio;
-use std::sync::atomic::{AtomicI64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicI64, Ordering};
 use std::sync::Arc;
 
 use serde::{Deserialize, Serialize};
@@ -72,23 +72,30 @@ struct NudeJob {
 #[derive(Clone)]
 pub struct NsfwClassifier {
     tx: mpsc::Sender<NudeJob>,
-    pub ready: std::sync::Arc<std::sync::atomic::AtomicBool>,
+    pub ready: Arc<AtomicBool>,
+    /// True only when startup cannot recover without a configuration change
+    /// and a restart (for example, Python or the optional NudeNet package is
+    /// missing). This prevents a permanent warning/restart loop.
+    permanently_unavailable: Arc<AtomicBool>,
     task: std::sync::Arc<tokio::sync::Mutex<Option<tokio::task::JoinHandle<()>>>>,
 }
 
 impl NsfwClassifier {
     pub fn spawn(python_bin: String, worker_script: PathBuf) -> Self {
         let (tx, rx) = mpsc::channel::<NudeJob>(32);
-        let ready = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let ready = Arc::new(AtomicBool::new(false));
+        let permanently_unavailable = Arc::new(AtomicBool::new(false));
         let task = tokio::spawn(nude_supervisor_loop(
             python_bin,
             worker_script,
             rx,
             ready.clone(),
+            permanently_unavailable.clone(),
         ));
         Self {
             tx,
             ready,
+            permanently_unavailable,
             task: std::sync::Arc::new(tokio::sync::Mutex::new(Some(task))),
         }
     }
@@ -99,6 +106,10 @@ impl NsfwClassifier {
             let _ = task.await;
         }
         self.ready.store(false, Ordering::Release);
+    }
+
+    fn is_permanently_unavailable(&self) -> bool {
+        self.permanently_unavailable.load(Ordering::Acquire)
     }
 
     pub async fn classify(&self, path: PathBuf) -> anyhow::Result<NudeNetResult> {
@@ -117,6 +128,10 @@ impl NsfwClassifier {
         anyhow::ensure!(
             paths.iter().all(|path| path.is_file()),
             "classification source is unavailable"
+        );
+        anyhow::ensure!(
+            !self.is_permanently_unavailable(),
+            "NudeNet worker is unavailable until Curator restarts; install NudeNet in the configured Python environment"
         );
         let (reply_tx, reply_rx) = oneshot::channel();
         self.tx
@@ -137,7 +152,8 @@ async fn nude_supervisor_loop(
     python_bin: String,
     worker_script: PathBuf,
     mut rx: mpsc::Receiver<NudeJob>,
-    ready: std::sync::Arc<std::sync::atomic::AtomicBool>,
+    ready: Arc<AtomicBool>,
+    permanently_unavailable: Arc<AtomicBool>,
 ) {
     let mut failures = 0_u32;
     'restart: loop {
@@ -155,6 +171,18 @@ async fn nude_supervisor_loop(
         {
             Ok(child) => child,
             Err(error) => {
+                if error.kind() == std::io::ErrorKind::NotFound {
+                    permanently_unavailable.store(true, Ordering::Release);
+                    warn!(
+                        "NudeNet worker is unavailable until Curator restarts: Python interpreter '{}' was not found",
+                        python_bin
+                    );
+                    drain_nude_jobs(
+                        &mut rx,
+                        "NudeNet worker unavailable (configured Python interpreter was not found)",
+                    );
+                    return;
+                }
                 warn!(
                     "NudeNet worker could not launch '{}': {}",
                     python_bin, error
@@ -181,8 +209,17 @@ async fn nude_supervisor_loop(
                 info!("NudeNet classifier worker ready");
             }
             Err(error) => {
-                warn!("NudeNet worker failed to start: {error}");
                 let _ = child.kill().await;
+                if is_permanent_nude_startup_error(&error) {
+                    permanently_unavailable.store(true, Ordering::Release);
+                    warn!("NudeNet worker is unavailable until Curator restarts: {error}");
+                    drain_nude_jobs(
+                        &mut rx,
+                        "NudeNet worker unavailable (install NudeNet and its model dependencies)",
+                    );
+                    return;
+                }
+                warn!("NudeNet worker failed to start: {error}");
                 drain_nude_jobs(
                     &mut rx,
                     "NudeNet worker unavailable (install nudenet and its model dependencies)",
@@ -225,6 +262,14 @@ async fn nude_supervisor_loop(
             }
         }
     }
+}
+
+fn is_permanent_nude_startup_error(error: &str) -> bool {
+    let error = error.to_ascii_lowercase();
+    error.contains("missing nudenet dependency")
+        || error.contains("no module named")
+        || error.contains("modulenotfounderror")
+        || error.contains("importerror")
 }
 
 async fn wait_nude_ready(lines: &mut Lines<BufReader<ChildStdout>>) -> Result<(), String> {
@@ -878,6 +923,12 @@ pub fn spawn_backfill_loop(
     tokio::spawn(async move {
         let mut last_warning = std::time::Instant::now() - std::time::Duration::from_secs(60);
         loop {
+            if classifier.is_permanently_unavailable() {
+                info!(
+                    "NudeNet auto-rating is paused until Curator restarts after its Python environment is repaired"
+                );
+                return;
+            }
             if !classifier.ready.load(Ordering::Acquire) {
                 tokio::time::sleep(std::time::Duration::from_secs(5)).await;
                 continue;
@@ -1029,6 +1080,18 @@ pub fn spawn_backfill_loop(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn missing_python_packages_are_terminal_startup_failures() {
+        assert!(is_permanent_nude_startup_error(
+            "missing NudeNet dependency: No module named 'nudenet'"
+        ));
+        assert!(is_permanent_nude_startup_error(
+            "ImportError: cannot import name NudeDetector"
+        ));
+        assert!(!is_permanent_nude_startup_error("startup timed out"));
+    }
+
     #[test]
     fn nudenet_never_promotes_anatomy_to_fast_or_cum() {
         assert_eq!(nudenet_rating(&[]), 1);

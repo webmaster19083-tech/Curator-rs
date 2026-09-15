@@ -4,6 +4,7 @@ use std::time::{Duration, Instant};
 
 use anyhow::Result;
 use futures::{Stream, StreamExt};
+use rusqlite::TransactionBehavior;
 use serde_json::Value;
 use tokio::io::{AsyncBufReadExt, AsyncReadExt, BufReader};
 use tracing::{info, warn};
@@ -406,11 +407,16 @@ pub fn index_file(state: &AppState, source_id: i64, path: &Path) -> Result<bool>
     let stamp = crate::media_files::stamp(path);
     let mut sidecar = path.as_os_str().to_os_string();
     sidecar.push(".json");
-    let origin: Option<String> = std::fs::read_to_string(Path::new(&sidecar))
+    // A file can arrive before gallery-dl completes its sidecar. Retain the
+    // whole document, rather than only its URL, so a later sidecar event can
+    // atomically add provenance without a second independent database write.
+    let sidecar_metadata = std::fs::read_to_string(Path::new(&sidecar))
         .ok()
-        .and_then(|s| serde_json::from_str::<Value>(&s).ok())
+        .and_then(|raw| serde_json::from_str::<Value>(&raw).ok());
+    let origin: Option<String> = sidecar_metadata
+        .as_ref()
         .and_then(|v| v.get("url").and_then(Value::as_str).map(str::to_owned));
-    let conn = state.pool.get()?;
+    let mut conn = state.pool.get()?;
     let existing: Option<(i64, Option<String>, Option<String>, bool)> = conn
         .query_row(
             "SELECT id, file_stamp, origin_url, downloaded FROM media WHERE filepath=?1",
@@ -422,9 +428,31 @@ pub fn index_file(state: &AppState, source_id: i64, path: &Path) -> Result<bool>
         .as_ref()
         .is_some_and(|r| r.1 == stamp && r.3 && (origin.is_none() || r.2 == origin))
     {
+        // The file row itself is current, but metadata-only filesystem events
+        // must still be useful. BEGIN IMMEDIATE obtains the sole SQLite writer
+        // lease before the read/modify/write work below, which avoids the
+        // immediate SQLITE_BUSY failure a deferred transaction can get while
+        // trying to upgrade a stale read snapshot.
+        if let (Some(metadata), Some((media_id, _, _, _))) =
+            (sidecar_metadata.as_ref(), existing.as_ref())
+        {
+            let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
+            if let Err(error) =
+                capture_sidecar_metadata(&tx, *media_id, origin.as_deref(), metadata)
+            {
+                // Sidecar evidence is supplementary: a malformed extractor
+                // document must not make a completed file disappear.
+                warn!("Could not retain late source metadata for media {media_id}: {error}");
+            }
+            tx.commit()?;
+        }
         return Ok(false);
     }
-    let tx = conn.unchecked_transaction()?;
+    // Claim the writer before inspecting possible placeholder rows. A
+    // deferred transaction can read while another indexer owns the writer,
+    // then fail immediately when it tries to upgrade; the pool's busy timeout
+    // is honored when BEGIN IMMEDIATE waits for that handoff instead.
+    let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
     // A metadata event can follow the file event. Merge an early real row into
     // its placeholder, retaining the placeholder ID, ratings and both tag sets.
     if let (Some((real_id, _, _, _)), Some(url)) = (&existing, &origin) {
@@ -472,6 +500,17 @@ pub fn index_file(state: &AppState, source_id: i64, path: &Path) -> Result<bool>
           classification_label='unclassified', manual_review_required=0, manual_review_reason=NULL,
           nsfw_retry_at=0, duration_attempted=0, duration_secs=CASE WHEN media.file_stamp=excluded.file_stamp THEN media.duration_secs ELSE NULL END",
         rusqlite::params![source_id,rel,path.file_name().unwrap_or_default().to_string_lossy(),kind,now_iso(),origin,stamp])?;
+    if let Some(metadata) = sidecar_metadata.as_ref() {
+        let media_id: i64 =
+            tx.query_row("SELECT id FROM media WHERE filepath=?1", [&rel], |row| {
+                row.get(0)
+            })?;
+        if let Err(error) = capture_sidecar_metadata(&tx, media_id, origin.as_deref(), metadata) {
+            // Preserve a successfully indexed file if an optional extractor
+            // payload is malformed. The helper rolls back just its savepoint.
+            warn!("Could not retain source metadata for media {media_id}: {error}");
+        }
+    }
     tx.commit()?;
     // Completion derives from real indexed files, not parser/log guesses.
     // A source with no successful placeholder listing keeps known_total NULL,
@@ -482,6 +521,33 @@ pub fn index_file(state: &AppState, source_id: i64, path: &Path) -> Result<bool>
     );
     // Keep sidecars: restart recovery and late metadata events need their URL.
     Ok(true)
+}
+
+/// Capture optional extractor evidence without allowing one malformed sidecar
+/// to roll back the media row that was just indexed. Keeping it inside the
+/// caller's immediate transaction also makes the media upsert, provenance,
+/// and source-tag candidates visible together.
+fn capture_sidecar_metadata(
+    tx: &rusqlite::Transaction<'_>,
+    media_id: i64,
+    source_url: Option<&str>,
+    metadata: &Value,
+) -> Result<()> {
+    tx.execute_batch("SAVEPOINT capture_sidecar_metadata")?;
+    match crate::provenance::capture_source_metadata(tx, media_id, source_url, metadata) {
+        Ok(()) => tx.execute_batch("RELEASE SAVEPOINT capture_sidecar_metadata")?,
+        Err(error) => {
+            // Roll back every statement from the optional capture (including
+            // any partially inserted tag candidate) before committing the
+            // primary media transaction.
+            tx.execute_batch(
+                "ROLLBACK TO SAVEPOINT capture_sidecar_metadata;
+                 RELEASE SAVEPOINT capture_sidecar_metadata;",
+            )?;
+            return Err(error);
+        }
+    }
+    Ok(())
 }
 
 pub fn scan_and_index(state: &AppState, source_id: i64, dest: &Path) -> Result<(i64, i64)> {
@@ -706,13 +772,13 @@ pub async fn populate_placeholders(state: Arc<AppState>, source_id: i64) {
     let Some(_persist_lease) = state.maintenance.try_acquire_background_worker() else {
         return;
     };
-    let conn = match state.pool.get() {
+    let mut conn = match state.pool.get() {
         Ok(c) => c,
         Err(_) => return,
     };
     let now = now_iso();
 
-    let tx = match conn.unchecked_transaction() {
+    let tx = match conn.transaction_with_behavior(TransactionBehavior::Immediate) {
         Ok(tx) => tx,
         Err(error) => {
             warn!("Placeholder pre-scan for source {source_id} could not start a transaction: {error}");
@@ -1682,7 +1748,7 @@ mod tests {
             .unwrap();
         std::fs::write(
             state.library_dir.join("test/item.jpg.json"),
-            r#"{"url":"https://example.test/item.jpg"}"#,
+            r#"{"url":"https://example.test/item.jpg","creator":"artist","tags":["tag one"]}"#,
         )
         .unwrap();
         assert!(index_file(&state, 1, &path).unwrap());
@@ -1720,6 +1786,67 @@ mod tests {
                 .unwrap(),
             1
         );
+        assert_eq!(
+            conn.query_row("SELECT creator FROM source_metadata", [], |r| {
+                r.get::<_, Option<String>>(0)
+            })
+            .unwrap(),
+            Some("artist".into())
+        );
+        assert_eq!(
+            conn.query_row("SELECT raw_name FROM source_tags", [], |r| {
+                r.get::<_, String>(0)
+            })
+            .unwrap(),
+            "tag one"
+        );
+    }
+
+    #[test]
+    fn index_file_waits_for_a_competing_writer() {
+        let dir = tempfile::tempdir().unwrap();
+        let state = crate::test_support::state(dir.path());
+        crate::test_support::source(&state);
+        let path = state.library_dir.join("test/writer-race.jpg");
+        std::fs::write(&path, b"first version").unwrap();
+        std::fs::write(
+            state.library_dir.join("test/writer-race.jpg.json"),
+            r#"{"url":"https://example.test/writer-race.jpg"}"#,
+        )
+        .unwrap();
+        assert!(index_file(&state, 1, &path).unwrap());
+
+        // Make the row stale so indexing has to read a placeholder candidate
+        // and then write. This is the deferred-transaction upgrade race that
+        // produced the "database is locked" stream in the supplied log.
+        std::fs::write(&path, b"second version with a different size").unwrap();
+        let blocker = rusqlite::Connection::open(dir.path().join("data.db")).unwrap();
+        blocker
+            .execute_batch("PRAGMA journal_mode=WAL; PRAGMA busy_timeout=30000; BEGIN IMMEDIATE;")
+            .unwrap();
+
+        let (started_tx, started_rx) = std::sync::mpsc::channel();
+        let (finished_tx, finished_rx) = std::sync::mpsc::channel();
+        let worker_state = state.clone();
+        let worker_path = path.clone();
+        let worker = std::thread::spawn(move || {
+            started_tx.send(()).unwrap();
+            let _ = finished_tx.send(index_file(&worker_state, 1, &worker_path));
+        });
+        started_rx
+            .recv_timeout(std::time::Duration::from_secs(1))
+            .unwrap();
+        std::thread::sleep(std::time::Duration::from_millis(100));
+        assert!(
+            finished_rx.try_recv().is_err(),
+            "indexing must wait for the writer instead of failing its update"
+        );
+        blocker.execute_batch("COMMIT").unwrap();
+        assert!(finished_rx
+            .recv_timeout(std::time::Duration::from_secs(2))
+            .unwrap()
+            .unwrap());
+        worker.join().unwrap();
     }
 
     #[test]

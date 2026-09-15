@@ -27,6 +27,7 @@ test('Linux and macOS scope packages carry appropriate service definitions', () 
   const daemon = read('packaging/macos/tech.webmaster19083.curator.server.plist');
   const agent = read('packaging/macos/tech.webmaster19083.curator.server.user.plist');
   const macPortable = read('packaging/macos/build-server-user-archive.sh');
+  const macDmgVerify = read('packaging/macos/verify-dmg.sh');
   const macVerify = read('packaging/macos/verify-app.sh');
   const macPostinstall = read('packaging/macos/postinstall-server.sh');
   assert.match(systemd, /CURATOR_INSTALL_SCOPE=all-users/);
@@ -38,6 +39,8 @@ test('Linux and macOS scope packages carry appropriate service definitions', () 
   assert.match(daemon, /<string>all-users<\/string>/);
   assert.match(agent, /<string>current-user<\/string>/);
   assert.match(macPortable, /install-current-user\.sh/);
+  assert.match(macDmgVerify, /hdiutil verify/);
+  assert.match(macDmgVerify, /hdiutil attach/);
   assert.match(macVerify, /CFBundleIdentifier/);
   assert.match(macVerify, /lipo -archs/);
   assert.match(macVerify, /Contents\/Resources/);
@@ -51,6 +54,9 @@ test('release workflow validates once and attaches matrix artifacts from one job
   assert.match(workflow, /build-server-installers\.ps1/);
   assert.match(workflow, /build-server-user-archive\.sh/);
   assert.match(workflow, /verify-app\.sh/);
+  assert.match(workflow, /verify-dmg\.sh/);
+  assert.match(workflow, /APPLE_SIGNING_IDENTITY: "-"/);
+  assert.match(workflow, /--bundles app,dmg/);
   assert.match(workflow, /curator --docs/);
   assert.match(workflow, /--bundles deb,appimage/);
   assert.match(workflow, /bundle\/appimage\/\*\.AppImage/);
@@ -59,4 +65,12 @@ test('release workflow validates once and attaches matrix artifacts from one job
   assert.match(workflow, /MACOSX_DEPLOYMENT_TARGET: "11\.0"/);
   assert.match(workflow, /needs: \[windows-host-viewer, windows-server, linux, macos\]/);
   assert.equal(fs.existsSync(path.join(root, '.github/workflows/windows-release.yml')), false);
+});
+
+test('macOS Host and Viewer bundles pin macOS 11 and use ad-hoc signing', () => {
+  for (const file of ['desktop/tauri.conf.json', 'viewer/tauri.conf.json']) {
+    const config = JSON.parse(read(file));
+    assert.equal(config.bundle.macOS.minimumSystemVersion, '11.0');
+    assert.equal(config.bundle.macOS.signingIdentity, '-');
+  }
 });

@@ -8,5 +8,16 @@
     "windows": [],
     "security": { "csp": null }
   },
-  "bundle": { "active": true, "targets": "all", "icon": ["icons/icon.png", "icons/icon.ico", "icons/icon.icns"], "shortDescription": "Organize your media library", "category": "Photography", "resources": { "../static/": "static/" } }
+  "bundle": {
+    "active": true,
+    "targets": "all",
+    "icon": ["icons/icon.png", "icons/icon.ico", "icons/icon.icns"],
+    "shortDescription": "Organize your media library",
+    "category": "Photography",
+    "resources": { "../static/": "static/" },
+    "macOS": {
+      "minimumSystemVersion": "11.0",
+      "signingIdentity": "-"
+    }
+  }
 }

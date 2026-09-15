@@ -114,9 +114,14 @@ jobs:
       - name: Build scoped Server installers
         shell: pwsh
         run: |
-          .\packaging\windows\build-server-installers.ps1 `
+          # The runner invokes this block from a generated PowerShell file, but
+          # the checked-out helper can still be rejected by a machine execution
+          # policy. Run it in a fresh, non-interactive Bypass process so the
+          # packaging result does not depend on the runner's policy state.
+          & powershell.exe -NoLogo -NoProfile -ExecutionPolicy Bypass -File .\packaging\windows\build-server-installers.ps1 `
             -ServerBinary target\release\curator.exe `
             -OutputDirectory artifacts\windows\server
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
       - uses: actions/upload-artifact@v4
         with:
           name: curator-windows-server
@@ -177,6 +182,11 @@ jobs:
     needs: validate
     env:
       MACOSX_DEPLOYMENT_TARGET: "11.0"
+      # Tauri signs both the app and the generated DMG payload with this
+      # documented pseudo-identity. It is intentionally ad-hoc, not
+      # notarization, and removes reliance on whatever identities a hosted
+      # runner happens to expose.
+      APPLE_SIGNING_IDENTITY: "-"
     strategy:
       fail-fast: false
       matrix:
@@ -215,14 +225,16 @@ jobs:
       - name: Build, ad-hoc sign, and validate Host and Viewer DMGs
         run: |
           for product in desktop viewer; do
-            (cd "$product" && tauri build --target ${{ matrix.target }} --bundles app)
+            (cd "$product" && tauri build --target ${{ matrix.target }} --bundles app,dmg)
           done
           host_app=target/${{ matrix.target }}/release/bundle/macos/Curator.app
           viewer_app='target/${{ matrix.target }}/release/bundle/macos/Curator Viewer.app'
-          sh packaging/macos/build-dmg.sh "$host_app" artifacts/macos/${{ matrix.target }}/
           sh packaging/macos/verify-app.sh "$host_app" tech.webmaster19083.curator ${{ matrix.mach_arch }}
-          sh packaging/macos/build-dmg.sh "$viewer_app" artifacts/macos/${{ matrix.target }}/
           sh packaging/macos/verify-app.sh "$viewer_app" tech.webmaster19083.curator.viewer ${{ matrix.mach_arch }}
+          for dmg in target/${{ matrix.target }}/release/bundle/dmg/*.dmg; do
+            sh packaging/macos/verify-dmg.sh "$dmg"
+            cp "$dmg" artifacts/macos/${{ matrix.target }}/
+          done
       - uses: actions/upload-artifact@v4
         with:
           name: curator-macos-${{ matrix.target }}

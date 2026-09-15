@@ -13,6 +13,10 @@
     "targets": "all",
     "icon": ["../desktop/icons/icon.png", "../desktop/icons/icon.ico", "../desktop/icons/icon.icns"],
     "shortDescription": "Connect to Curator hosts on your Tailnet",
-    "category": "Photography"
+    "category": "Photography",
+    "macOS": {
+      "minimumSystemVersion": "11.0",
+      "signingIdentity": "-"
+    }
   }
 }

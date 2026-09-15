@@ -1,10 +1,19 @@
-use crate::*;
+use crate::{
+    data_lock::DataDirectoryLock,
+    edition::{Edition, InstallScope},
+    *,
+};
 
 pub fn state(root: &std::path::Path) -> Arc<AppState> {
     for dir in ["library", "archives", "thumbnails"] {
         std::fs::create_dir_all(root.join(dir)).unwrap();
     }
     Arc::new(AppState {
+        edition: Edition::Host,
+        install_scope: InstallScope::CurrentUser,
+        instance_id: "test-instance".into(),
+        data_lock: Arc::new(DataDirectoryLock::acquire(root).unwrap()),
+        maintenance: Arc::new(maintenance::MaintenanceController::new()),
         pool: db::init_pool(root).unwrap(),
         group_tag_cache: Arc::new(RwLock::new(None)),
         shutdown: tokio_util::sync::CancellationToken::new(),

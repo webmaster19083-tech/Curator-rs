@@ -1,16 +1,22 @@
+pub mod appearance;
 mod beat;
 mod chpack;
-mod config;
+pub mod config;
+mod data_lock;
 mod db;
 #[cfg(test)]
 mod desktop_tests;
 mod downloader;
 mod duration;
+pub mod edition;
 mod hierarchy;
 pub mod local_import;
+pub mod maintenance;
 mod media_files;
+pub mod migration;
 mod nsfw;
 mod oobe;
+pub mod phar;
 mod process;
 mod provenance;
 pub mod remote;
@@ -28,9 +34,12 @@ use std::path::PathBuf;
 use std::sync::{atomic::AtomicBool, Arc};
 use std::time::Instant;
 
-use anyhow::Result;
+use anyhow::{Context, Result};
+use data_lock::DataDirectoryLock;
+use edition::{Edition, InitializeOptions, InstallScope};
 use r2d2::Pool;
 use r2d2_sqlite::SqliteConnectionManager;
+use rand::RngCore;
 use tokio::sync::{Mutex, RwLock, Semaphore};
 use tower_http::compression::CompressionLayer;
 use tower_http::services::ServeDir;
@@ -39,6 +48,14 @@ use tracing::{error, info, warn};
 pub static DOCS_TEXT: &str = include_str!("../DOCS.txt");
 pub static NSFW_WORKER_PY: &str = include_str!("../nsfw_worker.py");
 pub static ACTION_WORKER_PY: &str = include_str!("../action_worker.py");
+
+/// Tests that alter process-global environment variables share one guard.
+/// Production configuration is per scope and does not rely on this lock.
+#[cfg(test)]
+pub(crate) static PROCESS_ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+pub use edition::{Edition as ProductEdition, InitializeOptions as InitOptions};
+pub use edition::{API_PROTOCOL, PRODUCT_VERSION};
 
 pub type GroupTagCache = Arc<RwLock<Option<Arc<HashMap<i64, HashSet<String>>>>>>;
 
@@ -63,6 +80,19 @@ pub async fn set_start_with_windows_preference(
 /// Shared application state passed to every Axum route handler.
 #[derive(Clone)]
 pub struct AppState {
+    /// Product identity is intentionally stateful rather than inferred from
+    /// the executable name. It powers capability responses and guards
+    /// local-only operations when a browser arrives over Tailnet.
+    pub edition: Edition,
+    pub install_scope: InstallScope,
+    /// Stable across restarts of one data directory; safe to expose for a
+    /// Viewer to recognize a saved host, unlike its filesystem location.
+    pub instance_id: String,
+    /// Must outlive the SQLite pool and every worker. Its Drop implementation
+    /// releases the lock only after the final cloned AppState disappears.
+    pub data_lock: Arc<DataDirectoryLock>,
+    /// Serialized local-only work such as database backup and recovery.
+    pub maintenance: Arc<maintenance::MaintenanceController>,
     pub pool: Pool<SqliteConnectionManager>,
     /// Cached group-id → effective tag set. None = dirty, rebuild on next read.
     pub group_tag_cache: GroupTagCache,
@@ -122,6 +152,8 @@ pub struct AppState {
     pub nsfw: Option<nsfw::NsfwClassifier>,
     /// Optional P-HAR worker, independently supervised from NudeNet.
     pub action_classifier: Option<nsfw::ActionClassifier>,
+    /// Deprecated compatibility field. Arbitrary action-model paths are no
+    /// longer launched; managed P-HAR state lives beneath `data_dir/phar`.
     pub action_model_path: Option<String>,
 }
 
@@ -148,11 +180,57 @@ fn setup_logging(log_path: &std::path::Path) {
         .ok();
 }
 
+fn load_or_create_instance_id(data_dir: &std::path::Path) -> Result<String> {
+    let path = data_dir.join("instance.json");
+    if let Ok(text) = std::fs::read_to_string(&path) {
+        if let Ok(value) = serde_json::from_str::<serde_json::Value>(&text) {
+            if let Some(id) = value.get("instance_id").and_then(serde_json::Value::as_str) {
+                if !id.trim().is_empty() {
+                    return Ok(id.to_string());
+                }
+            }
+        }
+    }
+
+    let mut bytes = [0u8; 16];
+    rand::thread_rng().fill_bytes(&mut bytes);
+    let instance_id = hex::encode(bytes);
+    let text = serde_json::to_string_pretty(&serde_json::json!({
+        "instance_id": instance_id,
+        "created_by_version": PRODUCT_VERSION,
+    }))?;
+    std::fs::write(&path, text)
+        .with_context(|| format!("writing Curator instance identity {}", path.display()))?;
+    Ok(instance_id)
+}
+
 // ─── main ─────────────────────────────────────────────────────────────────────
 
 pub async fn initialize() -> Result<AppState> {
-    let cfg = config::load_config();
-    let data_dir = config::resolve_data_dir(&cfg);
+    initialize_with_options(InitializeOptions::server()).await
+}
+
+/// Host uses the same backend as Server but has the native bridge and local
+/// integrations. Viewer deliberately never calls this function.
+pub async fn initialize_host() -> Result<AppState> {
+    initialize_with_options(InitializeOptions::host()).await
+}
+
+pub async fn initialize_with_options(options: InitializeOptions) -> Result<AppState> {
+    anyhow::ensure!(
+        options.edition.owns_library(),
+        "Curator Viewer must not initialize a database or HTTP server"
+    );
+    let cfg = config::load_config_for(options.install_scope);
+    let requested_data_dir = config::resolve_data_dir_for(
+        &cfg,
+        options.install_scope,
+        options.data_dir_override.as_deref(),
+    );
+    std::fs::create_dir_all(&requested_data_dir)?;
+    let data_dir = dunce::canonicalize(&requested_data_dir)?;
+    let data_lock = Arc::new(DataDirectoryLock::acquire(&data_dir)?);
+    maintenance::apply_pending_restart(&data_dir, options.install_scope)?;
     let library_dir = data_dir.join("library");
     let archives_dir = data_dir.join("archives");
     let thumbs_dir = data_dir.join("thumbnails");
@@ -168,7 +246,8 @@ pub async fn initialize() -> Result<AppState> {
     setup_logging(&log_path);
 
     // Persist the resolved data_dir so future runs find the same place
-    config::ensure_config_json(&data_dir);
+    config::ensure_config_json_for(options.install_scope, &data_dir);
+    let instance_id = load_or_create_instance_id(&data_dir)?;
 
     // gallery-dl binary (PATH default or config override)
     let gallery_dl_bin = cfg
@@ -192,7 +271,15 @@ pub async fn initialize() -> Result<AppState> {
         .ffmpeg_bin
         .filter(|s| !s.is_empty())
         .unwrap_or_else(|| "ffmpeg".to_string());
-    let action_model_path = cfg.action_model_path.filter(|s| !s.trim().is_empty());
+    let legacy_action_model_path = cfg
+        .action_model_path
+        .clone()
+        .filter(|s| !s.trim().is_empty());
+    if legacy_action_model_path.is_some() {
+        warn!(
+            "Ignoring legacy action_model_path; configure managed P-HAR from Local Admin instead"
+        );
+    }
 
     // Database pool + migrations
     let pool = db::init_pool(&data_dir).map_err(|e| {
@@ -207,6 +294,10 @@ pub async fn initialize() -> Result<AppState> {
     // Settings (loaded from settings.json with DEFAULT_SETTINGS fallback)
     let mut settings = db::load_settings(&data_dir);
     let max_concurrent = settings.max_concurrent as usize;
+    // Construct the maintenance coordinator before any startup workers.  The
+    // workers receive clones of this exact controller, so a maintenance job
+    // can close the admission gate before it waits for their in-flight writes.
+    let maintenance = Arc::new(maintenance::MaintenanceController::new());
 
     // Second half of the OOBE self-heal (the first half lives in
     // db::load_settings, for installations that already had a
@@ -258,15 +349,20 @@ pub async fn initialize() -> Result<AppState> {
     } else {
         None
     };
-    let action_classifier = if settings.nsfw_filter_enabled {
-        action_model_path.as_ref().map(|model_path| {
-            info!("P-HAR action model configured — starting optional action worker");
-            nsfw::ActionClassifier::spawn(
-                python_bin.clone(),
-                action_worker_path,
-                model_path.clone(),
-            )
-        })
+    let phar_status = match phar::resume_requested_setup(&data_dir, options.install_scope) {
+        Ok(status) => status,
+        Err(error) => {
+            warn!("P-HAR managed setup could not be resumed: {error}");
+            phar::status(&data_dir, options.install_scope)
+        }
+    };
+    let action_classifier = if settings.nsfw_filter_enabled && phar_status.ready {
+        info!("P-HAR managed environment passed validation — starting optional action worker");
+        Some(nsfw::ActionClassifier::spawn(
+            python_bin.clone(),
+            action_worker_path,
+            phar::environment_dir(&data_dir),
+        ))
     } else {
         None
     };
@@ -278,6 +374,7 @@ pub async fn initialize() -> Result<AppState> {
             library_dir.clone(),
             ffmpeg_bin.clone(),
             settings.max_clip_length_secs,
+            Arc::clone(&maintenance),
         );
     }
 
@@ -290,7 +387,12 @@ pub async fn initialize() -> Result<AppState> {
     })
     .await?
     {
-        duration::spawn_backfill_loop(pool.clone(), ffprobe_bin.clone(), library_dir.clone());
+        duration::spawn_backfill_loop(
+            pool.clone(),
+            ffprobe_bin.clone(),
+            library_dir.clone(),
+            Arc::clone(&maintenance),
+        );
     } else {
         info!("ffprobe not found (\"{}\") — video duration (clips/videos split) won't be backfilled for existing videos; newly-downloaded ones are unaffected once ffprobe is available", ffprobe_bin);
     }
@@ -320,6 +422,11 @@ pub async fn initialize() -> Result<AppState> {
     );
 
     let state = AppState {
+        edition: options.edition,
+        install_scope: options.install_scope,
+        instance_id,
+        data_lock,
+        maintenance,
         pool,
         group_tag_cache: Arc::new(RwLock::new(None)),
         shutdown: tokio_util::sync::CancellationToken::new(),
@@ -351,7 +458,7 @@ pub async fn initialize() -> Result<AppState> {
         python_bin,
         nsfw: nsfw_classifier,
         action_classifier,
-        action_model_path,
+        action_model_path: None,
     };
 
     // File size migration is schema-only. Reading metadata for legacy rows is
@@ -364,6 +471,7 @@ pub async fn initialize() -> Result<AppState> {
             size_backfill_state.library_dir.clone(),
             size_backfill_state.shutdown.clone(),
             size_backfill_state.size_backfill.clone(),
+            Arc::clone(&size_backfill_state.maintenance),
         )
         .await;
     });
@@ -371,6 +479,18 @@ pub async fn initialize() -> Result<AppState> {
     // Recover completed files whose final event was lost before a crash.
     let startup_state = state.clone();
     state.download_tasks.spawn(async move {
+        // Startup recovery indexes files and writes durable metadata.  If a
+        // local Admin job begins first, wait until it has released its
+        // exclusive window rather than racing its snapshot or transaction.
+        let _recovery_lease = loop {
+            if startup_state.shutdown.is_cancelled() {
+                return;
+            }
+            if let Some(lease) = startup_state.maintenance.try_acquire_background_worker() {
+                break lease;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(250)).await;
+        };
         let result = tokio::task::spawn_blocking(move || -> Result<()> {
             media_files::reconcile_cancellable(
                 &startup_state.pool,

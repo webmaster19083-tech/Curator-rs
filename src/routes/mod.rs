@@ -1,3 +1,4 @@
+pub mod admin;
 pub mod ch;
 pub mod clips;
 pub mod downloads;
@@ -13,18 +14,84 @@ pub mod search;
 pub mod settings;
 pub mod source_tags;
 pub mod sources;
+pub mod system;
 pub mod tags;
 pub mod thumb;
 
 use crate::AppState;
 use axum::{
+    extract::{Request, State},
+    http::{Method, StatusCode},
+    middleware::Next,
+    response::{IntoResponse, Response},
     routing::{delete, get, patch, post, put},
-    Router,
+    Json, Router,
 };
+use serde_json::json;
 use std::sync::Arc;
+
+/// Maintenance owns the library exclusively while it takes a safety backup
+/// and applies a recovery transaction.  Individual download routes also
+/// cooperate with that mode, but this router-level gate keeps tags, groups,
+/// ratings, settings, and every other mutation from racing a backup or
+/// rollback through a route that was added later.
+async fn maintenance_write_guard(
+    State(state): State<Arc<AppState>>,
+    request: Request,
+    next: Next,
+) -> Response {
+    let mutating_method = matches!(
+        *request.method(),
+        Method::POST | Method::PUT | Method::PATCH | Method::DELETE
+    );
+    if mutating_method {
+        // Hold a lease for the full request, rather than merely checking the
+        // flag once.  This closes the otherwise unavoidable race where a
+        // maintenance job starts between a middleware check and a handler's
+        // SQLite write.
+        let Some(_request_lease) = state.maintenance.try_acquire_background_worker() else {
+            return (
+                StatusCode::SERVICE_UNAVAILABLE,
+                Json(json!({
+                    "error": "A local maintenance job is active. Try this change again when it completes."
+                })),
+            )
+                .into_response();
+        };
+        return next.run(request).await;
+    }
+    next.run(request).await
+}
 
 pub fn build_router(state: Arc<AppState>) -> Router {
     Router::new()
+        .route("/api/system/info", get(system::info))
+        .route(
+            "/api/admin/jobs",
+            get(admin::list_jobs).post(admin::start_job),
+        )
+        .route("/api/admin/jobs/:id", get(admin::get_job))
+        .route(
+            "/api/admin/backups",
+            get(admin::list_backups).post(admin::create_backup),
+        )
+        .route("/api/admin/backups/:id", get(admin::download_backup))
+        .route(
+            "/api/admin/backups/:id/validate",
+            post(admin::validate_backup),
+        )
+        .route(
+            "/api/admin/backups/:id/restore",
+            post(admin::restore_backup),
+        )
+        .route(
+            "/api/admin/phar",
+            get(admin::phar_status).post(admin::phar_intent),
+        )
+        .route("/api/admin/phar/install", post(admin::phar_install))
+        .route("/api/admin/phar/cancel", post(admin::phar_cancel))
+        .route("/api/admin/phar/repair", post(admin::phar_repair))
+        .route("/api/admin/phar/self-test", post(admin::phar_self_test))
         .route("/api/library/summary", get(crate::hierarchy::endpoint))
         // ── First-run OOBE ─────────────────────────────────────────────────
         // Explicit routes on "/" and "/index.html" take priority over the
@@ -125,5 +192,69 @@ pub fn build_router(state: Arc<AppState>) -> Router {
         .route("/api/goon/beat-maps/analyze", post(goon::analyze_beat_map))
         .route("/api/goon/beat-maps/:id", patch(goon::update_beat_map))
         .route("/api/goon/oauth/callback", post(goon::oauth_callback))
+        .layer(axum::middleware::from_fn_with_state(
+            Arc::clone(&state),
+            maintenance_write_guard,
+        ))
         .with_state(state)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use axum::body::Body;
+    use tower::ServiceExt;
+
+    #[tokio::test]
+    async fn maintenance_mode_rejects_all_normal_mutations() {
+        let root = tempfile::tempdir().unwrap();
+        let state = crate::test_support::state(root.path());
+        // Hold quiescence just long enough to prove the router cannot race a
+        // queued job. The task itself uses the direct pause function, so it
+        // is not blocked by this HTTP-only guard.
+        state.running_sources.lock().await.insert(1);
+        state
+            .maintenance
+            .start(
+                Arc::clone(&state),
+                crate::maintenance::MaintenanceRequest {
+                    kind: crate::maintenance::MaintenanceKind::CreateBackup,
+                    confirmation: String::new(),
+                    backup_id: None,
+                },
+            )
+            .await
+            .unwrap();
+        assert!(state.maintenance.is_active());
+
+        let response = build_router(Arc::clone(&state))
+            .oneshot(
+                axum::http::Request::builder()
+                    .method(Method::POST)
+                    .uri("/api/groups")
+                    .header("content-type", "application/json")
+                    .body(Body::from(r#"{"name":"must wait"}"#))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
+
+        state.running_sources.lock().await.clear();
+        for _ in 0..100 {
+            if !state.maintenance.is_active() {
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+        }
+        assert!(!state.maintenance.is_active());
+        assert!(
+            !state
+                .downloads_paused
+                .load(std::sync::atomic::Ordering::SeqCst),
+            "a completed job must restore the prior unpaused download state"
+        );
+        state.server_tasks.close();
+        state.server_tasks.wait().await;
+    }
 }

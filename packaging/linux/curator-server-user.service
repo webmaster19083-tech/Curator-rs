@@ -1,0 +1,14 @@
+[Unit]
+Description=Curator Server local and Tailnet media backend (current user)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+Environment=CURATOR_INSTALL_SCOPE=current-user
+ExecStart=__CURATOR_SERVER_PATH__ --background --install-scope current-user
+Restart=on-failure
+RestartSec=5
+
+[Install]
+WantedBy=default.target

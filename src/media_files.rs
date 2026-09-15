@@ -97,6 +97,7 @@ pub async fn backfill_missing_file_sizes(
     library: PathBuf,
     shutdown: tokio_util::sync::CancellationToken,
     progress: Arc<RwLock<SizeBackfillProgress>>,
+    maintenance: Arc<crate::maintenance::MaintenanceController>,
 ) {
     {
         let mut status = progress.write().await;
@@ -105,6 +106,19 @@ pub async fn backfill_missing_file_sizes(
             ..SizeBackfillProgress::default()
         };
     }
+    // Counting is read-only, but it still uses SQLite.  Treat it as an
+    // in-flight worker so an Admin job cannot begin its exclusive window in
+    // the middle of this startup phase.
+    let count_lease = loop {
+        if shutdown.is_cancelled() {
+            progress.write().await.running = false;
+            return;
+        }
+        if let Some(lease) = maintenance.try_acquire_background_worker() {
+            break lease;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(250)).await;
+    };
     let total = match tokio::task::spawn_blocking({
         let pool = pool.clone();
         move || count_missing_sizes(&pool)
@@ -125,6 +139,7 @@ pub async fn backfill_missing_file_sizes(
             return;
         }
     };
+    drop(count_lease);
     progress.write().await.total = total;
 
     let mut after_id = 0;
@@ -133,6 +148,14 @@ pub async fn backfill_missing_file_sizes(
             progress.write().await.running = false;
             return;
         }
+        if maintenance.is_active() {
+            tokio::time::sleep(std::time::Duration::from_millis(250)).await;
+            continue;
+        }
+        let Some(_worker) = maintenance.try_acquire_background_worker() else {
+            tokio::time::sleep(std::time::Duration::from_millis(250)).await;
+            continue;
+        };
         let batch = tokio::task::spawn_blocking({
             let pool = pool.clone();
             let library = library.clone();

@@ -211,6 +211,9 @@ pub async fn resync(
     State(state): State<Arc<AppState>>,
     Path(id): Path<i64>,
 ) -> Result<Json<Value>, (StatusCode, Json<Value>)> {
+    if state.maintenance.is_active() {
+        return Ok(Json(json!({ "status": "maintenance" })));
+    }
     let conn = state.pool.get().map_err(db_err)?;
     let row = conn.query_row("SELECT status FROM sources WHERE id=?1", [id], |r| {
         r.get::<_, String>(0)
@@ -249,6 +252,9 @@ pub async fn resync(
 // ─── POST /api/sources/resync-all ────────────────────────────────────────────
 
 pub async fn resync_all(State(state): State<Arc<AppState>>) -> Json<Value> {
+    if state.maintenance.is_active() {
+        return Json(json!({ "queued": 0, "maintenance": true }));
+    }
     if state
         .downloads_paused
         .load(std::sync::atomic::Ordering::SeqCst)

@@ -34,6 +34,15 @@ type Fingerprint = Option<(u64, Option<SystemTime>)>;
 static FAILED_THUMBS: Lazy<Mutex<HashMap<i64, (Fingerprint, String)>>> =
     Lazy::new(|| Mutex::new(HashMap::new()));
 
+/// Administrative cache rebuilds remove the on-disk thumbnails as well as
+/// this process-local negative cache, so a repaired file is retried at once.
+pub fn clear_failure_cache() {
+    FAILED_THUMBS
+        .lock()
+        .unwrap_or_else(|error| error.into_inner())
+        .clear();
+}
+
 fn fingerprint(path: &Path) -> Fingerprint {
     let meta = std::fs::metadata(path).ok()?;
     Some((meta.len(), meta.modified().ok()))

@@ -1,0 +1,8 @@
+Package: curator-server
+Version: @CURATOR_VERSION@
+Section: graphics
+Priority: optional
+Architecture: amd64
+Maintainer: Curator
+Description: Curator Server local and Tailnet media backend
+ Curator Server serves the Curator browser UI and manages a local media library.

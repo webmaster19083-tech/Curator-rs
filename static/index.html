@@ -180,20 +180,28 @@
       default library layout
       <select id="settings-library-layout"><option value="grid">Grid</option><option value="table">Table</option></select>
     </label>
-    <label class="settings-field mono small">
-      ffmpeg executable
-      <input id="settings-ffmpeg-bin" type="text" placeholder="ffmpeg">
-    </label>
-    <label class="settings-field mono small">
-      optional P-HAR action-model path
-      <input id="settings-action-model-path" type="text" placeholder="Leave blank for review-only Fast ratings">
-    </label>
+    <div id="settings-local-tools" data-local-setting>
+      <label class="settings-field mono small">
+        ffmpeg executable
+        <input id="settings-ffmpeg-bin" type="text" placeholder="ffmpeg">
+      </label>
+      <p class="muted">P-HAR is opt-in and uses a pinned managed environment. Configure its setup, repair, and self-test from Local Admin; arbitrary model paths are not accepted.</p>
+    </div>
 
     <h2 class="settings-subhead">Appearance</h2>
     <label class="settings-field mono small">
       theme
       <select id="settings-theme">
         <option value="system">System</option>
+        <option value="gtk-system">GTK System (local app)</option>
+        <option value="adwaita-light">Adwaita Light</option>
+        <option value="adwaita-dark">Adwaita Dark</option>
+        <option value="yaru-light">Yaru Light</option>
+        <option value="yaru-dark">Yaru Dark</option>
+        <option value="arc-light">Arc Light</option>
+        <option value="arc-dark">Arc Dark</option>
+        <option value="breeze-light">Breeze Light</option>
+        <option value="breeze-dark">Breeze Dark</option>
         <option value="atelier-dark">Atelier Dark</option>
         <option value="midnight">Midnight</option>
         <option value="ember">Ember</option>
@@ -273,24 +281,28 @@
       <select id="settings-soundtrack-provider"><option value="local">Local audio</option><option value="youtube">YouTube</option><option value="soundcloud">SoundCloud</option><option value="apple_music">Apple Music</option><option value="spotify">Spotify (independent only)</option></select>
     </label>
 
-    <h2 class="settings-subhead">Startup</h2>
-    <label class="settings-checkbox mono small">
-      <input id="settings-start-with-windows" type="checkbox"> Start Curator when Windows starts
-    </label>
-    <label class="settings-checkbox mono small">
-      <input id="settings-keep-running-in-tray" type="checkbox"> Keep Curator running in the system tray when the window is closed
-    </label>
+    <section id="settings-local-startup" data-local-setting data-host-setting>
+      <h2 class="settings-subhead">Startup</h2>
+      <label class="settings-checkbox mono small">
+        <input id="settings-start-with-windows" type="checkbox"> Start Curator when Windows starts
+      </label>
+      <label class="settings-checkbox mono small">
+        <input id="settings-keep-running-in-tray" type="checkbox"> Keep Curator running in the system tray when the window is closed
+      </label>
+    </section>
 
     <h2 class="settings-subhead">Remote Access</h2>
     <p class="muted">The same Curator server serves the desktop app, local browser fallback, and approved Tailscale devices. It never listens on ordinary LAN interfaces; addresses refresh while Curator is running.</p>
     <div id="settings-remote-access" class="mono small muted" aria-live="polite">Checking server status…</div>
 
-    <h2 class="settings-subhead">Setup</h2>
-    <p class="muted">
-      Reopens the first-run setup wizard so you can re-check dependencies or change
-      the data directory. Doesn't touch your downloads, database, or other settings.
-    </p>
-    <button id="settings-run-setup-again" class="btn btn-ghost btn-block small">Run Setup Again</button>
+    <section id="settings-local-setup" data-local-setting>
+      <h2 class="settings-subhead">Setup</h2>
+      <p class="muted">
+        Reopens the first-run setup wizard so you can re-check dependencies or change
+        the data directory. Doesn't touch your downloads, database, or other settings.
+      </p>
+      <button id="settings-run-setup-again" class="btn btn-ghost btn-block small">Run Setup Again</button>
+    </section>
 
     <div class="modal-actions">
       <button id="settings-cancel" class="btn btn-ghost">Cancel</button>

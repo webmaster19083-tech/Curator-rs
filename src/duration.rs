@@ -8,6 +8,7 @@
 //! per-file failures, no repeated wasted process-spawn attempts.
 
 use std::path::PathBuf;
+use std::sync::Arc;
 
 use tracing::warn;
 
@@ -26,9 +27,18 @@ pub fn ffprobe_available(ffprobe_bin: &str) -> bool {
     .unwrap_or(false)
 }
 
-pub fn spawn_backfill_loop(pool: DbPool, ffprobe_bin: String, library_dir: PathBuf) {
+pub fn spawn_backfill_loop(
+    pool: DbPool,
+    ffprobe_bin: String,
+    library_dir: PathBuf,
+    maintenance: Arc<crate::maintenance::MaintenanceController>,
+) {
     tokio::spawn(async move {
         loop {
+            if maintenance.is_active() {
+                tokio::time::sleep(std::time::Duration::from_millis(250)).await;
+                continue;
+            }
             let batch = tokio::task::spawn_blocking({
                 let pool = pool.clone();
                 move || fetch_undurationed_batch(&pool, 25)
@@ -55,6 +65,9 @@ pub fn spawn_backfill_loop(pool: DbPool, ffprobe_bin: String, library_dir: PathB
             }
 
             for (id, filepath) in rows {
+                let Some(_worker) = maintenance.try_acquire_background_worker() else {
+                    break;
+                };
                 let ffprobe_bin = ffprobe_bin.clone();
                 let pool = pool.clone();
                 // filepath is stored relative to library_dir (see routes/thumb.rs's

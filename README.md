@@ -1,100 +1,130 @@
-# Curator
+# Curator 0.2.0
 
-A small, self-hosted, site-agnostic front-end for [gallery-dl](https://github.com/mikf/gallery-dl).
+Curator is a self-hosted gallery-dl library: download media you are entitled to
+access, organize it with groups/tags/ratings, and browse it locally in a
+browser or native desktop app. The backend serves only loopback and explicitly
+detected Tailscale addresses—never ordinary LAN or wildcard interfaces.
 
-Paste in creator URLs from any site gallery-dl supports (DeviantArt, Pixiv,
-Twitter/X, ArtStation, Instagram, Reddit, Imgur, hundreds more), Curator
-downloads their content locally and gives you a fast browser UI to view it —
-by creator, by group, or everything shuffled together — with ratings, tags,
-a slideshow, and a few other ways to browse (portrait wall, mobile feed).
-An optional local NudeNet classifier can suggest the 1-3 exposure scale; a
-separate P-HAR worker can suggest Fast for qualifying short videos. Cum stays
-human-confirmed. See `--docs` for setup if you want local auto-rating.
-"Live browse" streams a URL straight from gallery-dl's listing output
-without downloading anything, for previewing before you commit disk space —
-merged in from the separate Contact Sheet project, so it's all one server
-now. Real sources get the same treatment automatically: a newly-added
-source shows up looking fully downloaded right away — streamed live until
-the real download catches up, then swapped to the real file in place, so
-any rating/tag you set early sticks. A dismissible sidebar reminder nudges
-you to export your source list every so often, since that's the one thing
-here that's genuinely hard to recreate if lost.
+Curator has three editions built from one Rust core and web frontend:
 
-Curator is a Tauri desktop application backed by one local Rust/Axum + SQLite
-service. The same service remains available in a normal browser as a fallback;
-everything runs on your machine and nothing is uploaded anywhere.
+- **Curator Server** (`curator`) is the headless backend, browser UI, download
+  manager, media server, and background service.
+- **Curator Host** (`Curator`) is the full Tauri app with viewer, tray, and
+  local integrations. It owns a library just like Server.
+- **Curator Viewer** (`curator-viewer`) is a lightweight Tauri client. It
+  starts no database or server and connects only to saved Tailnet hosts.
 
-## Requirements
+Host and Server can never open the same resolved data directory at once. An OS
+lock is held for the complete backend lifetime, so an unsafe shared SQLite/WAL
+setup fails before workers begin.
 
-- Windows, macOS, or Linux
-- [gallery-dl](https://github.com/mikf/gallery-dl) itself, available on your
-  `PATH` (`pip install gallery-dl`, or see gallery-dl's own install docs) —
-  Curator is a front-end for it, not a replacement for it
-- Optional: [ffmpeg](https://ffmpeg.org/) on your `PATH` — gallery-dl uses it
-  for some sites' video handling
+## Installation scope
 
-Curator itself needs no Python, no pip, and no separate install step — it's
-one binary.
+Every product has a **Current user** choice (the default) and an **All users**
+choice. App binaries follow the selected scope; Host and Viewer preferences
+stay per-user in either case.
 
-## Setup & run
+Current-user Server data lives in `%LocalAppData%\Curator` on Windows,
+`~/.local/share/Curator` on typical Linux desktops, and
+`~/Library/Application Support/Curator` on macOS. It runs as a Windows
+scheduled task, `systemd --user` unit, or LaunchAgent.
 
-**Windows:** download the Curator installer (`.msi` or NSIS `.exe`) from the
-[Releases page], install it, then open **Curator** from the Start menu. The
-desktop app starts its backend and library automatically; no browser, terminal,
-or working-directory setup is needed.
+All-users Server data lives in `%ProgramData%\Curator`, `/var/lib/curator`, or
+`/Library/Application Support/Curator`. It requires elevation and runs as a
+Windows service, systemd service, or LaunchDaemon. The package service
+templates are in [packaging](packaging/README.md).
 
-**macOS / Linux:** no pre-built binary is published yet — build from source
-with [Rust](https://rustup.rs) installed:
+Windows Server releases contain separate current-user and all-users NSIS
+installers. The Linux portable archive and macOS current-user archive include
+their non-elevated service installer scripts; Linux `.deb` and macOS `.pkg`
+are the all-users Server packages. Linux Host and Viewer releases also include
+portable AppImages alongside their `.deb` packages for current-user use.
 
-```bash
-git clone <this repo> curator
-cd curator
-cargo build --release
-./target/release/curator
+To bring a stopped Host library into a new all-users Server location, run the
+elevated import command. It locks both locations, snapshots the source SQLite
+database, copies library artifacts, and refuses to overwrite a non-empty
+destination:
+
+```text
+curator import-host --from "C:\path\to\host-data" --install-scope all-users
 ```
 
-The browser fallback is served at **http://127.0.0.1:42168** while Curator is
-running. Closing the desktop window can leave Curator running in the system
-tray, so its local browser fallback and downloads continue until you choose
-**Quit Curator**.
+## Viewer and Tailnet access
 
-**First launch:** Curator opens a short local setup wizard instead of the
-normal browser UI — it checks for `gallery-dl` (and optionally `ffmpeg`),
-lets you confirm or change where your data lives, and sets a few download
-and appearance defaults. Nothing you enter leaves your machine, and you're
-never asked for a password or site cookies there. Once you finish it (or
-choose "Advanced / Skip Setup"), Curator won't show it again — reopen it
-any time from **Settings → Run Setup Again**, which only lets you review or
-change things; it never touches your downloads, database, or other
-settings. Upgrading an existing installation never re-triggers the wizard.
-If `gallery-dl` isn't installed yet, the wizard tells you and lets you
-either install it and retest, or point Curator at wherever it lives.
+Start Server or Host on the machine that owns the library, install Tailscale on
+both devices, and configure an owner-only Tailnet grant. In Viewer, add the
+host URL, test it, then connect. Viewer verifies the host against the local
+Tailscale peer inventory and resolved Tailnet IP before it accepts the
+connection; it also checks `/api/system/info` for the Curator API protocol and
+edition.
 
-Your data (downloads, database, settings, log) lives outside the app's own
-folder — in `~/Curator` by default, separate from the code/binary — so
-upgrading Curator later is just "replace the binary (and `static/`) and run
-it again."
+Viewer has ordinary library management access—browsing, playback, downloads,
+sources, groups, tags, ratings, and routine settings—but never exposes local
+Admin, OOBE, executable-path, service, or P-HAR installation controls.
 
-## Everything else
+## Local Admin and recovery
 
-This file stays short on purpose. For the full reference — Tailscale-only
-remote access, moving your data directory, groups & tags, ratings, themes,
-speeding up downloads, gallery-dl login/cookies, troubleshooting, all of
-it — run:
+Host and local Server browser sessions expose **Local Admin**. Tailnet peers
+receive a 403 for this surface. Admin serializes maintenance jobs, reports
+progress, creates SQLite online backups, validates/downloads/restores backups,
+rebuilds derived caches, reconciles the library, and provides explicitly
+confirmed reset/cleanup tools.
+
+Every destructive job requires its displayed typed phrase, pauses/quiesces
+workers, creates a database/configuration backup, performs transactional data
+changes, invalidates caches, and restores prior state on failure. Restore and
+factory reset are staged for restart. Backups cover database/configuration,
+not downloaded media; factory reset preserves media, archives, managed P-HAR
+files, and backups unless their separate delete control is chosen.
+
+## Appearance and layout
+
+The app uses one primary scroller per view, an independent sidebar scroller,
+and modal-body scrollers so long lists remain usable on short displays.
+`100dvh`, bounded flex/grid sizing, sticky actions, keyboard focus, touch
+scrolling, and horizontal-overflow checks are part of the shell contract.
+
+Alongside Curator palettes, known GTK mappings are available for GTK System,
+Adwaita, Yaru, Arc, and Breeze in light/dark variants. Host and Viewer can
+inject their local GTK name, light/dark preference, accent, and font. Curator
+maps those known families to accessible palettes; it does not parse arbitrary
+GTK stylesheet files. Browser clients fall back to `prefers-color-scheme`.
+
+## Optional classification and P-HAR
+
+NudeNet is optional and can only suggest SFW, Slow, or Medium from anatomical
+evidence. P-HAR is separately opt-in and can suggest Fast only when a
+qualifying upstream action class appears in two consecutive temporal windows.
+Kissing/fondling are insufficient; climax labels never assign Cum
+automatically.
+
+The managed P-HAR environment pins the upstream source and submodules beneath
+the data directory. Native Linux and Windows via WSL2 are the supported first
+tier; native Windows and macOS remain experimental until automated install and
+real inference probes pass. Curator does not redistribute or download model
+checkpoints until each checkpoint has a verified upstream right and SHA-256.
+If setup is unavailable or fails, NudeNet/manual review remains operational
+and P-HAR is not reported ready.
+
+The Server NSIS installer and local OOBE both offer an unchecked opt-in choice;
+Local Admin can enable, cancel, repair, self-test, or remove the managed
+environment later. In this build the checkpoint rights/checksum gate is not
+yet satisfied, so choosing it records consent and reports a transparent
+blocked state instead of downloading an unverified model.
+
+## Building from source
 
 ```bash
-curator --docs
+cargo test --workspace --locked
+cargo clippy --workspace --all-targets --all-features -- -D warnings
+node --test tests/*.test.js
 ```
 
-or `curator --help` for just the command-line flags. `--docs` prints a lot
-of text; pipe it through a pager if you like (`| more` on Windows, `| less`
-on Linux/macOS).
+Run `curator --docs` for the full operational reference. The packaged macOS
+Host/Viewer apps and Server executable are ad-hoc signed with identity `-`;
+the Server `.pkg` is intentionally unsigned until an Apple Installer
+certificate is available. Ad-hoc signing is not notarization, so Gatekeeper
+may require explicit user approval.
 
-## A quick note on use
-
-Curator downloads whatever you point it at. Only add creators/galleries
-you have the right to access, and be mindful of each site's terms of
-service and rate limits — gallery-dl is a general-purpose tool, and how you
-use it is on you.
-
-[Releases page]: ../../releases
+Only add sources you have the right to access, and respect each source site's
+terms and rate limits.

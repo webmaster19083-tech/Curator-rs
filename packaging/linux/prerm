@@ -1,0 +1,10 @@
+#!/bin/sh
+set -eu
+
+if [ "$1" = remove ] || [ "$1" = deconfigure ]; then
+  systemctl disable --now curator-server.service >/dev/null 2>&1 || true
+  systemctl daemon-reload || true
+fi
+
+# Preserve /var/lib/curator, backups, downloads, and P-HAR environments.
+exit 0

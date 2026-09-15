@@ -148,6 +148,14 @@
     <label class="settings-checkbox mono small">
       <input type="checkbox" id="nsfw-enabled-input"> Enable automatic rating
     </label>
+    <label class="settings-checkbox mono small">
+      <input type="checkbox" id="phar-setup-requested-input"> Set up optional P-HAR after setup
+    </label>
+    <p class="oobe-help">
+      P-HAR is separate from NudeNet. On Windows it defaults to the supported
+      WSL2 environment; it never downloads a model until its upstream rights
+      and checksum are verified. You can also manage it later from Local Admin.
+    </p>
     <p class="oobe-help" id="nsfw-help">
       Turning this on when the environment isn't ready yet is fine — Curator will
       just leave items unrated until the classifier's dependencies are installed.
@@ -162,6 +170,15 @@
       theme
       <select class="oobe-input" id="theme-input">
         <option value="system">System</option>
+        <option value="gtk-system">GTK System (local app)</option>
+        <option value="adwaita-light">Adwaita Light</option>
+        <option value="adwaita-dark">Adwaita Dark</option>
+        <option value="yaru-light">Yaru Light</option>
+        <option value="yaru-dark">Yaru Dark</option>
+        <option value="arc-light">Arc Light</option>
+        <option value="arc-dark">Arc Dark</option>
+        <option value="breeze-light">Breeze Light</option>
+        <option value="breeze-dark">Breeze Dark</option>
         <option value="atelier-dark">Atelier Dark</option>
         <option value="midnight">Midnight</option>
         <option value="ember">Ember</option>

@@ -1,0 +1,15 @@
+#!/bin/sh
+set -eu
+
+if ! getent passwd curator >/dev/null 2>&1; then
+  useradd --system --home-dir /var/lib/curator --create-home --shell /usr/sbin/nologin curator
+fi
+install -d -o curator -g curator -m 0750 /var/lib/curator
+if command -v systemctl >/dev/null 2>&1 && [ -d /run/systemd/system ]; then
+  systemctl daemon-reload
+  systemctl enable --now curator-server.service
+fi
+
+# Package installs in a chroot/container may not have a live systemd manager;
+# a normal all-users installation starts the dedicated system service above.
+exit 0

@@ -1,289 +1,263 @@
-CURATOR — full reference
-=========================
+CURATOR 0.2.0 — operational reference
+======================================
 
-Curator is a self-hosted, site-agnostic front-end for gallery-dl: paste in
-creator/gallery URLs, it downloads them locally via the real gallery-dl CLI,
-indexes everything into a local SQLite database, and serves a browser UI for
-managing sources and browsing/slideshowing the results. Everything runs on
-your machine; nothing is uploaded anywhere.
-
-This is the long version. `curator --help` covers just the command line flags.
-Output below is long — pipe it through a pager if you like:
-    curator --docs | more        (Windows)
-    curator --docs | less        (Linux/macOS)
+Curator is a self-hosted gallery-dl frontend. It stores sources, media
+metadata, ratings, groups, tags, downloads, and browser UI state locally.
+It binds only to loopback and explicitly detected Tailscale addresses; it
+never binds an ordinary LAN interface or a wildcard address.
 
 
-RUNNING IT
-----------
-    Curator.exe
-The installed Tauri desktop app opens its native Curator window and starts its
-backend automatically. It does not depend on the current working directory and
-does not show a console window in a release install. Closing the window can
-leave Curator running in the system tray; choose Quit Curator to stop its
-downloads and browser fallback.
+EDITIONS
+--------
+
+Curator Server (`curator`)
+    Headless Rust backend, browser UI/API, downloads, media serving, console
+    mode, and background-service mode. It owns a data directory.
+
+Curator Host (`Curator`)
+    Tauri desktop application with the same backend, viewer, tray, and native
+    integrations. It owns a data directory and uses an in-process bridge.
+
+Curator Viewer (`curator-viewer`)
+    Lightweight Tauri client for saved Tailnet hosts. It starts no SQLite
+    database, no downloader, and no HTTP server. Its remote page uses ordinary
+    same-origin HTTP rather than the Host bridge.
+
+Host and Server acquire an exclusive OS lock at <data-dir>/.curator-data.lock
+before SQLite opens. Do not attempt to make two backend processes share a data
+directory; Curator intentionally rejects it.
+
+
+COMMANDS
+--------
 
     curator
-The source-built headless binary starts the same backend for development or
-browser-only use. Open http://127.0.0.1:42168 in a regular browser while it is
-running. `curator --docs` prints this reference.
+        Start Curator Server in the foreground with the current-user scope.
+
+    curator --background --install-scope current-user
+        Explicit background-service invocation used by current-user service
+        registration.
+
+    curator --background --install-scope all-users
+        Explicit background-service invocation used by machine service
+        registration. The surrounding service installer requires elevation.
+
+    curator --data-dir /path/to/data
+        Use a one-off explicit data directory. It still receives the exclusive
+        ownership lock.
+
+    curator import-host --from /path/to/host-data --install-scope all-users
+        Elevated, explicit Host-to-machine-Server migration. The command
+        locks source/destination, creates an online SQLite snapshot, copies
+        library/archives/thumbnails/backups/managed P-HAR files, and refuses
+        an occupied destination. It does not copy Host-local executable paths.
+
+    curator phar-intent --enabled true --install-scope current-user
+        Record only P-HAR opt-in intent. It performs no package/model download.
+        Installers call this after their file transaction only when the
+        unchecked P-HAR option was selected.
+
+    curator --docs
+        Print this document.
 
 
-WHERE YOUR DATA LIVES
-----------------------
-The binary and static/ live wherever you put curator.exe. Data (downloads,
-database, settings, log) defaults to ~/Curator.
+INSTALLATION SCOPE AND LOCATIONS
+--------------------------------
 
-To move it permanently, edit config.json next to curator.exe:
-    { "data_dir": "E:/CuratorData" }
-config.json is created automatically on first run if it doesn't exist yet.
+Current user is the default and normally needs no elevation.
 
-For a one-off override, the CURATOR_DATA_DIR environment variable takes
-priority over config.json for that session only.
+Windows current-user Server
+    Program files: per-user application location.
+    Data/config: %LocalAppData%\Curator.
+    Background mode: a current-user scheduled task.
 
-gallery-dl binary: Curator calls `gallery-dl` from your PATH by default.
-Override with `"gallery_dl_bin": "C:/path/to/gallery-dl.exe"` in config.json.
+Linux current-user Server
+    Program files: ~/.local/lib/curator (portable package convention).
+    Data/config: ~/.local/share/Curator on typical desktops.
+    Background mode: `systemctl --user enable --now curator-server-user`.
 
+macOS current-user Server
+    Program files: user Application Support/Curator location.
+    Data/config: ~/Library/Application Support/Curator.
+    Background mode: LaunchAgent.
 
-FIRST-RUN SETUP (OOBE)
-------------------------
-The very first time Curator runs — no settings.json and an empty database —
-it opens a short local setup wizard at http://127.0.0.1:42168 instead of the
-normal UI:
-  1. Welcome
-  2. Dependency check (gallery-dl required; ffmpeg/ffprobe optional)
-  3. Data directory (confirm the default, or pick another; existing files
-     are never moved)
-  4. gallery-dl configuration (a "test" button, nothing else — gallery-dl
-     keeps its own config/cookies separately and Curator never asks for a
-     password or cookies here)
-  5. Download defaults (concurrent download count)
-  6. Optional NSFW auto-rating
-  7. Appearance (theme, slideshow defaults)
-  8. Summary, then Finish
+All users requires elevation.
 
-"Advanced / Skip Setup" on the welcome screen jumps straight to the
-summary/Finish step without changing anything.
+Windows all-users Server
+    Program files: Program Files.
+    Data/config: %ProgramData%\Curator.
+    Background mode: CuratorServer Windows service.
 
-Once you finish (or skip), Curator marks setup complete in settings.json
-and always opens the normal UI after that — the wizard does not reappear on
-its own. Re-open it any time from Settings -> "Run Setup Again"; that only
-lets you review/change things and never touches your downloads, database,
-or other settings.
+Linux all-users Server
+    Program files/static assets: /usr/lib/curator.
+    Data/config: /var/lib/curator.
+    Background mode: `systemctl enable --now curator-server`.
 
-Upgrading an existing installation never triggers this: Curator recognizes
-an existing settings.json or a database that already has sources/media in
-it and skips straight to the normal UI, even if that installation predates
-this wizard entirely.
+macOS all-users Server
+    Program files/static assets: /Library/Application Support/Curator.
+    Data/config: /Library/Application Support/Curator.
+    Background mode: LaunchDaemon.
 
-Changing the data directory or a gallery-dl/ffprobe executable path through
-the wizard writes to config.json, same as editing it by hand would — it
-takes effect the next time Curator starts, same as it always has.
+Host and Viewer app binaries can use either scope while their personal
+preferences remain per-user. Older current-user config.json files adjacent to
+an executable are read as a compatibility fallback; new writes use the scoped
+configuration location.
+
+The Windows registration scripts and Linux/macOS service templates live under
+packaging/. Service uninstall removes only registration; it deliberately
+preserves libraries, archives, backups, and P-HAR environments.
 
 
-REMOTE ACCESS (TAILSCALE ONLY)
--------------------------------
-Curator intentionally never listens on ordinary Wi-Fi/Ethernet LAN interfaces.
-It binds loopback (http://127.0.0.1:42168) and, only while the local Tailscale
-daemon reports an active address, that device's Tailscale IP(s) on the same
-port. If Tailscale is unavailable or disconnects, Curator remains local-only.
+FIRST RUN
+---------
 
-Do not add a broad Windows firewall rule, port-forward a router, or treat a
-shared Tailnet as trusted. Every device permitted to reach Curator has full
-administrator access to its library. Configure an explicit owner-only Tailnet
-grant before using remote access:
-  1. Edit tailscale-grants.example.hujson with your own owner group and host
-     tag, then merge it into the Tailnet policy.
-  2. Tag this Curator PC with that host tag.
-  3. Confirm an owner device can open the Tailscale URL shown in Settings ->
-     Remote Access (or its MagicDNS hostname on port 42168).
-  4. Confirm a non-owner Tailnet identity is denied.
+Host and local Server browser sessions open the OOBE only for an empty,
+unconfigured library. It checks gallery-dl, optional ffprobe/ffmpeg, data
+directory writability, download defaults, optional NudeNet/P-HAR consent, and
+appearance.
+OOBE is local-only: a Tailnet viewer cannot use it.
 
-OOBE and executable-path configuration always remain local-only, even when a
-Tailnet device is permitted to administer normal library actions.
+gallery-dl is required for downloading and defaults to `gallery-dl` on PATH.
+ffprobe is optional for duration backfill; ffmpeg is optional for functions
+that decode/sample media. Executable-path configuration is local-only and
+takes effect after restart.
 
 
-SPEEDING UP DOWNLOADS
------------------------
-Downloading is limited by network requests per source, not CPU/GPU — more
-concurrent sources helps more than a faster processor. Settings -> "max
-concurrent downloads" (default 6, up to 20). Push it up if your connection
-can take it; bring it down if sources start landing on "error" (usually a
-site rate-limiting too many parallel connections from your IP).
-
-
-WHY BROWSING FEELS FAST (THUMBNAILS & CACHING)
--------------------------------------------------
-Grid tiles and sidebar previews use small cached JPEG thumbnails (360px long
-edge), not the multi-MB originals — the lightbox and slideshow still load the
-real file. Videos only fetch metadata once they're about to scroll into view.
-Everything is served with long-lived cache headers since files never change
-once downloaded. Deleting the thumbnails/ folder is always safe; it's a cache
-and rebuilds as needed.
-
-
-ADDING SOURCES
----------------
-"+ add multiple at once" (or the quick-add box), one URL per line or comma
-separated. https:// is optional. Paste the actual profile/gallery URL —
-Curator doesn't guess one from a bare username, since gallery-dl matches on
-per-site URL patterns. Each source downloads in the background; watch its
-status dot go pending -> downloading -> done.
-
-
-GROUPS
--------
-"+ group" in the sidebar creates one. Move a source into a group via its
-menu's "group" dropdown. Click a group to browse everything inside it,
-shuffled together. Double-click to rename; the x deletes a group without
-deleting its sources (they fall back to "Ungrouped").
-
-Subgroups: every group has its own + button for nesting (e.g. a "Platforms"
-group containing "Patreon" and "Twitter"). Browsing a group includes its
-subgroups' content too. Deleting a group with subgroups promotes them up one
-level rather than deleting or flattening them.
-
-Groups and tags are interchangeable: a group's own name, and any tags
-you've explicitly added to it, apply live to every file nested inside it
-(including through subgroups) — filtering by tag "nsfw" matches a file
-that's explicitly tagged "nsfw" AND a file that just lives in a group named
-(or tagged) "nsfw". Nothing is copied or written per-file; move a source to
-a different group and its effective tags update immediately. These
-inherited tags show up as dashed, read-only chips in the lightbox — remove
-them by editing the group (or moving the file out of it), not the file.
-
-
-RATINGS & TAGS
----------------
-Click a star in the lightbox to rate a file 1-5; use the review undo action
-when a human decision should be cleared. The media scale is 1★ SFW, 2★ Slow,
-3★ Medium, 4★ Fast, and 5★ Cum. Add tags via the lightbox's tag box (Enter or "+ tag");
-remove one by clicking its x. Both are filterable/sortable from the
-toolbar, and both apply to groups too (see above) — tag a group from its
-sidebar tag button (🏷).
-
-
-NSFW AUTO-RATING (OPTIONAL)
-------------------------------
-Curator can run newly-downloaded media through NudeNet's bundled 320×320
-detector. NudeNet supplies anatomical evidence only: it may suggest 1★ SFW,
-2★ Slow, or 3★ Medium. Detector confidence can never create Fast or Cum. An
-optional supervised P-HAR worker analyzes short video windows and suggests 4★
-Fast only after the same explicit-action class is ≥0.70 in two consecutive
-windows. Cum remains human-confirmed (or a reserved human `pace:cum` tag).
-Existing automatic results are migrated and requeued; human ratings are kept.
-
-This is entirely optional and off by default. To use it:
-
-  1. Install Python 3 if you don't already have it.
-  2. pip install nudenet
-  3. Turn on "enable NSFW auto-rating" in Settings, then restart Curator —
-     enabling/disabling this needs a restart, since it decides whether the
-     classifier process gets started at all.
-
-Curator writes its own copy of the worker script (nsfw_worker.py) into your
-data directory on every startup, so there's nothing else to install or copy
-by hand. If the Python dependencies aren't installed, or Python itself
-isn't on your PATH, this fails quietly — curator.log will show a warning,
-but nothing else in Curator depends on this or is affected by it.
-
-Images are classified directly. Short videos use six sampled frames plus the
-optional temporal action worker; long clips or unavailable dependencies go to
-manual review without retry storms.
-
-
-CLIPS VS VIDEOS
------------------
-The toolbar's type filter splits video into two categories by length:
-"clips" (up to 90 seconds) and "videos" (over 90 seconds) — handy for
-keeping short-form content separate from longer downloads. This needs
-ffprobe (part of ffmpeg — see Requirements) to read each video's duration;
-without it, videos still show up fine everywhere, they just won't sort
-into either "clips" or "videos" specifically (only "all" and "photos" are
-unaffected). Existing videos get their duration filled in automatically in
-the background after an update; new downloads get it immediately as
-they're indexed.
-
-The feed and portrait wall always skip anything over 90 seconds
-regardless of the toolbar filter — those views are built for quick,
-short-form browsing, and a long video breaks that up. This check happens
-live as each video loads, so it works even before ffprobe has backfilled
-that file's duration for the toolbar filter above.
-
-
-EXPORT / IMPORT
------------------
-"export list" in the sidebar footer downloads a JSON backup of every
-source's name, URL, group, and selection state (not the actual files).
-"import list" reads one of those back in (or any JSON shaped like
-{"sources":[{"url": "..."}]}), recreating groups it references; duplicates
-are skipped automatically.
-
-A dismissible reminder banner appears in the sidebar once it's been a
-while (30 days by default, "backup reminder" in Settings) since the last
-export, or if you've never exported at all.
-
-
-LIVE BROWSE (PREVIEW WITHOUT DOWNLOADING)
---------------------------------------------
-"live browse" in the toolbar opens a mode that streams directly from
-gallery-dl's listing output (`gallery-dl -j`) instead of downloading
-anything — nothing here touches your library or database. Paste a URL to
-browse it immediately; anything you like there can be added to the real
-library with one click. Useful for previewing before committing disk space.
-
-
-COCK HERO SESSION (TIER 3)
------------------------------
-Open /ch/ in your browser for the Cock Hero session UI. Configure tag/source
-filters, a pacing profile, and session duration. Cock hero fetches a filtered
-playlist from curator's /api/ch/playlist endpoint and drives the display —
-advancing media, playing video clips, layering a HUD with pace cues and
-elapsed time. Beat sync uses the Web Audio API, entirely client-side.
-
-To enable session logging, set "ch_log_sessions": true in Settings.
-
-
-LOGS & FINDING ERRORS
-------------------------
-Everything goes to curator.log in your data directory (rotates past 5MB).
-Click "view log" in the sidebar footer to open it as plain text.
-
-
-NOTES & KNOWN LIMITATIONS
------------------------------
-- Single-user, local tool: no accounts, no API auth.
-- Curator uses port 42168 and never exposes it to ordinary LAN or the open
-  internet. Use the explicit Tailscale grant described above for remote access.
-- Large libraries paginate the grid in batches of 150 while scrolling.
-- gallery-dl must be on your PATH (or configured in config.json as gallery_dl_bin).
-
-
-TROUBLESHOOTING
+VIEWER AND TAILNET
 ------------------
-- Check curator.log first — most issues show up there with enough detail to diagnose.
-- "gallery-dl could not be launched" -> ensure gallery-dl is installed and on your PATH.
-- A source stuck on "error" -> hover its row for the last bit of gallery-dl's output.
-- Port already in use -> another curator.exe is running, or change the port in source.
-- NSFW auto-rating stuck off / nothing getting rated -> check curator.log for
-  "nsfw worker" warnings; usually means Python isn't on PATH or
-  nudenet isn't installed for that Python. Run
-  tools/diagnose_nsfw.py (python tools/diagnose_nsfw.py) for a full
-  diagnosis -- it specifically checks whether pip install put the package
-  into a different Python than the one Curator actually launches, which is
-  the single most common cause of "installed it and it still says missing
-  dependency." Pass --fix to have it install the right packages for you.
-- Videos never sorting into "clips"/"videos" -> ffprobe isn't on PATH (it
-  ships with ffmpeg — see Requirements); curator.log logs this once at
-  startup rather than per-video.
-- First-run setup wizard keeps reappearing -> it only reappears if
-  settings.json's "oobe_completed" is false; check you're not running with
-  CURATOR_DATA_DIR pointed somewhere new each time (each data directory
-  gets its own settings.json and its own first-run state).
-- Want to redo first-run setup on purpose -> Settings -> "Run Setup Again"
-  (doesn't touch downloads/database/other settings).
 
-A NOTE ON USE
----------------
-Curator downloads whatever you point it at. Only add creators/galleries you
-have the right to access, and be mindful of each site's terms of service
-and rate limits.
+1. Start Host or Server on the library-owning device.
+2. Install and sign in to Tailscale on that device and the Viewer device.
+3. Configure a restrictive Tailnet grant. Tailnet grants remain the remote
+   authorization layer; Curator intentionally has no pairing token.
+4. In Viewer, add a named host and run its connectivity test.
+
+Viewer accepts an endpoint only when its hostname/IP appears in local
+Tailscale peer inventory and DNS resolution matches that peer's Tailnet IP.
+It then requests /api/system/info and checks API protocol, edition, version,
+instance identity, capabilities, and Tailnet-only status. A protocol mismatch
+is shown before the host is saved/used.
+
+Remote Viewer operations include browsing, playback, downloads, sources,
+groups, tags, ratings, and ordinary settings. Destructive Local Admin, OOBE,
+service management, executable paths, and P-HAR setup remain on the owning
+machine.
+
+
+SYSTEM INFO
+-----------
+
+    GET /api/system/info
+
+Returns edition, package version, API protocol, stable instance identity,
+capabilities, and the Tailnet-only assertion. It intentionally does not expose
+filesystem paths. Viewer uses it as its post-connect handshake.
+
+
+LOCAL ADMIN, BACKUPS, AND RESET
+-------------------------------
+
+Local Admin is available only to loopback/in-process Host/Server clients.
+Tailnet peers get 403 even if their grant allows ordinary library management.
+
+Admin jobs are serialized and show queued/running/succeeded/failed state. The
+available jobs include:
+
+  - create, list, download, validate, and stage restore of backups;
+  - clear human rating overrides;
+  - reset ratings/classifier evidence and requeue eligible analysis;
+  - flatten or delete groups while retaining the promised data;
+  - clear tag assignments/source-tag rules or interactive history;
+  - rebuild thumbnails/derived caches and reconcile library metadata;
+  - stage a factory reset that preserves media, archives, P-HAR, and backups;
+  - separately remove a managed P-HAR environment or downloaded archives.
+
+Destructive jobs require the displayed typed confirmation, pause/quiesce
+workers, make a WAL-aware online SQLite backup, use transactions where data is
+mutable, invalidate in-process caches, and fail with rollback rather than a
+partial change. Backup archives contain database/configuration only; downloaded
+media is intentionally not copied. Restore/reset changes are staged and apply
+on restart, with rollback files retained until every database/settings/config
+replacement succeeds.
+
+
+APPEARANCE AND SCROLLING
+------------------------
+
+The shell has one primary scrolling region for each view, a separate sidebar
+scroller, and modal-body scrollers. Source trees, results, groups/tags,
+ratings/review, downloads/discovery/playlists, Viewer hosts, OOBE, Settings,
+Admin jobs, and backups should reach their final item even on short screens.
+
+The layout uses dynamic viewport height, min-height: 0 on bounded flex/grid
+children, sticky actions, keyboard focus, touch scrolling, and horizontal
+overflow controls. Browser tests cover page assets; release UI tests should
+exercise desktop, short desktop, tablet, and phone viewport classes.
+
+Theme choices are System, Curator palettes, GTK System, and mapped Adwaita,
+Yaru, Arc, and Breeze light/dark presets. Host/Viewer provide client-local GTK
+name, light/dark preference, available accent, and font. Curator maps only
+those known family names; it never claims to parse arbitrary GTK CSS. Browser
+clients use prefers-color-scheme.
+
+
+P-HAR
+-----
+
+P-HAR is off by default and managed separately from NudeNet. Curator pins the
+upstream P-HAR source revision, its MMAction2/MMDetection/MMPose submodules,
+SHA-256 pins for the upstream dependency declaration and class label manifest,
+and a status marker under <data-dir>/phar.
+
+The adapter invokes the upstream multimodal demo rather than treating an
+arbitrary file as a TorchScript model. Its exact 17-class mapping permits Fast
+evidence only for sexual-action/position classes after two consecutive windows
+at the required threshold. `kissing` and `fondling` never qualify; `cumshot`
+and `facial-cumshot` remain evidence only and never cause automatic Cum.
+
+Native Linux and Windows through WSL2 are the supported first tier. Native
+Windows and native macOS are experimental and cannot be called ready until
+automated environment setup and a real inference probe pass. Local Admin can
+record intent, evaluate/resume, cancel, repair, inspect, self-test, and remove
+the managed environment.
+
+Checkpoint redistribution rights are deliberately not assumed. Until each
+required checkpoint has a verified upstream source, rights status, and SHA-256,
+Curator downloads nothing and reports P-HAR blocked/unready. The NSIS and OOBE
+opt-ins therefore record consent only in this build; Local Admin can show the
+blocked reason, cancel, repair, self-test, or remove the managed environment.
+Failed or blocked P-HAR never disables NudeNet/manual review.
+
+
+PACKAGING AND RELEASES
+----------------------
+
+All packages consume the workspace package version. Windows builds produce
+current-user and all-users Host/Viewer NSIS installers alongside MSI packages,
+plus separate current-user and all-users Server NSIS installers. The Server
+installer has an unchecked P-HAR consent checkbox and registers either a
+scheduled task or Windows service. Linux produces an all-users Server .deb and
+a current-user portable archive with the user-unit installer. macOS produces
+separate Intel and Apple Silicon artifacts with macOS 11 as the deployment
+floor, including an all-users Server .pkg and current-user LaunchAgent archive.
+Host and Viewer Linux jobs also attach portable AppImages beside their `.deb`
+packages for non-elevated use.
+
+Host/Viewer app bundles and Server executables are ad-hoc signed with
+`codesign --sign -`. The Server .pkg is intentionally unsigned unless an
+Apple Installer certificate is supplied. Ad-hoc signatures do not notarize an
+app: Gatekeeper may require an explicit approval.
+
+CI validates format, locked workspace builds/tests, strict Clippy, and browser
+tests once; product/platform jobs upload their artifacts first; one aggregate
+release job attaches them to avoid parallel release races. Packaging smoke
+checks cover service definitions, architecture, resources, signatures, server
+startup, and DMG mounting.
+
+
+USE
+---
+
+Only add sources you have the right to access. Curator is a local front-end;
+you remain responsible for source-site terms, rate limits, account access, and
+Tailnet membership.

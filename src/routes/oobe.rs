@@ -13,7 +13,7 @@ use std::net::SocketAddr;
 use tokio::sync::Semaphore;
 
 use crate::oobe as logic;
-use crate::{config, db, AppState};
+use crate::{config, db, phar, AppState};
 
 fn err(status: StatusCode, message: impl Into<String>) -> (StatusCode, Json<Value>) {
     (status, Json(json!({ "error": message.into() })))
@@ -113,7 +113,7 @@ async fn build_status(state: &Arc<AppState>) -> Value {
     };
 
     let settings = state.settings.read().await;
-    let cfg = config::load_config();
+    let cfg = config::load_config_for(state.install_scope);
 
     json!({
         "oobe_completed": settings.oobe_completed,
@@ -135,7 +135,7 @@ async fn build_status(state: &Arc<AppState>) -> Value {
             "ffprobe_bin": state.ffprobe_bin,
             "ffmpeg_bin": state.ffmpeg_bin,
             "python_bin": state.python_bin,
-            "action_model_path": state.action_model_path,
+            "phar": crate::phar::status(&state.data_dir, state.install_scope),
             // What's on disk right now, for the frontend to detect
             // "you have unsaved / pending-restart changes".
             "pending_data_dir": cfg.data_dir,
@@ -256,7 +256,9 @@ pub struct OobeSettingsBody {
     pub gallery_dl_bin: Option<String>,
     pub ffprobe_bin: Option<String>,
     pub ffmpeg_bin: Option<String>,
-    pub action_model_path: Option<String>,
+    /// Recording consent is local-only. Managed setup is evaluated after the
+    /// backend has already started and never runs inside an OS installer.
+    pub phar_setup_requested: Option<bool>,
     // settings.json-backed — take effect immediately, same fields the
     // normal Settings modal exposes (see routes/settings.rs).
     pub max_concurrent: Option<u32>,
@@ -289,7 +291,7 @@ pub async fn save_settings(
     ensure_local(&peer)?;
     // ── config.json fields ────────────────────────────────────────────────
     let mut cfg_dirty = false;
-    let mut cfg = config::load_config();
+    let mut cfg = config::load_config_for(state.install_scope);
 
     if let Some(raw) = &body.data_dir {
         let path = logic::sanitize_path_input(raw).map_err(|e| err(StatusCode::BAD_REQUEST, e))?;
@@ -322,28 +324,39 @@ pub async fn save_settings(
             Some(validate_executable_field(raw).map_err(|e| err(StatusCode::BAD_REQUEST, e))?);
         cfg_dirty = true;
     }
-    if let Some(raw) = &body.action_model_path {
-        let path = logic::sanitize_path_input(raw).map_err(|e| err(StatusCode::BAD_REQUEST, e))?;
-        if !raw.trim().is_empty() && !path.is_file() {
-            return Err(err(
-                StatusCode::BAD_REQUEST,
-                format!("'{raw}' doesn't exist."),
-            ));
-        }
-        cfg.action_model_path = if raw.trim().is_empty() {
-            None
-        } else {
-            Some(path.to_string_lossy().to_string())
-        };
-        cfg_dirty = true;
-    }
     if cfg_dirty {
-        config::save_config(&cfg).map_err(|e| {
+        config::save_config_for(state.install_scope, &cfg).map_err(|e| {
             err(
                 StatusCode::INTERNAL_SERVER_ERROR,
                 format!("Could not save config.json: {e}"),
             )
         })?;
+    }
+
+    if let Some(enabled) = body.phar_setup_requested {
+        // This path persists only consent/runtime metadata. It deliberately
+        // performs no clone, dependency install, or checkpoint download.
+        phar::record_install_intent(&state.data_dir, state.install_scope, enabled, None).map_err(
+            |error| {
+                err(
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    format!("Could not record P-HAR setup intent: {error}"),
+                )
+            },
+        )?;
+        if enabled {
+            // OOBE occurs after the backend has started. With unverified
+            // checkpoints this transparently records Blocked rather than
+            // pretending an environment is ready.
+            phar::resume_requested_setup(&state.data_dir, state.install_scope).map_err(
+                |error| {
+                    err(
+                        StatusCode::INTERNAL_SERVER_ERROR,
+                        format!("Could not evaluate P-HAR setup: {error}"),
+                    )
+                },
+            )?;
+        }
     }
 
     // ── settings.json fields (reuses the exact same field semantics as

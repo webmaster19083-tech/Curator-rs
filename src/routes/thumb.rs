@@ -64,6 +64,13 @@ pub async fn get_thumbnail(State(state): State<Arc<AppState>>, Path(id): Path<i6
     let src_path = dunce::simplified(&state.library_dir.join(&filepath)).to_path_buf();
 
     if !src_path.is_file() {
+        let Some(_worker) = state.maintenance.try_acquire_background_worker() else {
+            return (
+                StatusCode::SERVICE_UNAVAILABLE,
+                Json(json!({"error": "A local maintenance job is active."})),
+            )
+                .into_response();
+        };
         if let Ok(conn) = state.pool.get() {
             let _ = crate::media_files::mark_missing(&conn, id);
         }
@@ -76,6 +83,15 @@ pub async fn get_thumbnail(State(state): State<Arc<AppState>>, Path(id): Path<i6
     }
 
     // Images — generate/serve cached thumbnail
+    // Thumbnail generation writes cache files even though this is a GET.
+    // Lease it so an administrative cache rebuild has one owner at a time.
+    let Some(_worker) = state.maintenance.try_acquire_background_worker() else {
+        return (
+            StatusCode::SERVICE_UNAVAILABLE,
+            Json(json!({"error": "A local maintenance job is active."})),
+        )
+            .into_response();
+    };
     match get_or_create_thumb(id, src_path.clone(), state.thumbs_dir.clone()).await {
         Ok(bytes) => (
             StatusCode::OK,

@@ -563,9 +563,21 @@ async fn index_download(
         if scan && dirty.swap(false, Ordering::Relaxed) {
             info!("Recovering missed filesystem events for source {source_id}");
         }
+        // Each filesystem batch can write media/source rows. Move the lease
+        // into the blocking closure so it remains held even if the async
+        // watcher is cancelled while that closure is still finishing.
+        let Some(worker_lease) = state.maintenance.try_acquire_background_worker() else {
+            if final_scan {
+                watcher.take();
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(250)).await;
+            continue;
+        };
         let s = state.clone();
         let d = dest.clone();
         let result=tokio::task::spawn_blocking(move || -> Result<()> {
+            let _worker_lease = worker_lease;
             if scan { scan_and_index(&s,source_id,&d)?; }
             else {
                 for mut path in paths {
@@ -651,6 +663,12 @@ pub async fn populate_placeholders(state: Arc<AppState>, source_id: i64) {
     if state.shutdown.is_cancelled() {
         return;
     }
+    // Claiming a listing slot is a durable write. The long gallery-dl call
+    // below is deliberately outside this short lease so maintenance can
+    // cancel the owning download rather than wait for a network listing.
+    let Some(claim_lease) = state.maintenance.try_acquire_background_worker() else {
+        return;
+    };
     let claimed = {
         let conn = match state.pool.get() {
             Ok(c) => c,
@@ -665,6 +683,7 @@ pub async fn populate_placeholders(state: Arc<AppState>, source_id: i64) {
         .unwrap_or(0)
             > 0
     };
+    drop(claim_lease);
     if !claimed {
         return;
     }
@@ -682,6 +701,11 @@ pub async fn populate_placeholders(state: Arc<AppState>, source_id: i64) {
         return;
     }
 
+    // The listing finished outside maintenance. Re-admit its transactional
+    // result only if no Admin job has begun in the meantime.
+    let Some(_persist_lease) = state.maintenance.try_acquire_background_worker() else {
+        return;
+    };
     let conn = match state.pool.get() {
         Ok(c) => c,
         Err(_) => return,
@@ -759,6 +783,13 @@ pub fn run_download(
     let token = state.download_tasks.token();
     async move {
         let _token = token;
+        // A source owns both files and database rows for its whole run. The
+        // lease closes the gap between a queued task waking and maintenance
+        // pausing it; once maintenance flips active, newly queued sources do
+        // not begin mutating state.
+        let Some(_maintenance_lease) = state.maintenance.try_acquire_background_worker() else {
+            return;
+        };
         if state.shutdown.is_cancelled() || !state.running_sources.lock().await.insert(source_id) {
             return;
         }
@@ -1255,6 +1286,13 @@ fn schedule_retry(state: Arc<AppState>, source_id: i64, delay: Duration) {
             _ = state.shutdown.cancelled() => return,
             _ = tokio::time::sleep(delay) => {}
         }
+
+        // A retry timer can wake long after its source worker ended. Acquire
+        // its own short lease before it changes durable retry state or queues
+        // another downloader.
+        let Some(_retry_lease) = state.maintenance.try_acquire_background_worker() else {
+            return;
+        };
 
         if state
             .downloads_paused

@@ -23,24 +23,45 @@ const LEGACY_THEME_MAP = {
   yotsuba: 'linen', 'yotsuba-b': 'midnight', futaba: 'ember', burichan: 'midnight',
   tomorrow: 'linen', photon: 'linen', light: 'linen', 'oled-dark': 'oled', dark: 'atelier-dark',
 };
+const GTK_THEME_FAMILIES = ['adwaita', 'yaru', 'arc', 'breeze'];
+const GTK_ACCENTS = { blue: '#3584e4', teal: '#2190a4', green: '#3a944a', yellow: '#c88800', orange: '#e66100', red: '#e62b38', pink: '#d56199', purple: '#9141ac', slate: '#5e5c64' };
 function normalizeTheme(theme) {
   return LEGACY_THEME_MAP[theme] || theme;
+}
+function clientAppearance() {
+  const injected = window.__CURATOR_CLIENT_APPEARANCE__;
+  return injected && typeof injected === 'object' ? injected : { gtk_name: null, prefers_dark: window.matchMedia('(prefers-color-scheme: dark)').matches, accent: null, font: null };
+}
+function applyClientAppearance(appearance, active) {
+  const root = document.documentElement; root.style.removeProperty('--client-accent'); root.style.removeProperty('--client-font');
+  if (!active) return;
+  const raw = String(appearance.accent || '').trim().toLowerCase(); const accent = GTK_ACCENTS[raw] || (/^#[0-9a-f]{6}$/i.test(raw) ? raw : '');
+  if (accent) root.style.setProperty('--client-accent', accent);
+  const font = String(appearance.font || '').trim(); if (/^[\w\s,'-]{1,120}$/.test(font)) root.style.setProperty('--client-font', font);
 }
 function applyTheme(theme) {
   theme = normalizeTheme(theme);
   if (systemThemeMedia) { systemThemeMedia.onchange = null; systemThemeMedia = null; }
-  if (theme === 'system') {
+  const appearance = clientAppearance();
+  if (theme === 'gtk-system') {
+    const name = String(appearance.gtk_name || '').toLowerCase(); const family = GTK_THEME_FAMILIES.find((candidate) => name.includes(candidate)) || 'adwaita';
+    document.documentElement.dataset.theme = `${family}-${appearance.prefers_dark ? 'dark' : 'light'}`;
+    applyClientAppearance(appearance, true);
+  } else if (theme === 'system') {
     systemThemeMedia = window.matchMedia('(prefers-color-scheme: light)');
     const resolve = () => {
       if (systemThemeMedia.matches) document.documentElement.dataset.theme = 'linen';
       else delete document.documentElement.dataset.theme;
+      applyClientAppearance(appearance, false);
     };
     resolve();
     systemThemeMedia.onchange = resolve;
   } else if (theme === 'atelier-dark') {
     delete document.documentElement.dataset.theme;
+    applyClientAppearance(appearance, false);
   } else {
     document.documentElement.dataset.theme = theme;
+    applyClientAppearance(appearance, GTK_THEME_FAMILIES.some((family) => theme.startsWith(`${family}-`)));
   }
 }
 
@@ -143,6 +164,7 @@ async function loadStatus() {
 
   // Step 6
   el('#nsfw-enabled-input').checked = !!status.settings.nsfw_filter_enabled;
+  el('#phar-setup-requested-input').checked = !!status.config.phar?.requested;
 
   // Step 7
   el('#theme-input').value = status.settings.theme;
@@ -203,6 +225,7 @@ async function saveDraft() {
     default_slideshow_loop: el('#slideshow-loop-input').checked,
     default_slideshow_shuffle: el('#slideshow-shuffle-input').checked,
     nsfw_filter_enabled: el('#nsfw-enabled-input').checked,
+    phar_setup_requested: el('#phar-setup-requested-input').checked,
   };
   const dataDirValue = el('#data-dir-input').value.trim();
   if (dataDirValue && dataDirValue !== status.data_dir.path) body.data_dir = dataDirValue;
@@ -224,11 +247,13 @@ function renderFinish() {
   const gd = s.dependencies.gallery_dl;
   const fp = s.dependencies.ffmpeg;
   const ns = s.dependencies.nsfw;
+  const phar = s.config.phar;
   const rows = [
     ['gallery-dl', gd.found ? 'Ready' : 'Missing', gd.found ? 'ok' : 'err'],
     ['ffmpeg / ffprobe', fp.found ? 'Ready' : 'Optional — not found', fp.found ? 'ok' : 'warn'],
     ['Data directory', s.data_dir.path, s.data_dir.writable ? 'ok' : 'err'],
     ['Content classifier', ns.found ? (s.settings.nsfw_filter_enabled ? 'Ready & enabled' : 'Ready, not enabled') : 'Not available', ns.found ? 'ok' : 'warn'],
+    ['P-HAR', phar?.requested ? `${phar.phase || 'requested'} (${phar.support?.runtime || 'managed'})` : 'Not requested', phar?.ready ? 'ok' : (phar?.requested ? 'warn' : '')],
     ['Theme', s.settings.theme, ''],
     ['Concurrent downloads', String(s.settings.max_concurrent), ''],
   ];

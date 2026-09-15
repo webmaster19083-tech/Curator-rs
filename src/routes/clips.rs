@@ -40,6 +40,18 @@ pub async fn create(
             Json(json!({"error":"Another video is being split. Please wait for it to finish."})),
         )
     })?;
+    // The request middleware protects the initial validation, but this work
+    // persists results after FFmpeg exits. Reserve a worker lease before the
+    // job row exists so maintenance cannot snapshot halfway through it.
+    let worker_lease = state
+        .maintenance
+        .try_acquire_background_worker()
+        .ok_or_else(|| {
+            (
+                StatusCode::SERVICE_UNAVAILABLE,
+                Json(json!({"error":"A local maintenance job is active."})),
+            )
+        })?;
     let (filepath, job_id) = {
         let conn = state.pool.get().map_err(db_err)?;
         let filepath: Option<String> = conn.query_row("SELECT filepath FROM media WHERE id=?1 AND type='video' AND downloaded=1 AND missing=0 AND clip_parent_id IS NULL", [id], |r| r.get(0)).optional().map_err(db_err)?;
@@ -63,6 +75,7 @@ pub async fn create(
     let worker = state.clone();
     state.download_tasks.spawn(async move {
         let _permit = permit;
+        let _worker_lease = worker_lease;
         let result = split_video(
             worker.clone(),
             id,

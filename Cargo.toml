@@ -1,7 +1,15 @@
+[workspace]
+members = ["desktop", "viewer"]
+resolver = "2"
+
+[workspace.package]
+version = "0.2.0"
+edition = "2021"
+
 [package]
 name = "curator"
-version = "0.1.0"
-edition = "2021"
+version.workspace = true
+edition.workspace = true
 description = "Self-hosted gallery-dl front-end. Organize, view, tag, and rate your collection."
 
 [[bin]]
@@ -16,9 +24,10 @@ tower-http     = { version = "0.5", features = ["compression-gzip", "fs"] }
 tokio          = { version = "1",   features = ["full"] }
 
 # Database
-rusqlite       = { version = "0.31", features = ["bundled"] }
+rusqlite       = { version = "0.31", features = ["bundled", "backup"] }
 r2d2           = "0.8"
 r2d2_sqlite    = "0.24"
+fs2            = "0.4"
 
 # Serialization
 serde          = { version = "1",    features = ["derive"] }

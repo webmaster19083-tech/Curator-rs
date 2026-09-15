@@ -1,0 +1,21 @@
+[Unit]
+Description=Curator Server local and Tailnet media backend
+After=network-online.target tailscaled.service
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=curator
+Group=curator
+WorkingDirectory=/var/lib/curator
+Environment=CURATOR_INSTALL_SCOPE=all-users
+ExecStart=/usr/lib/curator/curator --background --install-scope all-users
+Restart=on-failure
+RestartSec=5
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=full
+ReadWritePaths=/var/lib/curator
+
+[Install]
+WantedBy=multi-user.target

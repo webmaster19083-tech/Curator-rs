@@ -1,7 +1,7 @@
 [package]
 name = "curator-desktop"
-version = "0.1.4"
-edition = "2021"
+version.workspace = true
+edition.workspace = true
 description = "Curator desktop media library"
 
 [[bin]]
@@ -27,13 +27,3 @@ windows-sys = { version = "0.61", features = ["Win32_Foundation", "Win32_Securit
 
 [features]
 custom-protocol = ["tauri/custom-protocol"]
-
-[profile.release]
-lto = "thin"
-codegen-units = 1
-strip = true
-
-[profile.dev]
-debug = 0
-incremental = false
-

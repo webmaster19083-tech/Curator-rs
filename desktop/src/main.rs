@@ -148,6 +148,14 @@ fn background_launch_requested() -> bool {
     std::env::args().any(|argument| argument == "--background")
 }
 
+fn host_initialization_script() -> String {
+    let appearance = serde_json::to_string(&curator::appearance::client_appearance())
+        .unwrap_or_else(|_| "{}".to_string());
+    format!(
+        "window.__CURATOR_RUNTIME__ = 'host'; window.__CURATOR_CLIENT_APPEARANCE__ = {appearance};"
+    )
+}
+
 fn create_main_window(app: &tauri::AppHandle, completed: bool) -> tauri::Result<()> {
     // Do not put the WebView2 profile beside the library. Curator's library
     // can live on an external drive which should stay independent of browser
@@ -168,6 +176,7 @@ fn create_main_window(app: &tauri::AppHandle, completed: bool) -> tauri::Result<
     .min_inner_size(960.0, 600.0)
     .visible(true)
     .data_directory(webview_data_dir)
+    .initialization_script(host_initialization_script())
     .disable_drag_drop_handler()
     .build()
     .map(|_| ());
@@ -445,7 +454,7 @@ fn main() {
             return;
         }
     };
-    let mut state = match runtime.block_on(curator::initialize()) {
+    let mut state = match runtime.block_on(curator::initialize_host()) {
         Ok(state) => state,
         Err(error) => {
             eprintln!("Library initialization failed: {error:#}");

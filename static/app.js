@@ -199,7 +199,6 @@ let appSettings = {
   theme: 'system',
   library_layout: 'grid',
   ffmpeg_bin: 'ffmpeg',
-  action_model_path: null,
   metronome_enabled: false,
   metronome_volume: 0.55,
   goon_persona: 'neutral',
@@ -265,8 +264,41 @@ const LEGACY_THEME_MAP = {
   yotsuba: 'linen', 'yotsuba-b': 'midnight', futaba: 'ember', burichan: 'midnight',
   tomorrow: 'linen', photon: 'linen', light: 'linen', 'oled-dark': 'oled', dark: 'atelier-dark',
 };
+const GTK_THEME_FAMILIES = ['adwaita', 'yaru', 'arc', 'breeze'];
+const GTK_ACCENTS = {
+  blue: '#3584e4', teal: '#2190a4', green: '#3a944a', yellow: '#c88800',
+  orange: '#e66100', red: '#e62b38', pink: '#d56199', purple: '#9141ac', slate: '#5e5c64',
+};
 function normalizeTheme(theme) {
   return LEGACY_THEME_MAP[theme] || theme;
+}
+
+function clientAppearance() {
+  const injected = window.__CURATOR_CLIENT_APPEARANCE__;
+  return injected && typeof injected === 'object' ? injected : {
+    gtk_name: null,
+    prefers_dark: window.matchMedia('(prefers-color-scheme: dark)').matches,
+    accent: null,
+    font: null,
+  };
+}
+
+function gtkPresetFor(appearance) {
+  const gtkName = String(appearance.gtk_name || '').toLowerCase();
+  const family = GTK_THEME_FAMILIES.find((candidate) => gtkName.includes(candidate)) || 'adwaita';
+  return `${family}-${appearance.prefers_dark ? 'dark' : 'light'}`;
+}
+
+function applyClientAppearance(appearance, activeGtkPreset) {
+  const root = document.documentElement;
+  root.style.removeProperty('--client-accent');
+  root.style.removeProperty('--client-font');
+  if (!activeGtkPreset) return;
+  const rawAccent = String(appearance.accent || '').trim().toLowerCase();
+  const accent = GTK_ACCENTS[rawAccent] || (/^#[0-9a-f]{6}$/i.test(rawAccent) ? rawAccent : '');
+  if (accent) root.style.setProperty('--client-accent', accent);
+  const font = String(appearance.font || '').trim();
+  if (/^[\w\s,'-]{1,120}$/.test(font)) root.style.setProperty('--client-font', font);
 }
 
 function applyTheme(theme) {
@@ -275,18 +307,25 @@ function applyTheme(theme) {
     systemThemeMedia.onchange = null;
     systemThemeMedia = null;
   }
-  if (theme === 'system') {
+  const appearance = clientAppearance();
+  if (theme === 'gtk-system') {
+    document.documentElement.dataset.theme = gtkPresetFor(appearance);
+    applyClientAppearance(appearance, true);
+  } else if (theme === 'system') {
     systemThemeMedia = window.matchMedia('(prefers-color-scheme: light)');
     const resolve = () => {
       if (systemThemeMedia.matches) document.documentElement.dataset.theme = 'linen';
       else delete document.documentElement.dataset.theme; // dark = the base palette, no override needed
+      applyClientAppearance(appearance, false);
     };
     resolve();
     systemThemeMedia.onchange = resolve;
   } else if (theme === 'atelier-dark') {
     delete document.documentElement.dataset.theme;
+    applyClientAppearance(appearance, false);
   } else {
     document.documentElement.dataset.theme = theme;
+    applyClientAppearance(appearance, GTK_THEME_FAMILIES.some((family) => theme.startsWith(`${family}-`)));
   }
 }
 
@@ -998,11 +1037,14 @@ async function openSettingsModal() {
   } catch (e) {
     toast('Could not load current settings: ' + e.message, true);
   }
+  const localIntegrations = appSettings.local_integration_settings_local_only !== true;
+  const hostIntegrations = localIntegrations && appSettings.host_integration_settings_available === true;
+  document.querySelectorAll('[data-local-setting]').forEach((node) => { node.hidden = !localIntegrations; });
+  document.querySelectorAll('[data-host-setting]').forEach((node) => { node.hidden = !hostIntegrations; });
   el('#settings-max-concurrent').value = appSettings.max_concurrent;
   el('#settings-max-clip-length').value = appSettings.max_clip_length_secs || 60;
   el('#settings-library-layout').value = appSettings.library_layout || 'grid';
   el('#settings-ffmpeg-bin').value = appSettings.ffmpeg_bin || 'ffmpeg';
-  el('#settings-action-model-path').value = appSettings.action_model_path || '';
   el('#settings-theme').value = appSettings.theme;
   el('#settings-default-speed').value = appSettings.default_slideshow_speed;
   el('#settings-default-loop').checked = !!appSettings.default_slideshow_loop;
@@ -1032,8 +1074,9 @@ async function saveSettings() {
   const nsfwFilterEnabled = el('#settings-nsfw-filter-enabled').checked;
   const nsfwFilterChanged = !!appSettings.nsfw_filter_enabled !== nsfwFilterEnabled;
   const externalToolsLocal = appSettings.external_tool_settings_local_only !== true;
-  const externalToolsChanged = externalToolsLocal && ((appSettings.ffmpeg_bin || 'ffmpeg') !== el('#settings-ffmpeg-bin').value.trim()
-    || (appSettings.action_model_path || '') !== el('#settings-action-model-path').value.trim());
+  const localIntegrations = appSettings.local_integration_settings_local_only !== true;
+  const hostIntegrations = localIntegrations && appSettings.host_integration_settings_available === true;
+  const externalToolsChanged = externalToolsLocal && (appSettings.ffmpeg_bin || 'ffmpeg') !== el('#settings-ffmpeg-bin').value.trim();
   const body = {
     max_concurrent: maxConcurrent,
     max_clip_length_secs: Math.max(5, Math.min(3600, parseInt(el('#settings-max-clip-length').value, 10) || 60)),
@@ -1052,14 +1095,15 @@ async function saveSettings() {
     tts_pitch: Math.max(0.5, Math.min(2, Number(el('#settings-tts-pitch').value) || 1)),
     tts_volume: Math.max(0, Math.min(1, Number(el('#settings-tts-volume').value) || 0)),
     soundtrack_provider: el('#settings-soundtrack-provider').value,
-    start_with_windows: el('#settings-start-with-windows').checked,
-    keep_running_in_tray: el('#settings-keep-running-in-tray').checked,
   };
   // Executable paths are intentionally omitted from Tailnet requests. The
   // backend only exposes these fields to loopback/in-process clients.
   if (externalToolsLocal && Object.prototype.hasOwnProperty.call(appSettings, 'ffmpeg_bin')) {
     body.ffmpeg_bin = el('#settings-ffmpeg-bin').value.trim() || 'ffmpeg';
-    body.action_model_path = el('#settings-action-model-path').value.trim();
+  }
+  if (hostIntegrations) {
+    body.start_with_windows = el('#settings-start-with-windows').checked;
+    body.keep_running_in_tray = el('#settings-keep-running-in-tray').checked;
   }
   try {
     const data = await api('/api/settings', { method: 'PATCH', body: JSON.stringify(body) });
@@ -1070,7 +1114,7 @@ async function saveSettings() {
     closeSettingsModal();
     toast(nsfwFilterChanged ? 'Settings saved — restart Curator for NSFW auto-rating to take effect' : 'Settings saved');
     renderExportReminderBanner();
-    if (externalToolsChanged) toast('Classifier/tool changes take effect after restarting Curator.');
+    if (externalToolsChanged) toast('ffmpeg changes take effect after restarting Curator.');
   } catch (e) {
     toast('Could not save settings: ' + e.message, true);
   }

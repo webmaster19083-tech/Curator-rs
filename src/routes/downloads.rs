@@ -197,6 +197,9 @@ pub async fn pause_source(State(state): State<Arc<AppState>>, Path(id): Path<i64
 /// Resume only one paused source.  Global pause still wins so this endpoint
 /// cannot accidentally restart downloads behind the user's back.
 pub async fn resume_source(State(state): State<Arc<AppState>>, Path(id): Path<i64>) -> Json<Value> {
+    if state.maintenance.is_active() {
+        return Json(json!({"id":id,"error":"A local maintenance job is active"}));
+    }
     // Serialize a source-level resume with global pause/resume.  Without the
     // same transition lock, a double-click or a simultaneous global resume
     // could both claim the row and enqueue duplicate downloader tasks.
@@ -221,6 +224,21 @@ pub async fn resume_source(State(state): State<Arc<AppState>>, Path(id): Path<i6
 // ─── POST /api/downloads/resume ──────────────────────────────────────────────
 
 pub async fn resume(State(state): State<Arc<AppState>>) -> Json<Value> {
+    if state.maintenance.is_active() {
+        return Json(json!({"error":"A local maintenance job is active"}));
+    }
+    resume_unchecked(state).await
+}
+
+/// The maintenance controller pauses downloads itself. Once its transaction
+/// and cache invalidation are complete it reopens worker admission, then uses
+/// this internal path to restore the prior download state without routing a
+/// synthetic HTTP request through the public control endpoint.
+pub(crate) async fn resume_after_maintenance(state: Arc<AppState>) -> Json<Value> {
+    resume_unchecked(state).await
+}
+
+async fn resume_unchecked(state: Arc<AppState>) -> Json<Value> {
     let _control = state.download_control.lock().await;
     // Wait for killed children and their final index pass before requeueing.
     while state.downloads_paused.load(Ordering::SeqCst) {

@@ -8,6 +8,7 @@
 use std::path::{Path, PathBuf};
 use std::process::Stdio;
 use std::sync::atomic::{AtomicI64, Ordering};
+use std::sync::Arc;
 
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
@@ -364,13 +365,13 @@ pub struct ActionClassifier {
 }
 
 impl ActionClassifier {
-    pub fn spawn(python_bin: String, worker_script: PathBuf, model_path: String) -> Self {
+    pub fn spawn(python_bin: String, worker_script: PathBuf, environment_dir: PathBuf) -> Self {
         let (tx, rx) = mpsc::channel::<ActionJob>(8);
         let ready = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
         let task = tokio::spawn(action_supervisor_loop(
             python_bin,
             worker_script,
-            model_path,
+            environment_dir,
             rx,
             ready.clone(),
         ));
@@ -421,7 +422,7 @@ impl ActionClassifier {
 async fn action_supervisor_loop(
     python_bin: String,
     worker_script: PathBuf,
-    model_path: String,
+    environment_dir: PathBuf,
     mut rx: mpsc::Receiver<ActionJob>,
     ready: std::sync::Arc<std::sync::atomic::AtomicBool>,
 ) {
@@ -430,8 +431,8 @@ async fn action_supervisor_loop(
         ready.store(false, Ordering::Release);
         let mut child = match crate::process::command(&python_bin)
             .arg(&worker_script)
-            .arg("--model")
-            .arg(&model_path)
+            .arg("--environment")
+            .arg(&environment_dir)
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
             .stderr(Stdio::piped())
@@ -619,30 +620,39 @@ fn compact_detections(detections: &[Detection]) -> Value {
     }).collect::<Vec<_>>())
 }
 
-/// Qualifying P-HAR class must appear in two adjacent temporal windows at
-/// >= .70. Idle/nonsexual/transition labels are explicitly insufficient.
+/// Exact label mapping for the pinned upstream P-HAR annotation vocabulary.
+///
+/// This is intentionally a closed list, not a substring heuristic. In
+/// particular, `kissing` and `fondling` are not enough evidence for Fast,
+/// and `cumshot`/`facial-cumshot` are retained as evidence only: Curator
+/// never assigns Cum automatically.
+fn phar_fast_label(label: &str) -> bool {
+    matches!(
+        label.trim().to_ascii_lowercase().as_str(),
+        "handjob"
+            | "fingering"
+            | "titjob"
+            | "blowjob"
+            | "cunnilingus"
+            | "deepthroat"
+            | "doggy"
+            | "the-snake"
+            | "anal"
+            | "missionary"
+            | "cowgirl"
+            | "scoop-up"
+            | "69"
+    )
+}
+
+/// A qualifying P-HAR class must appear in two adjacent temporal windows at
+/// >= .70. Kissing, fondling, and climax classes are explicitly insufficient.
 pub fn phar_fast_suggestion(windows: &[ActionWindow]) -> Option<f32> {
     let mut previous_end: Option<f64> = None;
     let mut previous_score = 0.0_f32;
     for window in windows {
-        let label = window.label.to_ascii_lowercase();
-        let excluded = label.contains("nonsexual")
-            || label.contains("non-sexual")
-            || label.contains("idle")
-            || label.contains("transition");
-        let explicit = [
-            "sex",
-            "masturb",
-            "intercourse",
-            "oral",
-            "fellatio",
-            "handjob",
-            "penetrat",
-            "explicit",
-        ]
-        .iter()
-        .any(|needle| label.contains(needle));
-        let qualified = !excluded && explicit && window.score.is_finite() && window.score >= 0.70;
+        let qualified =
+            phar_fast_label(&window.label) && window.score.is_finite() && window.score >= 0.70;
         let adjacent = previous_end
             .map(|end| window.start_secs <= end + 0.75)
             .unwrap_or(false);
@@ -863,12 +873,17 @@ pub fn spawn_backfill_loop(
     library_dir: PathBuf,
     ffmpeg_bin: String,
     max_clip_length_secs: u32,
+    maintenance: Arc<crate::maintenance::MaintenanceController>,
 ) {
     tokio::spawn(async move {
         let mut last_warning = std::time::Instant::now() - std::time::Duration::from_secs(60);
         loop {
             if !classifier.ready.load(Ordering::Acquire) {
                 tokio::time::sleep(std::time::Duration::from_secs(5)).await;
+                continue;
+            }
+            if maintenance.is_active() {
+                tokio::time::sleep(std::time::Duration::from_millis(250)).await;
                 continue;
             }
             let rows = match fetch_pending_batch(&pool, 12) {
@@ -884,6 +899,12 @@ pub fn spawn_backfill_loop(
                 continue;
             }
             for row in rows {
+                // Hold the lease through claim, inference, and the final
+                // persistence write. A maintenance job waits for an in-flight
+                // classification rather than taking a snapshot mid-result.
+                let Some(_worker) = maintenance.try_acquire_background_worker() else {
+                    break;
+                };
                 let source = library_dir.join(&row.filepath);
                 if !source.is_file() {
                     if let Ok(conn) = pool.get() {
@@ -1033,7 +1054,7 @@ mod tests {
         let one = vec![ActionWindow {
             start_secs: 0.0,
             end_secs: 2.0,
-            label: "explicit_sex".into(),
+            label: "blowjob".into(),
             score: 0.9,
         }];
         assert_eq!(phar_fast_suggestion(&one), None);
@@ -1041,13 +1062,13 @@ mod tests {
             ActionWindow {
                 start_secs: 0.0,
                 end_secs: 2.0,
-                label: "explicit_sex".into(),
+                label: "blowjob".into(),
                 score: 0.9,
             },
             ActionWindow {
                 start_secs: 1.0,
                 end_secs: 3.0,
-                label: "explicit_sex".into(),
+                label: "blowjob".into(),
                 score: 0.8,
             },
         ];
@@ -1067,6 +1088,27 @@ mod tests {
             },
         ];
         assert_eq!(phar_fast_suggestion(&idle), None);
+    }
+
+    #[test]
+    fn phar_kissing_fondling_and_climax_labels_never_promote_a_rating() {
+        for label in ["kissing", "fondling", "cumshot", "facial-cumshot"] {
+            let windows = vec![
+                ActionWindow {
+                    start_secs: 0.0,
+                    end_secs: 2.0,
+                    label: label.into(),
+                    score: 1.0,
+                },
+                ActionWindow {
+                    start_secs: 1.0,
+                    end_secs: 3.0,
+                    label: label.into(),
+                    score: 1.0,
+                },
+            ];
+            assert_eq!(phar_fast_suggestion(&windows), None, "{label}");
+        }
     }
     #[test]
     fn video_sampling_plan_is_six_frames_and_overlapping_windows() {
@@ -1092,13 +1134,13 @@ mod tests {
                 ActionWindow {
                     start_secs: 0.0,
                     end_secs: 2.0,
-                    label: "explicit_sex".into(),
+                    label: "blowjob".into(),
                     score: 0.9,
                 },
                 ActionWindow {
                     start_secs: 1.0,
                     end_secs: 3.0,
-                    label: "explicit_sex".into(),
+                    label: "blowjob".into(),
                     score: 0.8,
                 },
             ],

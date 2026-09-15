@@ -15,7 +15,7 @@ pub async fn reconcile_not_found(
     next: Next,
 ) -> Response {
     let response = next.run(request).await;
-    if response.status() == StatusCode::NOT_FOUND {
+    if response.status() == StatusCode::NOT_FOUND && !state.maintenance.is_active() {
         if let Some(path) = uri.path().strip_prefix("/library/") {
             if let Ok(decoded) = urlencoding::decode(path) {
                 let rel = decoded.into_owned();
@@ -23,6 +23,12 @@ pub async fn reconcile_not_found(
                     .components()
                     .any(|c| !matches!(c, std::path::Component::Normal(_)))
                 {
+                    // This GET route normally only serves files, but a 404
+                    // reconciles metadata.  Lease that exceptional write so
+                    // it cannot overlap an Admin backup or reset.
+                    let Some(_worker) = state.maintenance.try_acquire_background_worker() else {
+                        return response;
+                    };
                     let _=tokio::task::spawn_blocking(move || {
                         let path=state.library_dir.join(&rel);
                         if path.metadata().is_err_and(|e|e.kind()==std::io::ErrorKind::NotFound) {

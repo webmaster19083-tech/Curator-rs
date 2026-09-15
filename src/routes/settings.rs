@@ -13,6 +13,14 @@ use tokio::sync::Semaphore;
 use crate::db::save_settings;
 use crate::AppState;
 
+fn is_local_client(peer: &Option<ConnectInfo<SocketAddr>>) -> bool {
+    peer.as_ref().is_none_or(|peer| peer.0.ip().is_loopback())
+}
+
+fn host_integrations_available(state: &AppState, peer: &Option<ConnectInfo<SocketAddr>>) -> bool {
+    is_local_client(peer) && matches!(state.edition, crate::edition::Edition::Host)
+}
+
 /// Shared with `routes::oobe` (the Appearance step reuses the exact same
 /// allow-list rather than re-declaring it) — see "Do not introduce
 /// conflicting configuration systems" in the OOBE build notes.
@@ -26,6 +34,17 @@ pub(crate) const VALID_THEMES: &[&str] = &[
     "sage",
     "aurora",
     "oled",
+    // Known GTK families are mapped to Curator palettes. We deliberately do
+    // not accept arbitrary theme names or attempt to parse GTK stylesheets.
+    "gtk-system",
+    "adwaita-light",
+    "adwaita-dark",
+    "yaru-light",
+    "yaru-dark",
+    "arc-light",
+    "arc-dark",
+    "breeze-light",
+    "breeze-dark",
     // Legacy names remain accepted so an older settings.json can be opened
     // and normalized by the browser without becoming an invalid preference.
     "yotsuba",
@@ -76,7 +95,6 @@ pub struct PatchSettingsBody {
     /// before the database is opened. They are exposed here for the normal
     /// Settings UI but intentionally take effect on the next launch.
     pub ffmpeg_bin: Option<String>,
-    pub action_model_path: Option<String>,
 }
 
 // ─── GET /api/settings ───────────────────────────────────────────────────────
@@ -87,21 +105,26 @@ pub async fn get(
 ) -> Json<Value> {
     let s = state.settings.read().await;
     let mut value = serde_json::to_value(&*s).unwrap_or_default();
-    let config = crate::config::load_config();
+    let config = crate::config::load_config_for(state.install_scope);
     if let Some(object) = value.as_object_mut() {
-        let local = peer.as_ref().is_none_or(|peer| peer.0.ip().is_loopback());
+        let local = is_local_client(&peer);
+        let host_integrations = host_integrations_available(&state, &peer);
+        object.insert(
+            "host_integration_settings_available".into(),
+            json!(host_integrations),
+        );
         if local {
             object.insert(
                 "ffmpeg_bin".into(),
                 json!(config.ffmpeg_bin.unwrap_or_else(|| "ffmpeg".into())),
             );
-            object.insert("action_model_path".into(), json!(config.action_model_path));
             object.insert(
                 "external_tool_settings_restart_required".into(),
                 json!(true),
             );
         } else {
             object.insert("external_tool_settings_local_only".into(), json!(true));
+            object.insert("local_integration_settings_local_only".into(), json!(true));
         }
     }
     Json(value)
@@ -114,14 +137,31 @@ pub async fn patch(
     peer: Option<ConnectInfo<SocketAddr>>,
     Json(body): Json<PatchSettingsBody>,
 ) -> Result<Json<Value>, (StatusCode, Json<Value>)> {
-    if body.ffmpeg_bin.is_some() || body.action_model_path.is_some() {
-        if peer.as_ref().is_some_and(|peer| !peer.0.ip().is_loopback()) {
-            return Err((
-                StatusCode::FORBIDDEN,
-                Json(json!({"error":"Executable-path configuration is local-only."})),
-            ));
-        }
-        let mut config = crate::config::load_config();
+    let local = is_local_client(&peer);
+    if !local
+        && (body.ffmpeg_bin.is_some()
+            || body.start_with_windows.is_some()
+            || body.keep_running_in_tray.is_some())
+    {
+        return Err((
+            StatusCode::FORBIDDEN,
+            Json(
+                json!({"error":"Executable paths and local startup/tray controls are available only on this device."}),
+            ),
+        ));
+    }
+    if !host_integrations_available(&state, &peer)
+        && (body.start_with_windows.is_some() || body.keep_running_in_tray.is_some())
+    {
+        return Err((
+            StatusCode::FORBIDDEN,
+            Json(
+                json!({"error":"Startup and tray controls are available only in the local Curator Host app."}),
+            ),
+        ));
+    }
+    if body.ffmpeg_bin.is_some() {
+        let mut config = crate::config::load_config_for(state.install_scope);
         if let Some(value) = body.ffmpeg_bin.as_deref() {
             let value = value.trim();
             if value.is_empty() || value.len() > 4096 || value.contains('\0') {
@@ -132,21 +172,7 @@ pub async fn patch(
             }
             config.ffmpeg_bin = Some(value.to_string());
         }
-        if let Some(value) = body.action_model_path.as_deref() {
-            let value = value.trim();
-            if value.len() > 4096 || value.contains('\0') {
-                return Err((
-                    StatusCode::BAD_REQUEST,
-                    Json(json!({"error":"Invalid action-model path"})),
-                ));
-            }
-            config.action_model_path = if value.is_empty() {
-                None
-            } else {
-                Some(value.to_string())
-            };
-        }
-        crate::config::save_config(&config).map_err(|error| {
+        crate::config::save_config_for(state.install_scope, &config).map_err(|error| {
             (
                 StatusCode::INTERNAL_SERVER_ERROR,
                 Json(json!({"error":format!("Could not save external tool settings: {error}")})),
@@ -345,21 +371,26 @@ pub async fn patch(
 
     save_settings(&state.data_dir, &settings);
     let mut value = serde_json::to_value(&*settings).unwrap_or_default();
-    let config = crate::config::load_config();
+    let config = crate::config::load_config_for(state.install_scope);
     if let Some(object) = value.as_object_mut() {
-        let local = peer.as_ref().is_none_or(|peer| peer.0.ip().is_loopback());
+        let local = is_local_client(&peer);
+        let host_integrations = host_integrations_available(&state, &peer);
+        object.insert(
+            "host_integration_settings_available".into(),
+            json!(host_integrations),
+        );
         if local {
             object.insert(
                 "ffmpeg_bin".into(),
                 json!(config.ffmpeg_bin.unwrap_or_else(|| "ffmpeg".into())),
             );
-            object.insert("action_model_path".into(), json!(config.action_model_path));
             object.insert(
                 "external_tool_settings_restart_required".into(),
                 json!(true),
             );
         } else {
             object.insert("external_tool_settings_local_only".into(), json!(true));
+            object.insert("local_integration_settings_local_only".into(), json!(true));
         }
     }
     Ok(Json(value))
@@ -379,7 +410,38 @@ mod tests {
         )
         .await;
         assert!(value.get("ffmpeg_bin").is_none());
-        assert!(value.get("action_model_path").is_none());
         assert_eq!(value["external_tool_settings_local_only"], true);
+        assert_eq!(value["local_integration_settings_local_only"], true);
+    }
+
+    #[tokio::test]
+    async fn remote_settings_cannot_change_local_integration_controls() {
+        let root = tempfile::tempdir().unwrap();
+        let state = crate::test_support::state(root.path());
+        let body: PatchSettingsBody = serde_json::from_value(json!({
+            "keep_running_in_tray": false
+        }))
+        .unwrap();
+        let response = patch(
+            State(state),
+            Some(ConnectInfo(SocketAddr::from(([100, 80, 0, 2], 42168)))),
+            Json(body),
+        )
+        .await;
+        assert!(matches!(response, Err((StatusCode::FORBIDDEN, _))));
+    }
+
+    #[tokio::test]
+    async fn server_settings_cannot_enable_host_tray_controls() {
+        let root = tempfile::tempdir().unwrap();
+        let host_state = crate::test_support::state(root.path());
+        let mut server_state = (*host_state).clone();
+        server_state.edition = crate::edition::Edition::Server;
+        let body: PatchSettingsBody = serde_json::from_value(json!({
+            "start_with_windows": true
+        }))
+        .unwrap();
+        let response = patch(State(Arc::new(server_state)), None, Json(body)).await;
+        assert!(matches!(response, Err((StatusCode::FORBIDDEN, _))));
     }
 }

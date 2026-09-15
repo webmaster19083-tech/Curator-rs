@@ -1,6 +1,10 @@
 'use strict';
-// Preserve the existing fetch contract while dispatching API requests in process.
-if (window.__TAURI__) {
+// Runtime mode is explicit. A Viewer navigates to a remote Curator page in a
+// Tauri WebView too, but that page must keep same-origin HTTP semantics and
+// must never mistake the Viewer's bridge for a Host in-process backend.
+const curatorRuntime = window.__CURATOR_RUNTIME__ || (window.__TAURI__ ? 'host' : 'remote');
+window.curatorRuntime = curatorRuntime;
+if (window.__TAURI__ && curatorRuntime === 'host') {
   const invoke = window.__TAURI__.core.invoke;
   const browserFetch = window.fetch.bind(window);
   window.fetch = async (input, init = {}) => {
@@ -39,4 +43,3 @@ if (window.__TAURI__) {
     }
   });
 }
-

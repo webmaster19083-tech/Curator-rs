@@ -29,6 +29,8 @@ const explorer = {
   layout: localStorage.getItem('curator-library-layout') || 'grid',
   sourceCollapsed: new Set(),
   activityTimer: null,
+  adminTimer: null,
+  adminAvailable: false,
   goon: null,
   sizeBackfillRequest: false,
 };
@@ -436,7 +438,7 @@ function navigateTo(section) {
   }
   explorer.active = section; state.explorerSection = section; explorer.nav = section;
   clearExplorerSelection(); updateNavigation();
-  updateExplorerLocation(({ search: 'Search', sources: 'Sources', creators: 'Creators', groups: 'Groups', tags: 'Tags', ratings: 'Ratings', downloads: 'Downloads' })[section] || 'Library');
+  updateExplorerLocation(({ search: 'Search', sources: 'Sources', creators: 'Creators', groups: 'Groups', tags: 'Tags', ratings: 'Ratings', downloads: 'Downloads', admin: 'Local Admin' })[section] || 'Library');
   return renderExplorerPanel(section);
 }
 
@@ -980,6 +982,160 @@ function renderRatingsPanel(panel) {
 function stopActivityPolling() {
   if (explorer.activityTimer) { clearInterval(explorer.activityTimer); explorer.activityTimer = null; }
 }
+
+function stopAdminPolling() {
+  if (explorer.adminTimer) { clearInterval(explorer.adminTimer); explorer.adminTimer = null; }
+}
+
+async function configureAdminUi() {
+  const button = explorerEl('#explorer-admin-nav');
+  if (!button || window.curatorRuntime === 'viewer') return;
+  try {
+    await api('/api/admin/jobs');
+    explorer.adminAvailable = true;
+    button.hidden = false;
+  } catch (_) {
+    explorer.adminAvailable = false;
+    button.hidden = true;
+  }
+}
+
+function adminActionButton(label, kind, confirmation, description) {
+  const card = document.createElement('article'); card.className = 'explorer-card admin-action';
+  const title = document.createElement('h3'); title.textContent = label;
+  const detail = document.createElement('p'); detail.textContent = description;
+  const button = panelButton(label); button.addEventListener('click', async () => {
+    const typed = confirmation ? prompt(`Type ${confirmation} to continue:`) : '';
+    if (confirmation && typed !== confirmation) { toast('Confirmation did not match.', true); return; }
+    try {
+      await api('/api/admin/jobs', { method: 'POST', body: JSON.stringify({ kind, confirmation: typed || '' }) });
+      toast('Maintenance job queued.');
+      const panel = explorerEl('#explorer-panel'); if (panel) refreshAdminPanel(panel);
+    } catch (error) { toast(`Could not start maintenance: ${error.message}`, true); }
+  });
+  card.append(title, detail, button); return card;
+}
+
+function renderAdminJobs(target, jobs) {
+  target.replaceChildren();
+  if (!jobs.length) { const empty = document.createElement('p'); empty.className = 'muted'; empty.textContent = 'No maintenance jobs yet.'; target.append(empty); return; }
+  jobs.slice().reverse().forEach((job) => {
+    const row = document.createElement('article'); row.className = `admin-job admin-job-${job.phase}`;
+    const title = document.createElement('strong'); title.textContent = `${String(job.kind).replaceAll('_', ' ')} · ${job.phase}`;
+    const detail = document.createElement('p'); detail.textContent = job.error || job.message || '';
+    row.append(title, detail);
+    if (job.backup_id) { const backup = document.createElement('small'); backup.className = 'mono muted'; backup.textContent = `Safety backup: ${job.backup_id}`; row.append(backup); }
+    if (job.restart_required) { const restart = document.createElement('small'); restart.className = 'admin-restart'; restart.textContent = 'Restart Curator to apply this job.'; row.append(restart); }
+    target.append(row);
+  });
+}
+
+function renderAdminBackups(target, backups) {
+  target.replaceChildren();
+  if (!backups.length) { const empty = document.createElement('p'); empty.className = 'muted'; empty.textContent = 'No database/configuration backups have been created yet.'; target.append(empty); return; }
+  backups.forEach((backup) => {
+    const row = document.createElement('article'); row.className = 'admin-backup';
+    const title = document.createElement('strong'); title.textContent = backup.id;
+    const meta = document.createElement('small'); meta.className = 'mono muted'; meta.textContent = `${formatBytes(backup.size_bytes)} · ${formatDate(backup.created_at)}`;
+    const actions = document.createElement('div'); actions.className = 'explorer-card-actions';
+    const download = document.createElement('a'); download.className = 'btn btn-ghost'; download.textContent = 'Download'; download.href = `/api/admin/backups/${encodeURIComponent(backup.id)}`;
+    const validate = panelButton('Validate'); validate.addEventListener('click', async () => {
+      try { await api(`/api/admin/backups/${encodeURIComponent(backup.id)}/validate`, { method: 'POST' }); toast('Backup validation queued.'); }
+      catch (error) { toast(`Could not validate backup: ${error.message}`, true); }
+    });
+    const restore = panelButton('Stage restore'); restore.addEventListener('click', async () => {
+      const confirmation = prompt('Type RESTORE BACKUP to stage this restore:');
+      if (confirmation !== 'RESTORE BACKUP') { toast('Confirmation did not match.', true); return; }
+      try { await api(`/api/admin/backups/${encodeURIComponent(backup.id)}/restore`, { method: 'POST', body: JSON.stringify({ confirmation }) }); toast('Restore staged; restart after the job succeeds.'); }
+      catch (error) { toast(`Could not stage restore: ${error.message}`, true); }
+    });
+    actions.append(download, validate, restore); row.append(title, meta, actions); target.append(row);
+  });
+}
+
+function renderAdminPhar(target, phar) {
+  target.replaceChildren();
+  const heading = document.createElement('h3'); heading.className = 'panel-subhead'; heading.textContent = 'P-HAR'; target.append(heading);
+  const detail = document.createElement('p'); detail.className = 'muted';
+  const support = phar?.support || {};
+  detail.textContent = phar ? `${phar.phase.replaceAll('_', ' ')} · ${support.tier || 'unknown'} / ${support.runtime || 'unknown'} · ${phar.message}` : 'Loading P-HAR status…';
+  target.append(detail);
+  if (!phar) return;
+  const actions = document.createElement('div'); actions.className = 'explorer-card-actions';
+  const refresh = () => { const panel = target.closest('.explorer-panel'); if (panel) refreshAdminPanel(panel); };
+  const intent = panelButton(phar.requested ? 'Disable P-HAR' : 'Enable P-HAR setup');
+  intent.addEventListener('click', async () => {
+    try { await api('/api/admin/phar', { method: 'POST', body: JSON.stringify({ enabled: !phar.requested }) }); refresh(); }
+    catch (error) { toast(`Could not update P-HAR: ${error.message}`, true); }
+  });
+  const install = panelButton('Evaluate setup'); install.disabled = !phar.requested;
+  install.addEventListener('click', async () => {
+    try { const result = await api('/api/admin/phar/install', { method: 'POST' }); toast(result.message || 'P-HAR setup evaluated.'); refresh(); }
+    catch (error) { toast(`Could not evaluate P-HAR: ${error.message}`, true); }
+  });
+  const cancel = panelButton('Cancel'); cancel.disabled = !phar.requested;
+  cancel.addEventListener('click', async () => {
+    try { await api('/api/admin/phar/cancel', { method: 'POST' }); refresh(); }
+    catch (error) { toast(`Could not cancel P-HAR setup: ${error.message}`, true); }
+  });
+  const repair = panelButton('Repair'); repair.disabled = !phar.requested;
+  repair.addEventListener('click', async () => {
+    try { const result = await api('/api/admin/phar/repair', { method: 'POST' }); toast(result.message || 'P-HAR repair evaluated.'); refresh(); }
+    catch (error) { toast(`Could not repair P-HAR: ${error.message}`, true); }
+  });
+  const selfTest = panelButton('Self-test'); selfTest.disabled = !phar.requested;
+  selfTest.addEventListener('click', async () => {
+    try { const result = await api('/api/admin/phar/self-test', { method: 'POST' }); toast(result.message || 'P-HAR self-test finished.'); refresh(); }
+    catch (error) { toast(`P-HAR self-test failed: ${error.message}`, true); }
+  });
+  actions.append(intent, install, cancel, repair, selfTest); target.append(actions);
+}
+
+async function refreshAdminPanel(panel) {
+  if (explorer.active !== 'admin' || !panel.isConnected) return;
+  try {
+    const [backups, jobs, phar] = await Promise.all([api('/api/admin/backups'), api('/api/admin/jobs'), api('/api/admin/phar')]);
+    renderAdminPhar(explorerEl('#admin-phar', panel), phar);
+    renderAdminBackups(explorerEl('#admin-backup-list', panel), backups.backups || []);
+    renderAdminJobs(explorerEl('#admin-job-list', panel), jobs.jobs || []);
+  } catch (error) {
+    const status = explorerEl('#admin-status', panel); if (status) status.textContent = `Admin unavailable: ${error.message}`;
+  }
+}
+
+function renderAdminPanel(panel) {
+  stopActivityPolling(); stopAdminPolling();
+  panel.replaceChildren(makePanelHeading('Local Admin', 'Recovery and maintenance are available only on this device. Each destructive job first creates a database/configuration backup, pauses workers, and records progress below.'));
+  const status = document.createElement('p'); status.id = 'admin-status'; status.className = 'muted'; panel.append(status);
+  const phar = document.createElement('section'); phar.id = 'admin-phar'; phar.className = 'admin-phar'; panel.append(phar);
+  const backupActions = document.createElement('div'); backupActions.className = 'explorer-card-actions';
+  const create = panelButton('Create backup'); create.classList.add('btn-accent'); create.addEventListener('click', async () => {
+    try { await api('/api/admin/backups', { method: 'POST' }); toast('Backup job queued.'); refreshAdminPanel(panel); }
+    catch (error) { toast(`Could not create backup: ${error.message}`, true); }
+  }); backupActions.append(create); panel.append(backupActions);
+  const backupHeading = document.createElement('h3'); backupHeading.className = 'panel-subhead'; backupHeading.textContent = 'Backups'; panel.append(backupHeading);
+  const backupList = document.createElement('div'); backupList.id = 'admin-backup-list'; backupList.className = 'admin-list'; panel.append(backupList);
+  const actionsHeading = document.createElement('h3'); actionsHeading.className = 'panel-subhead'; actionsHeading.textContent = 'Maintenance'; panel.append(actionsHeading);
+  const actions = document.createElement('div'); actions.className = 'explorer-card-list admin-actions';
+  [
+    ['Clear human rating overrides', 'clear_human_ratings', 'CLEAR HUMAN RATINGS', 'Return effective ratings to retained automatic recommendations.'],
+    ['Reset ratings and classifier evidence', 'reset_ratings_and_evidence', 'RESET RATINGS', 'Clear all ratings/evidence and requeue eligible image analysis.'],
+    ['Flatten group nesting', 'flatten_groups', 'FLATTEN GROUPS', 'Make every group top-level without changing assignments.'],
+    ['Delete groups and assignments', 'delete_groups', 'DELETE GROUPS', 'Remove groups only; sources, media, and tags stay intact.'],
+    ['Clear tag assignments and rules', 'clear_tag_assignments', 'CLEAR TAG ASSIGNMENTS', 'Keep tag names but remove media/group assignments and source-tag rules.'],
+    ['Clear interactive-session history', 'clear_interactive_history', 'CLEAR SESSION HISTORY', 'Delete logged interactive and Cock Hero sessions.'],
+    ['Rebuild thumbnails and caches', 'rebuild_caches', 'REBUILD CACHES', 'Clear derived cache files; originals are untouched.'],
+    ['Reconcile library metadata', 'reconcile_library', '', 'Check the media library and restart file-size backfill.'],
+    ['Factory reset database/settings', 'factory_reset', 'RESET CURATOR', 'Stages reset for restart; media, archives, P-HAR, and backups remain.'],
+    ['Delete P-HAR environment', 'remove_phar_environment', 'DELETE P-HAR', 'Remove the managed P-HAR files and disable its setup request.'],
+    ['Delete archives', 'remove_archives', 'DELETE ARCHIVES', 'Remove downloaded archive files; media remains.'],
+  ].forEach(([label, kind, confirmation, description]) => actions.append(adminActionButton(label, kind, confirmation, description)));
+  panel.append(actions);
+  const jobsHeading = document.createElement('h3'); jobsHeading.className = 'panel-subhead'; jobsHeading.textContent = 'Jobs'; panel.append(jobsHeading);
+  const jobs = document.createElement('div'); jobs.id = 'admin-job-list'; jobs.className = 'admin-list'; panel.append(jobs);
+  refreshAdminPanel(panel);
+  explorer.adminTimer = setInterval(() => refreshAdminPanel(panel), 1200);
+}
 async function refreshActivityPanel(panel) {
   if (explorer.active !== 'downloads' || document.hidden || !panel.isConnected) return;
   const status = explorerEl('#activity-status', panel); const list = explorerEl('#activity-source-list', panel);
@@ -1021,6 +1177,7 @@ async function renderDownloadsPanel(panel) {
 async function renderExplorerPanel(section) {
   if (!explorer.installed) return;
   if (section !== 'downloads') stopActivityPolling();
+  if (section !== 'admin') stopAdminPolling();
   if (section === 'media') return explorerLoadView();
   const request = ++explorer.panelRequest; setExplorerVisible(false);
   const panel = explorerEl('#explorer-panel'); if (!panel) return; panel.replaceChildren();
@@ -1031,6 +1188,7 @@ async function renderExplorerPanel(section) {
   else if (section === 'tags') await renderTagsPanel(panel);
   else if (section === 'ratings') renderRatingsPanel(panel);
   else if (section === 'downloads') await renderDownloadsPanel(panel);
+  else if (section === 'admin') renderAdminPanel(panel);
   if (request !== explorer.panelRequest) return;
 }
 
@@ -1077,11 +1235,19 @@ function installExplorerUi() {
   topNavigation.className = 'explorer-top-navigation';
   topNavigation.setAttribute('aria-label', 'Primary navigation');
   topNavigation.innerHTML = '<button type="button" data-top-nav="library">Library</button><button type="button" data-top-nav="discover">Discover</button><button type="button" data-top-nav="organization">Organization</button><button type="button" data-top-nav="activity">Activity <span id="topnav-download-count" class="nav-count" hidden></span></button><button type="button" data-top-nav="settings">Settings</button>';
+  const adminNavigation = document.createElement('button');
+  adminNavigation.id = 'explorer-admin-nav';
+  adminNavigation.type = 'button';
+  adminNavigation.dataset.topNav = 'admin';
+  adminNavigation.textContent = 'Admin';
+  adminNavigation.hidden = true;
+  topNavigation.append(adminNavigation);
   explorerEl('.explorer-toolbar-top', toolbar).after(topNavigation);
   const topDestinations = { library: 'all', discover: 'search', organization: 'groups', activity: 'downloads' };
   explorerAll('[data-top-nav]', topNavigation).forEach((button) => button.addEventListener('click', () => {
     const destination = button.dataset.topNav;
     if (destination === 'settings') { openSettingsModal(); return; }
+    if (destination === 'admin') { navigateTo('admin'); return; }
     navigateTo(topDestinations[destination] || 'all');
   }));
   const sizeBackfill = document.createElement('small');
@@ -1162,6 +1328,7 @@ function installExplorerUi() {
     else if (explorer.active === 'downloads') renderExplorerPanel('downloads');
   });
   void restorePlayMode(); updateNavigation(); updateBulkUI();
+  void configureAdminUi();
 }
 
 // This script is loaded after the library markup and app.js.  Installing

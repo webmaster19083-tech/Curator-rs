@@ -9,6 +9,7 @@ const read = (file) => fs.readFileSync(path.join(root, file), 'utf8');
 test('Windows Server installer has explicit user and machine scope plus opt-in P-HAR', () => {
   const nsis = read('packaging/windows/curator-server.nsi');
   const register = read('packaging/windows/Register-CuratorServer.ps1');
+  const build = read('packaging/windows/build-server-installers.ps1');
   assert.match(nsis, /RequestExecutionLevel admin/);
   assert.match(nsis, /RequestExecutionLevel user/);
   assert.match(nsis, /Set up P-HAR after installation/);
@@ -17,6 +18,9 @@ test('Windows Server installer has explicit user and machine scope plus opt-in P
   assert.match(register, /sc\.exe create CuratorServer/);
   assert.match(register, /phar-intent --enabled true/);
   assert.ok(register.indexOf('phar-intent --enabled true') < register.indexOf('& $startServer'));
+  assert.match(build, /Get-Command -Name \$name -CommandType Application/);
+  assert.match(build, /ProgramFilesX86/);
+  assert.match(build, /NSIS\\makensis\.exe/);
 });
 
 test('Linux and macOS scope packages carry appropriate service definitions', () => {
@@ -52,6 +56,7 @@ test('release workflow validates once and attaches matrix artifacts from one job
   assert.match(workflow, /validate:/);
   assert.match(workflow, /windows-server:/);
   assert.match(workflow, /build-server-installers\.ps1/);
+  assert.match(workflow, /GITHUB_PATH/);
   assert.match(workflow, /build-server-user-archive\.sh/);
   assert.match(workflow, /verify-app\.sh/);
   assert.match(workflow, /verify-dmg\.sh/);

@@ -76,6 +76,9 @@ async function api(path, opts) {
     const message = (body && body.error) || `Request failed (${res.status})`;
     throw new Error(message);
   }
+  if (!body || typeof body !== 'object') {
+    throw new Error('Curator returned an invalid setup response. Restart Curator and try again.');
+  }
   return body;
 }
 

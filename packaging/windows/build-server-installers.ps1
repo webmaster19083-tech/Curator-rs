@@ -17,10 +17,33 @@ if (-not (Test-Path -LiteralPath $sourceBinary -PathType Leaf)) {
     throw "Curator Server executable was not found: $ServerBinary"
 }
 
-$nsis = Get-Command makensis.exe -ErrorAction SilentlyContinue
-if (-not $nsis) { $nsis = Get-Command makensis -ErrorAction SilentlyContinue }
+function Find-MakeNSIS {
+    # Prefer PATH for local developer installs. Chocolatey's NSIS package
+    # writes Program Files but does not refresh the already-running Actions
+    # shell's PATH, so also check the standard installation directories.
+    foreach ($name in @('makensis.exe', 'makensis')) {
+        $command = Get-Command -Name $name -CommandType Application -ErrorAction SilentlyContinue |
+            Select-Object -First 1
+        if ($command) { return $command.Source }
+    }
+
+    $programFilesRoots = @(
+        [Environment]::GetFolderPath([Environment+SpecialFolder]::ProgramFilesX86),
+        [Environment]::GetFolderPath([Environment+SpecialFolder]::ProgramFiles)
+    ) | Where-Object { $_ }
+    foreach ($root in $programFilesRoots) {
+        $candidate = Join-Path $root 'NSIS\makensis.exe'
+        if (Test-Path -LiteralPath $candidate -PathType Leaf) {
+            return (Resolve-Path -LiteralPath $candidate).Path
+        }
+    }
+
+    return $null
+}
+
+$nsis = Find-MakeNSIS
 if (-not $nsis) {
-    throw 'makensis is required to build Curator Server installers.'
+    throw 'makensis is required to build Curator Server installers. Install NSIS or add makensis.exe to PATH.'
 }
 
 if (-not $Version) {
@@ -50,7 +73,7 @@ try {
             "/DOUTPUT_FILE=$installer"
         )
         if ($scope -eq 'all-users') { $arguments += '/DALL_USERS' }
-        & $nsis.Source @arguments (Join-Path $scriptRoot 'curator-server.nsi')
+        & $nsis @arguments (Join-Path $scriptRoot 'curator-server.nsi')
         if ($LASTEXITCODE -ne 0) { throw "makensis failed for the $scope installer." }
     }
 } finally {

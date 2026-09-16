@@ -99,7 +99,19 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
       - name: Install NSIS
         shell: pwsh
-        run: choco install nsis -y --no-progress
+        run: |
+          choco install nsis -y --no-progress
+          # Chocolatey installs NSIS under Program Files but cannot update
+          # this already-running runner process. Make it available to the
+          # following packaging step, and fail here if installation was only
+          # superficially successful.
+          $makensis = @(
+            (Join-Path ([Environment]::GetFolderPath([Environment+SpecialFolder]::ProgramFilesX86)) 'NSIS\makensis.exe'),
+            (Join-Path ([Environment]::GetFolderPath([Environment+SpecialFolder]::ProgramFiles)) 'NSIS\makensis.exe')
+          ) | Where-Object { Test-Path -LiteralPath $_ -PathType Leaf } | Select-Object -First 1
+          if (-not $makensis) { throw 'Chocolatey completed but makensis.exe was not installed.' }
+          Split-Path -Parent $makensis | Out-File -FilePath $env:GITHUB_PATH -Encoding utf8 -Append
+          Write-Host "Using $makensis"
       - name: Build Server executable
         shell: pwsh
         run: |

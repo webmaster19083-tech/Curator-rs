@@ -411,6 +411,7 @@ pub struct SessionService {
     engine: std::sync::Arc<std::sync::Mutex<Option<SessionEngine>>>,
     updates: broadcast::Sender<SessionUpdate>,
     runner: std::sync::Arc<std::sync::Mutex<Option<CancellationToken>>>,
+    clock: std::sync::Arc<dyn Fn() -> u64 + Send + Sync>,
 }
 
 impl Default for SessionService {
@@ -420,11 +421,24 @@ impl Default for SessionService {
             engine: std::sync::Arc::new(std::sync::Mutex::new(None)),
             updates,
             runner: std::sync::Arc::new(std::sync::Mutex::new(None)),
+            clock: std::sync::Arc::new(monotonic_ms),
         }
     }
 }
 
 impl SessionService {
+    #[cfg(test)]
+    fn with_clock(clock: impl Fn() -> u64 + Send + Sync + 'static) -> Self {
+        Self {
+            clock: std::sync::Arc::new(clock),
+            ..Self::default()
+        }
+    }
+
+    fn now(&self) -> u64 {
+        (self.clock)()
+    }
+
     pub fn start(&self, config: GameConfig) -> Result<SessionState, String> {
         let mut slot = self
             .engine
@@ -494,7 +508,7 @@ impl SessionService {
         self.stop_runner();
         self.start(config)?;
         let update = self.dispatch(SessionCommand::Start {
-            monotonic_ms: monotonic_ms(),
+            monotonic_ms: self.now(),
         })?;
         self.start_runner(update.state.session_id.clone());
         Ok(update)
@@ -504,7 +518,7 @@ impl SessionService {
     /// process-monotonic timestamp. This is the entry point used by native and
     /// remote UI surfaces.
     pub fn control(&self, control: SessionControl) -> Result<SessionUpdate, String> {
-        let now = monotonic_ms();
+        let now = self.now();
         let command = match control {
             // Kept as a read-compatible remote command, but the application
             // runner alone advances authoritative time.
@@ -545,7 +559,7 @@ impl SessionService {
 
     pub fn interrupt_active(&self) -> Option<SessionUpdate> {
         self.dispatch(SessionCommand::Interrupt {
-            monotonic_ms: monotonic_ms(),
+            monotonic_ms: self.now(),
         })
         .ok()
     }
@@ -589,7 +603,7 @@ impl SessionService {
                         if service.snapshot().as_ref().map(|state| &state.session_id) != Some(&session_id) {
                             break;
                         }
-                        match service.tick_for_session(&session_id, monotonic_ms()) {
+                        match service.tick_for_session(&session_id, service.now()) {
                             Ok(update) if matches!(update.state.status, SessionStatus::Completed | SessionStatus::Cancelled | SessionStatus::Interrupted) => break,
                             Ok(_) => {},
                             Err(_) => break,
@@ -1266,17 +1280,27 @@ mod tests {
         ));
     }
 
-    #[tokio::test]
+    #[tokio::test(start_paused = true)]
     async fn service_runner_completes_a_started_session_without_a_client_tick() {
-        let service = SessionService::default();
+        let clock = std::sync::Arc::new(AtomicU64::new(0));
+        let service_clock = std::sync::Arc::clone(&clock);
+        let service = SessionService::with_clock(move || service_clock.load(Ordering::SeqCst));
         let mut updates = service.subscribe();
         let mut cfg = config(71);
-        cfg.duration.active_duration_ms = 1;
-        cfg.phases[0].duration_ms = 1;
+        cfg.duration.active_duration_ms = 100;
+        cfg.phases[0].duration_ms = 100;
         cfg.phases.truncate(1);
         let started = service.start_running(cfg).unwrap();
         assert_eq!(started.state.status, SessionStatus::Running);
-        let terminal = tokio::time::timeout(std::time::Duration::from_secs(1), async {
+
+        // Advance the scheduler and injected process clock together. No wall
+        // clock sleep or client Tick participates in session completion.
+        tokio::task::yield_now().await;
+        clock.store(100, Ordering::SeqCst);
+        tokio::time::advance(std::time::Duration::from_millis(100)).await;
+        tokio::task::yield_now().await;
+
+        let terminal = tokio::time::timeout(std::time::Duration::from_millis(1), async {
             loop {
                 let update = updates.recv().await.unwrap();
                 if update
@@ -1289,7 +1313,7 @@ mod tests {
             }
         })
         .await
-        .expect("the 50 ms authoritative runner should complete the session");
+        .expect("the authoritative runner should complete from injected time");
         assert_eq!(terminal.state.status, SessionStatus::Completed);
     }
 }

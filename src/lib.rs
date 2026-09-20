@@ -605,9 +605,15 @@ pub async fn shutdown(state: &AppState) {
     // Stamp and settle the active interval before cancelling observers. The
     // insert is idempotent, so it safely races the normal terminal observer.
     if let Some(update) = state.sessions.interrupt_active() {
-        tracing::info!(session_id = %update.state.session_id, "Marked active session interrupted during shutdown");
-        if let Err(error) = persist_session_summary(state, &update.state).await {
-            tracing::warn!(session_id = %update.state.session_id, %error, "Could not persist interrupted session summary");
+        if update
+            .effects
+            .iter()
+            .any(|effect| matches!(effect, session::SessionEffect::EndSession { .. }))
+        {
+            tracing::info!(session_id = %update.state.session_id, "Marked active session interrupted during shutdown");
+        }
+        if let Err(error) = persist_terminal_update(state, &update).await {
+            tracing::warn!(session_id = %update.state.session_id, %error, "Could not persist interrupted session summary; the terminal snapshot remains available for retry");
         }
     }
     state.sessions.stop_runner();
@@ -660,8 +666,8 @@ pub fn spawn_session_summary_persistence(state: &AppState) {
                 continue;
             }
             loop {
-                match persist_session_summary(&persistence_state, &update.state).await {
-                    Ok(()) => break,
+                match persist_terminal_update(&persistence_state, &update).await {
+                    Ok(_) => break,
                     Err(error) => {
                         tracing::warn!(session_id = %update.state.session_id, %error, "Could not persist terminal session summary; retrying locally");
                         tokio::select! {
@@ -673,6 +679,25 @@ pub fn spawn_session_summary_persistence(state: &AppState) {
             }
         }
     });
+}
+
+/// Apply the one application-level persistence rule: only the update that
+/// carries the engine's first terminal transition may request a summary
+/// insert. The database key remains the second line of defense against an
+/// observer/shutdown race or a local retry.
+async fn persist_terminal_update(
+    state: &AppState,
+    update: &session::SessionUpdate,
+) -> Result<bool> {
+    if !update
+        .effects
+        .iter()
+        .any(|effect| matches!(effect, session::SessionEffect::EndSession { .. }))
+    {
+        return Ok(false);
+    }
+    persist_session_summary(state, &update.state).await?;
+    Ok(true)
 }
 
 /// Persist an immutable terminal outcome from the Rust session engine. Native
@@ -775,6 +800,32 @@ mod session_persistence_tests {
             .query_row(
                 "SELECT COUNT(*) FROM interactive_sessions WHERE session_id=?1",
                 [&summary.session_id],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(count, 1);
+    }
+
+    #[tokio::test]
+    async fn terminal_snapshot_without_first_transition_effect_is_not_persisted() {
+        let root = tempfile::tempdir().unwrap();
+        let state = test_support::state(root.path());
+        let mut engine = session::SessionEngine::new(session::GameConfig::quick_default()).unwrap();
+        engine.dispatch(session::SessionCommand::Start { monotonic_ms: 0 });
+        let terminal = engine.dispatch(session::SessionCommand::Interrupt { monotonic_ms: 1 });
+        assert!(persist_terminal_update(&state, &terminal).await.unwrap());
+
+        let replay = engine.dispatch(session::SessionCommand::Interrupt { monotonic_ms: 2 });
+        assert!(replay.effects.is_empty());
+        assert!(!persist_terminal_update(&state, &replay).await.unwrap());
+
+        let count: i64 = state
+            .pool
+            .get()
+            .unwrap()
+            .query_row(
+                "SELECT COUNT(*) FROM interactive_sessions WHERE session_id=?1",
+                [&replay.state.session_id],
                 |row| row.get(0),
             )
             .unwrap();

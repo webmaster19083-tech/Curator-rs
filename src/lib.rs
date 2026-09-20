@@ -204,7 +204,10 @@ fn setup_logging(log_path: &std::path::Path) {
     // Keep _guard alive for the process lifetime
     std::mem::forget(_guard);
 
-    let filter = EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("info"));
+    // Capture diagnostic detail by default in both stdout and curator.log.
+    // An explicit RUST_LOG remains authoritative for users who need a quieter
+    // filter or narrower module selection.
+    let filter = EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("debug"));
 
     tracing_subscriber::registry()
         .with(filter)

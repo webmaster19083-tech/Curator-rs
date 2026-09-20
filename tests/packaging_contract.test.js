@@ -6,6 +6,12 @@ const path = require('node:path');
 const root = path.join(__dirname, '..');
 const read = (file) => fs.readFileSync(path.join(root, file), 'utf8');
 
+test('Host packaging selects the Tauri binary when the native preview is present', () => {
+  const manifest = read('desktop/Cargo.toml');
+  assert.match(manifest, /^default-run = "Curator"$/m);
+  assert.match(manifest, /name = "curator-native-preview"/);
+});
+
 test('Windows Server installer has explicit user and machine scope plus opt-in P-HAR', () => {
   const nsis = read('packaging/windows/curator-server.nsi');
   const register = read('packaging/windows/Register-CuratorServer.ps1');

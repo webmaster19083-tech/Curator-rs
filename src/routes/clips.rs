@@ -144,7 +144,7 @@ async fn split_video(
         .tempdir_in(&state.data_dir)?;
     let output_pattern = staging.path().join("clip-%04d.mp4");
     let log = tempfile::tempfile()?;
-    let mut child = tokio::process::Command::new(&state.ffmpeg_bin)
+    let mut child = crate::process::command(&state.ffmpeg_bin)
         .args(["-nostdin", "-hide_banner", "-loglevel", "error", "-n", "-i"])
         .arg(&original)
         .args([

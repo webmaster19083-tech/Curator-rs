@@ -24,6 +24,27 @@ pub fn command(program: impl AsRef<std::ffi::OsStr>) -> tokio::process::Command 
     command
 }
 
+/// Construct a blocking helper command with exactly the same process-group,
+/// hidden-window, and UTF-8 policy as [`command`]. Blocking call sites must
+/// use this factory rather than creating an OS process directly.
+pub fn blocking_command(program: impl AsRef<std::ffi::OsStr>) -> Command {
+    let mut command = Command::new(program);
+    command
+        .env("PYTHONUTF8", "1")
+        .env("PYTHONIOENCODING", "utf-8");
+    #[cfg(windows)]
+    {
+        use std::os::windows::process::CommandExt;
+        command.creation_flags(0x08000000); // CREATE_NO_WINDOW
+    }
+    #[cfg(unix)]
+    {
+        use std::os::unix::process::CommandExt;
+        command.process_group(0);
+    }
+    command
+}
+
 /// Owns a Windows job object for one externally launched process.  Closing
 /// the job terminates every inherited descendant, which is more dependable
 /// than asking `taskkill` to discover a tree after the parent is already
@@ -96,6 +117,17 @@ pub fn guard_process_tree(pid: u32) -> Option<ProcessTreeGuard> {
 }
 
 pub fn output_timeout(cmd: &mut Command, timeout: Duration) -> io::Result<Output> {
+    output_timeout_limited(cmd, timeout, 64 * 1024)
+}
+
+/// Wait for a command without risking an unbounded in-memory stderr/stdout
+/// capture. Large intentional outputs (such as decoded PCM) must opt in to a
+/// specific ceiling at their call site.
+pub fn output_timeout_limited(
+    cmd: &mut Command,
+    timeout: Duration,
+    output_limit: u64,
+) -> io::Result<Output> {
     // Files avoid pipe deadlock and unbounded reader threads on broken subprocesses.
     let mut stdout = tempfile::tempfile()?;
     let mut stderr = tempfile::tempfile()?;
@@ -122,8 +154,8 @@ pub fn output_timeout(cmd: &mut Command, timeout: Duration) -> io::Result<Output
     stderr.seek(SeekFrom::Start(0))?;
     let mut out = Vec::new();
     let mut err = Vec::new();
-    stdout.take(65536).read_to_end(&mut out)?;
-    stderr.take(65536).read_to_end(&mut err)?;
+    stdout.take(output_limit).read_to_end(&mut out)?;
+    stderr.take(64 * 1024).read_to_end(&mut err)?;
     Ok(Output {
         status,
         stdout: out,
@@ -134,6 +166,36 @@ pub fn output_timeout(cmd: &mut Command, timeout: Duration) -> io::Result<Output
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn production_helpers_do_not_bypass_the_process_factory() {
+        // Test modules may create fixtures directly. Production helper paths
+        // must all enter through `command` or `blocking_command` so Windows
+        // never flashes a console and cancellation/diagnostics stay bounded.
+        const FILES: &[&str] = &[
+            "src/appearance.rs",
+            "src/beat.rs",
+            "src/downloader.rs",
+            "src/duration.rs",
+            "src/nsfw.rs",
+            "src/oobe.rs",
+            "src/remote.rs",
+            "src/routes/clips.rs",
+            "src/routes/search.rs",
+            "src/startup.rs",
+            "viewer/src/main.rs",
+        ];
+        for file in FILES {
+            let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join(file);
+            let source = std::fs::read_to_string(&path).unwrap();
+            let production = source.split("#[cfg(test)]").next().unwrap_or(&source);
+            assert!(
+                !production.contains("Command::new("),
+                "{file} bypasses the central process factory"
+            );
+        }
+    }
+
     #[test]
     fn hung_subprocess_is_killed_and_reaped() {
         #[cfg(windows)]

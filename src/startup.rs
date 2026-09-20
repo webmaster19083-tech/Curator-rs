@@ -22,12 +22,10 @@ pub struct StartupRegistration {
 /// from flashing a foreground window before Curator settles into the tray.
 #[cfg(windows)]
 pub fn set_start_with_windows(enabled: bool) -> Result<(), String> {
-    use std::process::Command;
-
     const RUN_KEY: &str = r"HKCU\Software\Microsoft\Windows\CurrentVersion\Run";
     const VALUE_NAME: &str = "Curator";
 
-    let mut command = Command::new("reg.exe");
+    let mut command = crate::process::blocking_command("reg.exe");
     if enabled {
         let executable = std::env::current_exe()
             .map_err(|error| format!("Could not find the Curator executable: {error}"))?;
@@ -45,8 +43,7 @@ pub fn set_start_with_windows(enabled: bool) -> Result<(), String> {
     } else {
         command.args(["delete", RUN_KEY, "/v", VALUE_NAME, "/f"]);
     }
-    let output = command
-        .output()
+    let output = crate::process::output_timeout(&mut command, std::time::Duration::from_secs(5))
         .map_err(|error| format!("Could not update Windows startup: {error}"))?;
     // Deleting a missing Run entry already reaches the requested end state.
     if output.status.success() || !enabled {
@@ -138,14 +135,13 @@ pub fn classify_startup_command(
 
 #[cfg(windows)]
 fn query_run_value() -> Result<Option<String>, String> {
-    use std::process::Command;
-
     const RUN_KEY: &str = r"HKCU\Software\Microsoft\Windows\CurrentVersion\Run";
     const VALUE_NAME: &str = "Curator";
-    let output = Command::new("reg.exe")
-        .args(["query", RUN_KEY, "/v", VALUE_NAME])
-        .output()
-        .map_err(|error| format!("Could not inspect Windows startup: {error}"))?;
+    let output = crate::process::output_timeout(
+        crate::process::blocking_command("reg.exe").args(["query", RUN_KEY, "/v", VALUE_NAME]),
+        std::time::Duration::from_secs(5),
+    )
+    .map_err(|error| format!("Could not inspect Windows startup: {error}"))?;
     if !output.status.success() {
         // `reg query` uses a non-zero exit for a missing value. That is an
         // expected reconciliation result rather than an error.

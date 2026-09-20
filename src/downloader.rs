@@ -386,7 +386,7 @@ pub(crate) fn probe_video_duration(ffprobe_bin: &str, path: &Path) -> Option<f64
         return None;
     }
     let output = crate::process::output_timeout(
-        std::process::Command::new(ffprobe_bin)
+        crate::process::blocking_command(ffprobe_bin)
             .args([
                 "-v",
                 "error",

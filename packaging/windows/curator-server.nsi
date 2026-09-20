@@ -16,7 +16,7 @@ SetCompressor /SOLID lzma
   !error "OUTPUT_FILE must name the installer artifact"
 !endif
 !ifndef PRODUCT_VERSION
-  !define PRODUCT_VERSION "0.2.0"
+  !define PRODUCT_VERSION "0.3.0"
 !endif
 
 !ifdef ALL_USERS

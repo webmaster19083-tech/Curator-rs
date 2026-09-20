@@ -17,10 +17,11 @@ pub mod migration;
 mod nsfw;
 mod oobe;
 pub mod phar;
-mod process;
+pub mod process;
 mod provenance;
 pub mod remote;
 pub mod routes;
+pub mod session;
 mod slug;
 mod startup;
 mod storage;
@@ -153,6 +154,9 @@ pub struct AppState {
     /// picking the item that just played. It is intentionally ephemeral: media
     /// is not private activity telemetry and a restart begins a new session.
     pub playback_history: Arc<Mutex<VecDeque<i64>>>,
+    /// The authoritative, serialized command boundary for an active native
+    /// or remote session. UI clients only receive snapshots and effects.
+    pub sessions: session::SessionService,
     pub settings: Arc<RwLock<db::Settings>>,
     /// Live, UI-visible progress for the cheap post-startup size backfill.
     /// This is not migration state: an interrupted run safely restarts from
@@ -483,6 +487,7 @@ pub async fn initialize_with_options(options: InitializeOptions) -> Result<AppSt
         download_cooldowns: Arc::new(Mutex::new(HashMap::new())),
         remote_server: Arc::new(remote::ServerStatus::new(remote::DEFAULT_SERVER_PORT)),
         playback_history: Arc::new(Mutex::new(VecDeque::with_capacity(24))),
+        sessions: session::SessionService::default(),
         settings: Arc::new(RwLock::new(settings)),
         size_backfill: Arc::new(RwLock::new(media_files::SizeBackfillProgress::default())),
         search_registry,
@@ -593,6 +598,12 @@ pub fn router(state: AppState) -> axum::Router {
 
 pub async fn shutdown(state: &AppState) {
     state.shutdown.cancel();
+    if let Some(update) = state.sessions.interrupt_active() {
+        tracing::info!(session_id = %update.state.session_id, "Marked active session interrupted during shutdown");
+        if let Err(error) = persist_session_summary(state, &update.state).await {
+            tracing::warn!(session_id = %update.state.session_id, %error, "Could not persist interrupted session summary");
+        }
+    }
     if let Some(worker) = &state.nsfw {
         worker.shutdown().await;
     }
@@ -603,6 +614,47 @@ pub async fn shutdown(state: &AppState) {
     state.server_tasks.close();
     state.download_tasks.wait().await;
     state.server_tasks.wait().await;
+}
+
+/// Persist an immutable terminal outcome from the Rust session engine. Native
+/// and remote adapters share this operation, so interruption records remain
+/// local and inspectable even when the desktop window disappears.
+pub async fn persist_session_summary(
+    state: &AppState,
+    summary: &session::SessionState,
+) -> Result<()> {
+    let pool = state.pool.clone();
+    let summary = summary.clone();
+    tokio::task::spawn_blocking(move || -> Result<()> {
+        let mut conn = pool.get()?;
+        let transaction = conn.transaction()?;
+        let detail = serde_json::json!({
+            "session_id": summary.session_id,
+            "seed": summary.seed,
+            "active_elapsed_ms": summary.active_elapsed_ms,
+            "paused_elapsed_ms": summary.paused_elapsed_ms,
+            "phase": summary.phase,
+            "statistics": summary.statistics,
+            "tempo": summary.tempo,
+        });
+        transaction.execute(
+            "INSERT INTO interactive_sessions(started_at,duration_s,item_count,plan,events,ended_state,timing_corrections)
+             VALUES(?1,?2,?3,?4,?5,?6,?7)",
+            rusqlite::params![
+                db::now_iso(),
+                i64::try_from(summary.active_elapsed_ms / 1_000).unwrap_or(i64::MAX),
+                i64::try_from(summary.event_history.len()).unwrap_or(i64::MAX),
+                "native-session-v1",
+                serde_json::to_string(&summary.event_history)?,
+                serde_json::to_string(&summary.status)?.trim_matches('"'),
+                detail.to_string(),
+            ],
+        )?;
+        transaction.commit()?;
+        Ok(())
+    })
+    .await??;
+    Ok(())
 }
 
 impl AppState {

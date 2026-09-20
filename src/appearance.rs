@@ -43,10 +43,15 @@ fn env_value(name: &str) -> Option<String> {
 
 #[cfg(target_os = "linux")]
 fn gsettings(key: &str) -> Option<String> {
-    let output = std::process::Command::new("gsettings")
-        .args(["get", "org.gnome.desktop.interface", key])
-        .output()
-        .ok()?;
+    let output = crate::process::output_timeout(
+        crate::process::blocking_command("gsettings").args([
+            "get",
+            "org.gnome.desktop.interface",
+            key,
+        ]),
+        std::time::Duration::from_secs(2),
+    )
+    .ok()?;
     output.status.success().then(|| {
         String::from_utf8_lossy(&output.stdout)
             .trim()

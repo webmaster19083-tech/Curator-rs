@@ -39,3 +39,13 @@ test('GTK mapping and remote runtime boundaries remain explicit', () => {
   assert.match(app, /local_integration_settings_local_only/);
   assert.match(app, /host_integration_settings_available/);
 });
+
+test('contextual commands replace library filters and native VR remains available', () => {
+  const css = read('static/style.css');
+  const library = read('static/library.js');
+  assert.match(library, /function setExplorerCommandContext\(context\)/);
+  assert.match(library, /setExplorerCommandContext\(category\)/);
+  assert.match(css, /\[data-command-context="discover"\] \.explorer-toolbar-actions/);
+  assert.match(css, /\[data-command-context="settings"\] \.explorer-toolbar-filters/);
+  assert.match(library, /mode === 'vr' && curatorRuntime === 'host'/);
+});

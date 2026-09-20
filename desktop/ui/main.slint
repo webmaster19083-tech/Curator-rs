@@ -1,0 +1,72 @@
+import { Button, HorizontalBox, VerticalBox } from "std-widgets.slint";
+
+export component CuratorNativeWindow inherits Window {
+    in-out property <string> active-page: "Library";
+    in-out property <string> status: "Native shell ready";
+    callback select-page(string);
+    callback start-session();
+
+    title: "Curator Native Preview";
+    preferred-width: 1120px;
+    preferred-height: 720px;
+    min-width: 760px;
+    min-height: 480px;
+
+    VerticalBox {
+        padding: 18px;
+        spacing: 14px;
+
+        Text {
+            text: "Curator";
+            font-size: 28px;
+            font-weight: 700;
+        }
+
+        HorizontalBox {
+            spacing: 8px;
+            for page in ["Library", "Discover", "Organization", "Activity", "Settings", "Diagnostics"] : Button {
+                text: page;
+                primary: root.active-page == page;
+                clicked => { root.select-page(page); }
+            }
+        }
+
+        Rectangle {
+            horizontal-stretch: 1;
+            vertical-stretch: 1;
+            border-width: 1px;
+            border-color: #5b6474;
+            border-radius: 8px;
+            background: #1d2330;
+
+            VerticalBox {
+                padding: 22px;
+                spacing: 12px;
+                Text {
+                    text: root.active-page;
+                    font-size: 22px;
+                    font-weight: 600;
+                }
+                Text {
+                    text: root.active-page == "Library"
+                        ? "Library browsing and image playback migrate here first."
+                        : root.active-page == "Settings"
+                        ? "Settings and recovery state are native-owned display models."
+                        : "This native command surface is ready for its shared Rust view model.";
+                    wrap: word-wrap;
+                }
+                Button {
+                    text: "Start session";
+                    enabled: root.active-page == "Library";
+                    clicked => { root.start-session(); }
+                }
+            }
+        }
+
+        Text {
+            text: root.status;
+            color: #b9c3d6;
+            wrap: word-wrap;
+        }
+    }
+}

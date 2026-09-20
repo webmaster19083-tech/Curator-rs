@@ -44,11 +44,38 @@ function normalizePlayMode(mode) {
 }
 
 function supportsPlayMode(mode) {
+  // Host is a native desktop app. Its panorama fallback is available without
+  // an attached headset, so VR must remain a visible Play choice there.
+  if (mode === 'vr' && curatorRuntime === 'host') return true;
   const narrowOrCoarse = window.matchMedia('(max-width: 900px), (pointer: coarse)').matches;
   const wideFine = window.matchMedia('(min-width: 901px) and (pointer: fine)').matches;
   if (mode === 'feed') return narrowOrCoarse;
   if (mode === 'portrait' || mode === 'vr') return wideFine;
   return true;
+}
+function setExplorerCommandContext(context) {
+  document.body.dataset.commandContext = context;
+}
+function explorerCommandContext() {
+  return ['search', 'sources', 'creators'].includes(explorer.nav) ? 'discover'
+    : ['groups', 'tags', 'ratings', 'review'].includes(explorer.nav) ? 'organization'
+      : ['downloads', 'recent'].includes(explorer.nav) ? 'activity' : 'library';
+}
+window.refreshExplorerCommandContext = () => setExplorerCommandContext(explorerCommandContext());
+function hasNativeHostBridge() {
+  return curatorRuntime === 'host' && typeof window.curatorNative?.importLocalFolder === 'function';
+}
+async function importNativeFolder() {
+  if (!hasNativeHostBridge()) return;
+  try {
+    const sourceId = await window.curatorNative.importLocalFolder(null);
+    if (sourceId == null) return;
+    toast('Local folder added to Curator.');
+    await refreshSources();
+    await explorerLoadView();
+  } catch (error) {
+    toast(`Could not import that folder: ${error.message || error}`, true);
+  }
 }
 function updatePlayCapabilities() {
   explorerAll('[data-play-mode="feed"]').forEach((button) => { button.hidden = !supportsPlayMode('feed'); });
@@ -142,9 +169,8 @@ function updateNavigation() {
   if (!explorer.installed) return;
   renderExplorerSourceHierarchy();
   explorerAll('[data-nav]').forEach((button) => button.classList.toggle('active', button.dataset.nav === explorer.nav));
-  const category = ['search', 'sources', 'creators'].includes(explorer.nav) ? 'discover'
-    : ['groups', 'tags', 'ratings', 'review'].includes(explorer.nav) ? 'organization'
-      : ['downloads', 'recent'].includes(explorer.nav) ? 'activity' : 'library';
+  const category = explorerCommandContext();
+  setExplorerCommandContext(category);
   explorerAll('[data-top-nav]').forEach((button) => button.classList.toggle('active', button.dataset.topNav === category));
   const activeDownloads = state.sources.filter((source) => source.status === 'pending' || source.status === 'downloading').length;
   const badge = explorerEl('#topnav-download-count');
@@ -571,7 +597,8 @@ function launchPlayMode(mode = explorer.playMode, items = null) {
 // from `AudioContext.currentTime`; no stage owns an independent timeout.
 function goonCurrentBeat(session) {
   if (!session.running || !session.audio) return session.anchorBeat;
-  return session.anchorBeat + (session.audio.currentTime - session.anchorAt) * session.bpm / 60;
+  const raw = session.anchorBeat + (session.audio.currentTime - session.anchorAt) * session.bpm / 60;
+  return Math.max(0, Math.min(session.totalBeats, raw));
 }
 function goonRebase(session, beat = goonCurrentBeat(session)) {
   session.anchorBeat = Math.max(0, Math.min(session.totalBeats, beat));
@@ -580,6 +607,26 @@ function goonRebase(session, beat = goonCurrentBeat(session)) {
   // and BPM edits use the same master clock.
   if (session.audio) session.anchorAt = session.audio.currentTime + session.beatOffsetSecs;
   session.nextScheduledBeat = Math.ceil(session.anchorBeat);
+}
+function goonRecordTimingCorrection(session, kind) {
+  const corrections = session.timingCorrections || (session.timingCorrections = []);
+  corrections.push({
+    kind,
+    beat: Math.round(goonCurrentBeat(session) * 1000) / 1000,
+    bpm: session.bpm,
+    beat_offset_secs: session.beatOffsetSecs,
+    active_duration_s: Math.round(goonActiveDurationMs(session) / 10) / 100,
+  });
+  if (corrections.length > 128) corrections.splice(0, corrections.length - 128);
+}
+function goonActiveDurationMs(session) {
+  return (session.activeDurationMs || 0) + (session.activeStartedAt == null ? 0 : Math.max(0, performance.now() - session.activeStartedAt));
+}
+function goonStopActiveDuration(session) {
+  const duration = goonActiveDurationMs(session);
+  session.activeDurationMs = duration;
+  session.activeStartedAt = null;
+  return duration;
 }
 function goonStageIndex(session, beat) {
   return session.stages.findIndex((stage) => beat >= Number(stage.start_beat) && beat < Number(stage.end_beat));
@@ -711,7 +758,10 @@ function goonStartClock(session) {
   session.audio ||= new AudioCtor();
   session.audio.resume().then(() => {
     if (explorer.goon !== session || session.ended) return;
-    session.running = true; session.startedAt ||= performance.now(); goonRebase(session, session.anchorBeat);
+    session.running = true;
+    session.startedAt ||= performance.now();
+    session.activeStartedAt = performance.now();
+    goonRebase(session, session.anchorBeat);
     explorerEl('#goon-start')?.setAttribute('hidden', '');
     const pause = explorerEl('#goon-pause'); if (pause) pause.textContent = 'Pause';
     goonScheduleMetronome(session); goonTick(session);
@@ -720,21 +770,22 @@ function goonStartClock(session) {
 function goonPauseClock(session) {
   if (!session?.audio) return;
   if (session.running) {
-    goonRebase(session); session.running = false; cancelAnimationFrame(session.raf); clearTimeout(session.scheduler);
+    goonRebase(session); goonStopActiveDuration(session); session.running = false; cancelAnimationFrame(session.raf); clearTimeout(session.scheduler);
     session.audio.suspend(); window.speechSynthesis?.cancel();
     const pause = explorerEl('#goon-pause'); if (pause) pause.textContent = 'Resume';
   } else goonStartClock(session);
 }
-function goonSetBpm(session, value) {
+function goonSetBpm(session, value, correctionKind = 'bpm') {
   const bpm = Number(value); if (!Number.isFinite(bpm) || bpm < 40 || bpm > 300) return;
   const beat = goonCurrentBeat(session); session.bpm = bpm; goonRebase(session, beat);
+  goonRecordTimingCorrection(session, correctionKind);
   const readout = explorerEl('#goon-bpm'); if (readout) readout.value = String(Math.round(bpm * 10) / 10);
 }
 function goonTapTempo(session) {
   const now = performance.now(); session.taps = [...(session.taps || []), now].slice(-6);
   if (session.taps.length < 2) return;
   const intervals = session.taps.slice(1).map((time, index) => time - session.taps[index]).filter((value) => value >= 200 && value <= 1500);
-  if (intervals.length) goonSetBpm(session, 60000 / (intervals.reduce((sum, value) => sum + value, 0) / intervals.length));
+  if (intervals.length) goonSetBpm(session, 60000 / (intervals.reduce((sum, value) => sum + value, 0) / intervals.length), 'tap_tempo');
 }
 async function startGoonSession(items) {
   const original = Array.isArray(items) ? items : [];
@@ -755,6 +806,7 @@ async function startGoonSession(items) {
     stageIndex: -2, lastBeat: -1, visualIndex: 0, visualMarker: null, running: false, ended: false,
     metronome: { enabled: !!payload.metronome?.enabled, volume: Number(payload.metronome?.volume ?? .55) },
     soundtrack: payload.soundtrack || {}, beatOffsetSecs: Number(timeline.beat_offset_secs || 0), taps: [], startedAt: null,
+    activeDurationMs: 0, activeStartedAt: null, timingCorrections: [],
   };
   goonBuildBeatMap(session); goonApplyStage(session, -1); goonRenderBeatMap(session, 0);
   const bpm = explorerEl('#goon-bpm'); if (bpm) bpm.value = String(session.bpm);
@@ -768,11 +820,11 @@ async function startGoonSession(items) {
 }
 function endGoonSession(endedState = 'completed') {
   const session = explorer.goon; if (!session) return;
+  const duration = Math.round(goonStopActiveDuration(session) / 1000);
   session.ended = true; session.running = false; cancelAnimationFrame(session.raf); clearTimeout(session.scheduler);
   session.audio?.suspend().catch(() => {}); window.speechSynthesis?.cancel();
   explorerEl('#goon-hud').hidden = true; explorer.goon = null;
-  const duration = session.startedAt ? Math.round((performance.now() - session.startedAt) / 1000) : 0;
-  api('/api/goon/session/complete', { method: 'POST', body: JSON.stringify({ duration_s: duration, stages_completed: Math.max(0, session.stageIndex + 1), ended_state: endedState, soundtrack_provider: session.soundtrack.provider || 'local', bpm: session.bpm, beat_offset_secs: session.beatOffsetSecs, rating_phases: session.stages.map((stage) => stage.pace) }) }).catch(() => {});
+  api('/api/goon/session/complete', { method: 'POST', body: JSON.stringify({ duration_s: duration, stages_completed: Math.max(0, session.stageIndex + 1), ended_state: endedState, soundtrack_provider: session.soundtrack.provider || 'local', bpm: session.bpm, beat_offset_secs: session.beatOffsetSecs, timing_corrections: session.timingCorrections, rating_phases: session.stages.map((stage) => stage.pace) }) }).catch(() => {});
   explorerLegacy.exitSlideshow();
 }
 
@@ -1221,6 +1273,15 @@ function installExplorerUi() {
   const toolbar = document.createElement('header'); toolbar.className = 'explorer-toolbar';
   toolbar.innerHTML = '<div class="explorer-toolbar-top"><div><p class="explorer-kicker">Library</p><h1 id="explorer-location">All Media</h1></div><div class="explorer-toolbar-actions"><button id="explorer-add-source-main" class="btn btn-ghost" type="button">+ Add source</button><label class="explorer-search"><span class="sr-only">Search library</span><input id="explorer-library-search" type="search" placeholder="Search library" autocomplete="off"></label><div class="explorer-play-split"><button id="explorer-play-primary" class="btn btn-accent" type="button">Play</button><button id="explorer-play-toggle" class="btn btn-accent" type="button" aria-label="Choose play mode" aria-haspopup="menu" aria-expanded="false">▾</button><div id="explorer-play-menu" role="menu" hidden><button type="button" data-play-mode="feed">Mobile Feed</button><button type="button" data-play-mode="slideshow">Slideshow</button><button type="button" data-play-mode="portrait">Portrait Wall</button><button type="button" data-play-mode="review">Review</button><button type="button" data-play-mode="goon">GOON</button></div></div></div></div><div class="explorer-toolbar-filters"><div class="explorer-type-buttons"><button type="button" data-type="all" class="explorer-type-filter active">All</button><button type="button" data-type="image" class="explorer-type-filter">Images</button><button type="button" data-type="clip" class="explorer-type-filter">Clips</button><button type="button" data-type="video" class="explorer-type-filter">Videos</button></div><select id="explorer-sort" aria-label="Sort media"><option value="default">Sort: default</option><optgroup label="Name"><option value="filename_asc">Name (A–Z)</option><option value="filename_desc">Name (Z–A)</option></optgroup><optgroup label="Date"><option value="date_desc">Date added (newest)</option><option value="date_asc">Date added (oldest)</option><option value="downloaded_desc">Date downloaded (newest)</option><option value="downloaded_asc">Date downloaded (oldest)</option><option value="modified_desc">Date modified (newest)</option><option value="modified_asc">Date modified (oldest)</option></optgroup><optgroup label="Media"><option value="duration_desc">Duration (longest)</option><option value="duration_asc">Duration (shortest)</option><option value="size_desc">File size (largest)</option><option value="size_asc">File size (smallest)</option><option value="rating_desc">Rating (highest)</option><option value="rating_asc">Rating (lowest)</option></optgroup><optgroup label="Source"><option value="creator_asc">Creator (A–Z)</option><option value="creator_desc">Creator (Z–A)</option><option value="source_asc">Source (A–Z)</option><option value="source_desc">Source (Z–A)</option></optgroup><option value="shuffle">Random</option></select><select id="explorer-tag-filter" aria-label="Filter by tag"><option value="">All tags</option></select><select id="explorer-max-rating" aria-label="Maximum rating"><option value="">All ratings</option><option value="4">Up to 4 stars</option><option value="3">Up to 3 stars</option><option value="2">Up to 2 stars</option><option value="1">Up to 1 star</option></select><select id="explorer-rating-status" aria-label="Rating status"><option value="">All review states</option><option value="unrated">Unrated</option><option value="auto">Auto rated</option><option value="needs_review">Needs review</option><option value="reviewed">Human reviewed</option></select></div><div id="explorer-bulk-bar" hidden><span id="explorer-selection-count" class="mono small"></span><button type="button" data-bulk="add-group">Add to Group</button><button type="button" data-bulk="add-tag">Add Tag</button><button type="button" data-bulk="set-rating">Set Rating</button><button type="button" data-bulk="move">Move</button><button type="button" data-bulk="delete" class="danger">Delete</button><button type="button" data-bulk="review">Review</button><button type="button" data-bulk="play">Play Selected</button><button type="button" data-bulk="refresh">Refresh Metadata</button><button type="button" data-bulk="open-source">Open Source</button><button type="button" data-bulk="clear">Clear</button></div>';
   legacyToolbar.before(toolbar);
+  if (hasNativeHostBridge()) {
+    const importFolder = document.createElement('button');
+    importFolder.id = 'explorer-import-folder';
+    importFolder.className = 'btn btn-ghost';
+    importFolder.type = 'button';
+    importFolder.textContent = 'Import folder';
+    importFolder.addEventListener('click', importNativeFolder);
+    explorerEl('.explorer-toolbar-actions', toolbar).insertBefore(importFolder, explorerEl('.explorer-search', toolbar));
+  }
   const topNavigation = document.createElement('nav');
   topNavigation.className = 'explorer-top-navigation';
   topNavigation.setAttribute('aria-label', 'Primary navigation');
@@ -1289,6 +1350,7 @@ function installExplorerUi() {
     const beat = goonCurrentBeat(session);
     session.beatOffsetSecs = Number(event.target.value) || 0;
     goonRebase(session, beat);
+    goonRecordTimingCorrection(session, 'offset');
   });
   explorerEl('#goon-metronome').addEventListener('change', (event) => {
     if (!explorer.goon) return; explorer.goon.metronome.enabled = event.target.checked; appSettings.metronome_enabled = event.target.checked;
@@ -1300,6 +1362,7 @@ function installExplorerUi() {
   });
   explorerEl('#goon-seek').addEventListener('input', (event) => {
     const session = explorer.goon; if (!session) return; goonRebase(session, Number(event.target.value));
+    goonRecordTimingCorrection(session, 'seek');
     const index = goonStageIndex(session, Math.floor(session.anchorBeat)); if (index !== session.stageIndex) goonApplyStage(session, index); goonRenderBeatMap(session, session.anchorBeat);
   });
   explorerEl('#goon-end').addEventListener('click', endGoonSession);

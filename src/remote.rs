@@ -16,7 +16,6 @@ use anyhow::{Context, Result};
 use serde::Serialize;
 use serde_json::Value;
 use tokio::net::TcpListener;
-use tokio::process::Command;
 use tokio::time::timeout;
 use tokio_util::sync::CancellationToken;
 use tracing::{info, warn};
@@ -308,7 +307,7 @@ fn url_for(address: IpAddr, port: u16) -> String {
 async fn command_output(command: &str, args: &[&str]) -> Option<String> {
     let output = timeout(
         Duration::from_secs(2),
-        Command::new(command).args(args).output(),
+        crate::process::command(command).args(args).output(),
     )
     .await
     .ok()?

@@ -20,7 +20,7 @@ use crate::downloader::probe_video_duration;
 /// silently failing on every single video.
 pub fn ffprobe_available(ffprobe_bin: &str) -> bool {
     crate::process::output_timeout(
-        std::process::Command::new(ffprobe_bin).arg("-version"),
+        crate::process::blocking_command(ffprobe_bin).arg("-version"),
         std::time::Duration::from_secs(5),
     )
     .map(|o| o.status.success())

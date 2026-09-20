@@ -31,6 +31,7 @@ pub fn state(root: &std::path::Path) -> Arc<AppState> {
         download_cooldowns: Arc::new(Mutex::new(HashMap::new())),
         remote_server: Arc::new(remote::ServerStatus::new(remote::DEFAULT_SERVER_PORT)),
         playback_history: Arc::new(Mutex::new(VecDeque::new())),
+        sessions: session::SessionService::default(),
         settings: Arc::new(RwLock::new(db::Settings::default())),
         size_backfill: Arc::new(RwLock::new(media_files::SizeBackfillProgress::default())),
         search_registry: Arc::new(routes::search::default_provider_registry()),

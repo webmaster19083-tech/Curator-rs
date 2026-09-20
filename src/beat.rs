@@ -27,14 +27,18 @@ pub fn decode_mono_pcm(ffmpeg_bin: &str, path: &Path) -> Result<Vec<f32>, String
     if !path.is_file() {
         return Err("Audio file is unavailable".to_string());
     }
-    let output = std::process::Command::new(ffmpeg_bin)
-        .args(["-hide_banner", "-loglevel", "error", "-i"])
-        .arg(path)
-        .args([
-            "-t", "300", "-vn", "-ac", "1", "-ar", "22050", "-f", "f32le", "pipe:1",
-        ])
-        .output()
-        .map_err(|error| format!("ffmpeg is unavailable: {error}"))?;
+    let mut command = crate::process::blocking_command(ffmpeg_bin);
+    command.args(["-hide_banner", "-loglevel", "error", "-i"]);
+    command.arg(path);
+    command.args([
+        "-t", "300", "-vn", "-ac", "1", "-ar", "22050", "-f", "f32le", "pipe:1",
+    ]);
+    let output = crate::process::output_timeout_limited(
+        &mut command,
+        std::time::Duration::from_secs(30),
+        32 * 1024 * 1024,
+    )
+    .map_err(|error| format!("ffmpeg is unavailable: {error}"))?;
     if !output.status.success() {
         return Err("ffmpeg could not decode this audio track".to_string());
     }

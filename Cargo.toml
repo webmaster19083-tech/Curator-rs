@@ -3,7 +3,7 @@ members = ["desktop", "viewer"]
 resolver = "2"
 
 [workspace.package]
-version = "0.2.0"
+version = "0.3.0"
 edition = "2021"
 
 [package]
@@ -76,12 +76,14 @@ tokio-util     = { version = "0.7", features = ["io", "rt"] }
 # require a Rust edition/MSRV ahead of the CI toolchain and the build fails
 # during dependency resolution (see curator_rs_fixed / build fix notes).
 hashbrown      = "=0.15.5"
-indexmap       = "=2.11.4"
+# Slint's compiler requires indexmap 2.14+. Keep the workspace pin explicit
+# so every desktop/CLI target resolves the same compatible version.
+indexmap       = "=2.14.2"
 uuid           = "=1.10.0"
 time           = "=0.3.36"
 async-compression = "=0.4.28"
 compression-codecs = "=0.4.28"
-image-webp     = "=0.2.0"
+image-webp     = "=0.2.4"
 
 # Platform kill (non-Windows)
 [target.'cfg(not(target_os = "windows"))'.dependencies]

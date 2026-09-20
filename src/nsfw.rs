@@ -880,26 +880,29 @@ fn sample_video_frames(
     let mut paths = Vec::new();
     for (index, seconds) in frame_times(duration).into_iter().enumerate() {
         let output = directory.path().join(format!("frame-{index}.jpg"));
-        let status = std::process::Command::new(ffmpeg_bin)
-            .args([
-                "-hide_banner",
-                "-loglevel",
-                "error",
-                "-ss",
-                &format!("{seconds:.3}"),
-                "-i",
-            ])
-            .arg(source)
-            .args([
-                "-frames:v",
-                "1",
-                "-vf",
-                "scale=320:320:force_original_aspect_ratio=decrease",
-                "-y",
-            ])
-            .arg(&output)
-            .status()
-            .map_err(|error| format!("ffmpeg is unavailable: {error}"))?;
+        let status = crate::process::output_timeout(
+            crate::process::blocking_command(ffmpeg_bin)
+                .args([
+                    "-hide_banner",
+                    "-loglevel",
+                    "error",
+                    "-ss",
+                    &format!("{seconds:.3}"),
+                    "-i",
+                ])
+                .arg(source)
+                .args([
+                    "-frames:v",
+                    "1",
+                    "-vf",
+                    "scale=320:320:force_original_aspect_ratio=decrease",
+                    "-y",
+                ])
+                .arg(&output),
+            std::time::Duration::from_secs(30),
+        )
+        .map(|result| result.status)
+        .map_err(|error| format!("ffmpeg is unavailable: {error}"))?;
         if !status.success() || !output.is_file() {
             return Err("ffmpeg could not sample this clip".to_string());
         }

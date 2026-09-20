@@ -7,6 +7,15 @@ window.curatorRuntime = curatorRuntime;
 if (window.__TAURI__ && curatorRuntime === 'host') {
   const invoke = window.__TAURI__.core.invoke;
   const browserFetch = window.fetch.bind(window);
+  // Keep native-only capabilities behind an explicit Host bridge. A Viewer
+  // uses a Tauri WebView too, but must never gain file-system actions against
+  // the machine hosting its remote page.
+  window.curatorNative = Object.freeze({
+    choosePath: directory => invoke('choose_path', { directory: !!directory }),
+    importLocalFolder: groupId => invoke('import_local_folder', { groupId: groupId ?? null }),
+    mediaAction: (id, action) => invoke('media_action', { id, action }),
+    librarySummary: () => invoke('library_summary'),
+  });
   window.fetch = async (input, init = {}) => {
     const path = typeof input === 'string' ? input : input.url;
     if (path.startsWith('/api/') && !path.startsWith('/api/thumb/')) {
@@ -38,7 +47,7 @@ if (window.__TAURI__ && curatorRuntime === 'host') {
     for(const [id,directory] of [['data-dir-input',true],['dep-gallery_dl-path',false],['dep-ffprobe-path',false]]) {
       const input=document.getElementById(id);if(!input)continue;
       const button=document.createElement('button');button.type='button';button.textContent='Browse…';button.className='btn btn-ghost';
-      button.onclick=async()=>{const path=await invoke('choose_path',{directory});if(path){input.value=path;input.dispatchEvent(new Event('input'));}};
+      button.onclick=async()=>{const path=await window.curatorNative.choosePath(directory);if(path){input.value=path;input.dispatchEvent(new Event('input'));}};
       input.after(button);
     }
   });

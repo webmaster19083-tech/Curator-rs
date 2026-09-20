@@ -1,4 +1,4 @@
-CURATOR 0.2.0 — operational reference
+CURATOR 0.3.0 — operational reference
 ======================================
 
 Curator is a self-hosted gallery-dl frontend. It stores sources, media
@@ -76,11 +76,6 @@ Linux current-user Server
     Data/config: ~/.local/share/Curator on typical desktops.
     Background mode: `systemctl --user enable --now curator-server-user`.
 
-macOS current-user Server
-    Program files: user Application Support/Curator location.
-    Data/config: ~/Library/Application Support/Curator.
-    Background mode: LaunchAgent.
-
 All users requires elevation.
 
 Windows all-users Server
@@ -93,17 +88,12 @@ Linux all-users Server
     Data/config: /var/lib/curator.
     Background mode: `systemctl enable --now curator-server`.
 
-macOS all-users Server
-    Program files/static assets: /Library/Application Support/Curator.
-    Data/config: /Library/Application Support/Curator.
-    Background mode: LaunchDaemon.
-
 Host and Viewer app binaries can use either scope while their personal
 preferences remain per-user. Older current-user config.json files adjacent to
 an executable are read as a compatibility fallback; new writes use the scoped
 configuration location.
 
-The Windows registration scripts and Linux/macOS service templates live under
+The Windows registration scripts and Linux service templates live under
 packaging/. Service uninstall removes only registration; it deliberately
 preserves libraries, archives, backups, and P-HAR environments.
 
@@ -244,7 +234,7 @@ at the required threshold. `kissing` and `fondling` never qualify; `cumshot`
 and `facial-cumshot` remain evidence only and never cause automatic Cum.
 
 Native Linux and Windows through WSL2 are the supported first tier. Native
-Windows and native macOS are experimental and cannot be called ready until
+Windows is experimental and cannot be called ready until
 automated environment setup and a real inference probe pass. Local Admin can
 record intent, evaluate/resume, cancel, repair, inspect, self-test, and remove
 the managed environment.
@@ -265,22 +255,14 @@ current-user and all-users Host/Viewer NSIS installers alongside MSI packages,
 plus separate current-user and all-users Server NSIS installers. The Server
 installer has an unchecked P-HAR consent checkbox and registers either a
 scheduled task or Windows service. Linux produces an all-users Server .deb and
-a current-user portable archive with the user-unit installer. macOS produces
-separate Intel and Apple Silicon artifacts with macOS 11 as the deployment
-floor, including an all-users Server .pkg and current-user LaunchAgent archive.
-Host and Viewer Linux jobs also attach portable AppImages beside their `.deb`
+a current-user portable archive with the user-unit installer. Host and Viewer
+Linux jobs also attach portable AppImages beside their `.deb`
 packages for non-elevated use.
-
-Host/Viewer app bundles and Server executables are ad-hoc signed with
-`codesign --sign -`. The Server .pkg is intentionally unsigned unless an
-Apple Installer certificate is supplied. Ad-hoc signatures do not notarize an
-app: Gatekeeper may require an explicit approval.
 
 CI validates format, locked workspace builds/tests, strict Clippy, and browser
 tests once; product/platform jobs upload their artifacts first; one aggregate
 release job attaches them to avoid parallel release races. Packaging smoke
-checks cover service definitions, architecture, resources, signatures, server
-startup, and DMG mounting.
+checks cover service definitions, architecture, resources, and server startup.
 
 
 USE

@@ -1,6 +1,6 @@
 # Curator packaging contracts
 
-Each product consumes the workspace version (`0.2.0`) and keeps its library
+Each product consumes the workspace version (`0.3.0`) and keeps its library
 ownership explicit:
 
 - `curator` is **Curator Server**. It runs headlessly, serves the browser UI,
@@ -20,8 +20,6 @@ downloads a model.
 Linux produces an all-users `.deb` and a current-user portable archive. The
 archive includes `install-current-user.sh` and a rendered systemd-user unit;
 the `.deb` creates a `curator` service account and owns `/var/lib/curator`.
-macOS similarly has an unsigned all-users `.pkg`/LaunchDaemon and a
-current-user archive with `install-current-user.sh`/LaunchAgent.
 
 Host and Viewer Linux release jobs build both Debian packages and portable
 AppImages. The app files may be placed per-user or system-wide; their settings
@@ -40,7 +38,6 @@ curator import-host --from "C:\path\to\host-data" --install-scope all-users
 The command snapshots the Host database, copies library/media artifacts into
 an empty Server directory, and refuses active or non-empty data directories.
 
-macOS Host/Viewer apps and the Server executable are ad-hoc signed with
-`codesign --sign -`. A Server `.pkg` remains unsigned until an Apple Installer
-certificate is supplied. Ad-hoc signing is not notarization; Gatekeeper may
-still require an explicit user approval.
+Future packaging and CI target Windows and Linux. Existing macOS packaging
+assets are retained temporarily for a deliberate cleanup after the native
+Windows/Linux milestone stabilizes; they are not release targets.

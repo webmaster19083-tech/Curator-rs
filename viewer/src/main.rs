@@ -146,7 +146,7 @@ fn normalized_endpoint(raw: &str) -> Result<reqwest::Url, String> {
 async fn tailscale_peers() -> Result<Vec<TailnetPeer>, String> {
     let output = tokio::time::timeout(
         Duration::from_secs(3),
-        tokio::process::Command::new("tailscale")
+        curator::process::command("tailscale")
             .args(["status", "--json"])
             .output(),
     )

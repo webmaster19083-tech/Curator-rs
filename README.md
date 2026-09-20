@@ -1,4 +1,4 @@
-# Curator 0.2.0
+# Curator 0.3.0
 
 Curator is a self-hosted gallery-dl library: download media you are entitled to
 access, organize it with groups/tags/ratings, and browse it locally in a
@@ -25,19 +25,16 @@ choice. App binaries follow the selected scope; Host and Viewer preferences
 stay per-user in either case.
 
 Current-user Server data lives in `%LocalAppData%\Curator` on Windows,
-`~/.local/share/Curator` on typical Linux desktops, and
-`~/Library/Application Support/Curator` on macOS. It runs as a Windows
-scheduled task, `systemd --user` unit, or LaunchAgent.
+`~/.local/share/Curator` on typical Linux desktops. It runs as a Windows
+scheduled task or `systemd --user` unit.
 
-All-users Server data lives in `%ProgramData%\Curator`, `/var/lib/curator`, or
-`/Library/Application Support/Curator`. It requires elevation and runs as a
-Windows service, systemd service, or LaunchDaemon. The package service
+All-users Server data lives in `%ProgramData%\Curator` or `/var/lib/curator`.
+It requires elevation and runs as a Windows service or systemd service. The package service
 templates are in [packaging](packaging/README.md).
 
 Windows Server releases contain separate current-user and all-users NSIS
-installers. The Linux portable archive and macOS current-user archive include
-their non-elevated service installer scripts; Linux `.deb` and macOS `.pkg`
-are the all-users Server packages. Linux Host and Viewer releases also include
+installers. The Linux portable archive includes its non-elevated service
+installer script; Linux `.deb` is the all-users Server package. Linux Host and Viewer releases also include
 portable AppImages alongside their `.deb` packages for current-user use.
 
 To bring a stopped Host library into a new all-users Server location, run the
@@ -100,7 +97,7 @@ automatically.
 
 The managed P-HAR environment pins the upstream source and submodules beneath
 the data directory. Native Linux and Windows via WSL2 are the supported first
-tier; native Windows and macOS remain experimental until automated install and
+tier; native Windows remains experimental until automated install and
 real inference probes pass. Curator does not redistribute or download model
 checkpoints until each checkpoint has a verified upstream right and SHA-256.
 If setup is unavailable or fails, NudeNet/manual review remains operational
@@ -120,11 +117,9 @@ cargo clippy --workspace --all-targets --all-features -- -D warnings
 node --test tests/*.test.js
 ```
 
-Run `curator --docs` for the full operational reference. The packaged macOS
-Host/Viewer apps and Server executable are ad-hoc signed with identity `-`;
-the Server `.pkg` is intentionally unsigned until an Apple Installer
-certificate is available. Ad-hoc signing is not notarization, so Gatekeeper
-may require explicit user approval.
+Run `curator --docs` for the full operational reference. Future desktop
+releases target Windows and Linux; the remaining macOS packaging files are
+retained temporarily only for deliberate removal after native stabilization.
 
 Only add sources you have the right to access, and respect each source site's
 terms and rate limits.

@@ -562,7 +562,7 @@ pub fn default_provider_registry() -> ProviderRegistry {
 
 pub fn build_provider_registry(gallery_dl_bin: &str) -> ProviderRegistry {
     let version = crate::process::output_timeout(
-        std::process::Command::new(gallery_dl_bin).arg("--version"),
+        crate::process::blocking_command(gallery_dl_bin).arg("--version"),
         Duration::from_secs(3),
     )
     .ok()
@@ -577,7 +577,7 @@ pub fn build_provider_registry(gallery_dl_bin: &str) -> ProviderRegistry {
     })
     .filter(|value| !value.is_empty());
     let extractors = crate::process::output_timeout(
-        std::process::Command::new(gallery_dl_bin).arg("--list-extractors"),
+        crate::process::blocking_command(gallery_dl_bin).arg("--list-extractors"),
         Duration::from_secs(5),
     )
     .ok()

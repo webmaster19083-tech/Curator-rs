@@ -9,11 +9,10 @@
 //!
 //! Nothing in here executes shell strings or trusts frontend-supplied paths
 //! without checking them first — see `sanitize_path_input` and
-//! `check_executable`, both of which only ever call `Command::new(..).arg(..)`
-//! with a fixed, explicit argument list.
+//! `check_executable`, both of which use a fixed, explicit argument list
+//! through the central subprocess factory.
 
 use std::path::{Path, PathBuf};
-use std::process::Command;
 use std::time::Duration;
 
 use rusqlite::Connection;
@@ -89,7 +88,10 @@ pub fn check_writable_dir(path: &Path) -> Result<(), String> {
 /// injection surface here regardless of what `bin` contains.
 pub fn check_executable(bin: &str, version_arg: &str) -> DependencyStatus {
     let checked = bin.to_string();
-    match Command::new(bin).arg(version_arg).output() {
+    match crate::process::output_timeout(
+        crate::process::blocking_command(bin).arg(version_arg),
+        Duration::from_secs(5),
+    ) {
         Ok(out) if out.status.success() => {
             let text = String::from_utf8_lossy(&out.stdout);
             let version = text
@@ -158,7 +160,10 @@ pub fn detect_ffprobe(bin: &str) -> DependencyStatus {
 pub fn detect_nsfw_env(python_bin: &str) -> DependencyStatus {
     let checked = python_bin.to_string();
     let probe = "import nudenet";
-    match Command::new(python_bin).args(["-c", probe]).output() {
+    match crate::process::output_timeout(
+        crate::process::blocking_command(python_bin).args(["-c", probe]),
+        Duration::from_secs(5),
+    ) {
         Ok(out) if out.status.success() => DependencyStatus {
             found: true,
             version: None,
@@ -302,7 +307,7 @@ mod tests {
         // Mirrors the existing skip-if-absent pattern used by
         // downloader.rs's own ffmpeg-dependent tests, since ffprobe isn't
         // guaranteed to be installed on every machine running this suite.
-        if Command::new("ffprobe")
+        if crate::process::blocking_command("ffprobe")
             .arg("-version")
             .output()
             .map(|o| o.status.success())

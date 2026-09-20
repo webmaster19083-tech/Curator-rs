@@ -1466,6 +1466,14 @@ body.explorer-ready .legacy-toolbar { display: none !important; }
 #explorer-play-menu button { display: block; width: 100%; padding: 8px 9px; border: 0; border-radius: 6px; color: var(--text-primary); background: transparent; text-align: left; cursor: pointer; }
 #explorer-play-menu button:hover, #explorer-play-menu button.current { background: var(--accent-soft); color: var(--accent-hover); }
 .explorer-toolbar-filters { flex-wrap: wrap; margin-top: 13px; }
+[data-command-context="discover"] .explorer-toolbar-actions,
+[data-command-context="discover"] .explorer-toolbar-filters,
+[data-command-context="organization"] .explorer-toolbar-actions,
+[data-command-context="organization"] .explorer-toolbar-filters,
+[data-command-context="activity"] .explorer-toolbar-actions,
+[data-command-context="activity"] .explorer-toolbar-filters,
+[data-command-context="settings"] .explorer-toolbar-actions,
+[data-command-context="settings"] .explorer-toolbar-filters { display: none; }
 .explorer-type-buttons { padding-right: 8px; border-right: 1px solid var(--line-soft); }
 .explorer-type-filter, .explorer-toolbar-filters select, #explorer-bulk-bar button { min-height: 31px; padding: 5px 9px; border: 1px solid var(--line); border-radius: 7px; color: var(--text-muted); background: var(--bg-elevated); font: 12px var(--font-body); cursor: pointer; }
 .explorer-type-filter.active { color: var(--accent-text); border-color: var(--accent); background: var(--accent); }

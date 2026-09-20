@@ -11,6 +11,7 @@ pub mod misc;
 pub mod oobe;
 pub mod remote;
 pub mod search;
+pub mod session;
 pub mod settings;
 pub mod source_tags;
 pub mod sources;
@@ -94,6 +95,11 @@ pub fn build_router(state: Arc<AppState>) -> Router {
         .route("/api/admin/phar/repair", post(admin::phar_repair))
         .route("/api/admin/phar/self-test", post(admin::phar_self_test))
         .route("/api/library/summary", get(crate::hierarchy::endpoint))
+        // Shared session service: native Slint and remote/recovery clients use
+        // these same typed operations, rather than owning competing clocks.
+        .route("/api/session", get(session::current))
+        .route("/api/session/start", post(session::start))
+        .route("/api/session/command", post(session::control))
         // ── First-run OOBE ─────────────────────────────────────────────────
         // Explicit routes on "/" and "/index.html" take priority over the
         // static-file fallback_service registered in main.rs, so a

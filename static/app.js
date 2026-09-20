@@ -469,6 +469,8 @@ function bindGlobalUI() {
   el('#lightbox-prev').addEventListener('click', () => stepLightbox(-1));
   el('#lightbox-next').addEventListener('click', () => stepLightbox(1));
   el('#create-clips-btn').addEventListener('click', createVideoClips);
+  el('#lightbox-open-native').addEventListener('click', () => nativeMediaAction('open'));
+  el('#lightbox-reveal-native').addEventListener('click', () => nativeMediaAction('reveal'));
   const activeClipJob = localStorage.getItem('curatorClipJob');
   if (activeClipJob) watchClipJob(Number(activeClipJob));
   el('#lightbox-start-slideshow').addEventListener('click', () => startSlideshow(state.lightboxIndex));
@@ -1277,6 +1279,7 @@ async function clearArchivesNow() {
 }
 
 async function openSettingsModal() {
+  document.body.dataset.commandContext = 'settings';
   try {
     const data = await api('/api/settings');
     appSettings = { ...appSettings, ...data };
@@ -1328,6 +1331,7 @@ async function openSettingsModal() {
 function closeSettingsModal() {
   window.stopLocalAdminPolling?.();
   el('#settings-modal').hidden = true;
+  window.refreshExplorerCommandContext?.();
 }
 
 async function saveSettings() {
@@ -1990,6 +1994,9 @@ async function stepLightbox(delta) {
 function renderLightboxItem() {
   const item = state.currentItems[state.lightboxIndex];
   if (!item) return;
+  const nativeFileActions = !!window.curatorNative?.mediaAction && item.downloaded !== 0 && !mediaUnavailable(item);
+  el('#lightbox-open-native').hidden = !nativeFileActions;
+  el('#lightbox-reveal-native').hidden = !nativeFileActions;
   el('#lightbox-clip-tools').hidden = item.type !== 'video' || item.downloaded === 0 || item.clip_parent_id != null || (item.duration_secs != null && item.duration_secs <= clipMaxSeconds());
   const stage = el('#lightbox-stage');
   stage.innerHTML = '';
@@ -2030,6 +2037,17 @@ function renderLightboxItem() {
 
   renderStarRating(el('#lightbox-rating'), item.rating || 0, (rating) => rateMedia(item, rating));
   renderTagRow(item);
+}
+
+async function nativeMediaAction(action) {
+  const item = state.currentItems[state.lightboxIndex];
+  if (!item || !window.curatorNative?.mediaAction || item.downloaded === 0 || mediaUnavailable(item)) return;
+  try {
+    await window.curatorNative.mediaAction(item.id, action);
+  } catch (error) {
+    const label = action === 'reveal' ? 'show the file in its folder' : 'open the file';
+    toast(`Could not ${label}: ${error.message || error}`, true);
+  }
 }
 
 let clipJobPending = false;

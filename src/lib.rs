@@ -506,6 +506,8 @@ pub async fn initialize_with_options(options: InitializeOptions) -> Result<AppSt
         action_model_path: None,
     };
 
+    spawn_session_summary_persistence(&state);
+
     // File size migration is schema-only. Reading metadata for legacy rows is
     // deferred to a bounded background job so startup stays responsive and
     // the Explorer can show real progress rather than a blocked window.
@@ -597,13 +599,16 @@ pub fn router(state: AppState) -> axum::Router {
 }
 
 pub async fn shutdown(state: &AppState) {
-    state.shutdown.cancel();
+    // Stamp and settle the active interval before cancelling observers. The
+    // insert is idempotent, so it safely races the normal terminal observer.
     if let Some(update) = state.sessions.interrupt_active() {
         tracing::info!(session_id = %update.state.session_id, "Marked active session interrupted during shutdown");
         if let Err(error) = persist_session_summary(state, &update.state).await {
             tracing::warn!(session_id = %update.state.session_id, %error, "Could not persist interrupted session summary");
         }
     }
+    state.sessions.stop_runner();
+    state.shutdown.cancel();
     if let Some(worker) = &state.nsfw {
         worker.shutdown().await;
     }
@@ -614,6 +619,57 @@ pub async fn shutdown(state: &AppState) {
     state.server_tasks.close();
     state.download_tasks.wait().await;
     state.server_tasks.wait().await;
+}
+
+/// Terminal persistence is driven by the engine's first EndSession effect,
+/// not by the transport that happened to carry a terminal command. Thus an
+/// unattended automatic completion is durable just like a remote cancel.
+pub fn spawn_session_summary_persistence(state: &AppState) {
+    let mut updates = state.sessions.subscribe();
+    let persistence_state = state.clone();
+    state.download_tasks.spawn(async move {
+        loop {
+            let update = tokio::select! {
+                _ = persistence_state.shutdown.cancelled() => return,
+                update = updates.recv() => match update {
+                    Ok(update) => update,
+                    Err(tokio::sync::broadcast::error::RecvError::Lagged(skipped)) => {
+                        tracing::warn!(skipped, "Session update subscriber lagged; recovering retained terminal snapshot if needed");
+                        let Some(snapshot) = persistence_state.sessions.snapshot() else {
+                            continue;
+                        };
+                        if !matches!(snapshot.status, session::SessionStatus::Completed | session::SessionStatus::Cancelled | session::SessionStatus::Interrupted) {
+                            continue;
+                        }
+                        session::SessionUpdate {
+                            effects: vec![session::SessionEffect::EndSession { status: snapshot.status.clone() }],
+                            state: snapshot,
+                        }
+                    }
+                    Err(tokio::sync::broadcast::error::RecvError::Closed) => return,
+                },
+            };
+            if !update
+                .effects
+                .iter()
+                .any(|effect| matches!(effect, session::SessionEffect::EndSession { .. }))
+            {
+                continue;
+            }
+            loop {
+                match persist_session_summary(&persistence_state, &update.state).await {
+                    Ok(()) => break,
+                    Err(error) => {
+                        tracing::warn!(session_id = %update.state.session_id, %error, "Could not persist terminal session summary; retrying locally");
+                        tokio::select! {
+                            _ = persistence_state.shutdown.cancelled() => return,
+                            _ = tokio::time::sleep(std::time::Duration::from_secs(1)) => {}
+                        }
+                    }
+                }
+            }
+        }
+    });
 }
 
 /// Persist an immutable terminal outcome from the Rust session engine. Native
@@ -638,9 +694,11 @@ pub async fn persist_session_summary(
             "tempo": summary.tempo,
         });
         transaction.execute(
-            "INSERT INTO interactive_sessions(started_at,duration_s,item_count,plan,events,ended_state,timing_corrections)
-             VALUES(?1,?2,?3,?4,?5,?6,?7)",
+            "INSERT INTO interactive_sessions(session_id,started_at,duration_s,item_count,plan,events,ended_state,timing_corrections)
+             VALUES(?1,?2,?3,?4,?5,?6,?7,?8)
+             ON CONFLICT(session_id) WHERE session_id IS NOT NULL DO NOTHING",
             rusqlite::params![
+                summary.session_id,
                 db::now_iso(),
                 i64::try_from(summary.active_elapsed_ms / 1_000).unwrap_or(i64::MAX),
                 i64::try_from(summary.event_history.len()).unwrap_or(i64::MAX),
@@ -691,4 +749,32 @@ pub fn media_path(state: &AppState, id: i64) -> Result<PathBuf> {
     let path = dunce::canonicalize(root.join(relative))?;
     anyhow::ensure!(path.starts_with(root), "File is outside the library");
     Ok(path)
+}
+
+#[cfg(test)]
+mod session_persistence_tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn native_session_summary_insert_is_idempotent_by_session_id() {
+        let root = tempfile::tempdir().unwrap();
+        let state = test_support::state(root.path());
+        let mut engine = session::SessionEngine::new(session::GameConfig::quick_default()).unwrap();
+        let summary = engine
+            .dispatch(session::SessionCommand::Start { monotonic_ms: 0 })
+            .state;
+        persist_session_summary(&state, &summary).await.unwrap();
+        persist_session_summary(&state, &summary).await.unwrap();
+        let count: i64 = state
+            .pool
+            .get()
+            .unwrap()
+            .query_row(
+                "SELECT COUNT(*) FROM interactive_sessions WHERE session_id=?1",
+                [&summary.session_id],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(count, 1);
+    }
 }

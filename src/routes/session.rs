@@ -43,15 +43,9 @@ pub async fn control(
     State(state): State<Arc<AppState>>,
     Json(command): Json<SessionControl>,
 ) -> ApiResult<SessionUpdate> {
-    let terminal_request = matches!(
-        command,
-        SessionControl::End { .. } | SessionControl::Interrupt
-    );
-    let update = state.sessions.control(command).map_err(session_error)?;
-    if terminal_request {
-        crate::persist_session_summary(&state, &update.state)
-            .await
-            .map_err(|error| session_error(error.to_string()))?;
-    }
-    Ok(Json(update))
+    state
+        .sessions
+        .control(command)
+        .map(Json)
+        .map_err(session_error)
 }

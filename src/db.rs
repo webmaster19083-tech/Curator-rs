@@ -681,6 +681,7 @@ pub fn run_migrations(conn: &Connection) -> Result<()> {
     )?;
     let session_cols: HashSet<String> = column_names(conn, "interactive_sessions");
     for (name, definition) in [
+        ("session_id", "TEXT"),
         ("soundtrack_provider", "TEXT"),
         ("bpm", "REAL"),
         ("beat_offset_secs", "REAL"),
@@ -693,6 +694,12 @@ pub fn run_migrations(conn: &Connection) -> Result<()> {
             ))?;
         }
     }
+    // Old GOON/Cock Hero rows intentionally have no native session identity.
+    // Native terminal summaries use this partial key for retry-safe inserts.
+    conn.execute_batch(
+        "CREATE UNIQUE INDEX IF NOT EXISTS idx_interactive_sessions_session_id
+         ON interactive_sessions(session_id) WHERE session_id IS NOT NULL;",
+    )?;
     conn.execute_batch(
         "CREATE TABLE IF NOT EXISTS goon_playlists (
             id INTEGER PRIMARY KEY AUTOINCREMENT,

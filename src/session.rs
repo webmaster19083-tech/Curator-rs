@@ -6,8 +6,13 @@
 
 use rand::{rngs::StdRng, Rng, SeedableRng};
 use serde::{Deserialize, Serialize};
-use std::sync::OnceLock;
+use std::sync::{
+    atomic::{AtomicU64, Ordering},
+    OnceLock,
+};
 use std::time::Instant;
+use tokio::sync::broadcast;
+use tokio_util::sync::CancellationToken;
 
 pub const GAME_CONFIG_SCHEMA_VERSION: u32 = 1;
 
@@ -252,6 +257,7 @@ impl GameConfig {
             if event.id.trim().is_empty()
                 || event.probability_basis_points > 10_000
                 || event.minimum_occurrences > event.maximum_occurrences
+                || event.duration_ms == 0
                 || !event_ids.insert(&event.id)
             {
                 return Err("An event definition is invalid".into());
@@ -262,6 +268,14 @@ impl GameConfig {
                 .any(|id| !phase_ids.contains(id))
             {
                 return Err(format!("Event {} references an unknown phase", event.id));
+            }
+        }
+        for phase in &self.phases {
+            if let Some(event_id) = phase.event_ids.iter().find(|id| !event_ids.contains(*id)) {
+                return Err(format!(
+                    "Phase {} references an unknown event {}",
+                    phase.id, event_id
+                ));
             }
         }
         Ok(())
@@ -337,8 +351,8 @@ pub enum SessionCommand {
     SkipMedia,
     ReportPlaybackFailure { detail: String },
     ChangeTempoOffset { offset_ms: i64 },
-    End { completed: bool },
-    Interrupt,
+    End { completed: bool, monotonic_ms: u64 },
+    Interrupt { monotonic_ms: u64 },
 }
 
 /// UI and HTTP adapters use this clock-free command shape. The shared service
@@ -366,6 +380,7 @@ pub enum SessionEffect {
     ScheduleMetronome { target_bpm: f64, meter: u8 },
     StartPhase { phase_id: String },
     StartEvent { event_id: String, duration_ms: u64 },
+    EndEvent { event_id: String },
     ShowInstruction { text: String },
     SkipMedia,
     PlaybackFailed { detail: String },
@@ -391,9 +406,22 @@ pub struct SessionEngine {
 
 /// Process-shared session ownership. Desktop and HTTP adapters send commands
 /// through this service; neither obtains mutable access to the engine itself.
-#[derive(Clone, Default)]
+#[derive(Clone)]
 pub struct SessionService {
     engine: std::sync::Arc<std::sync::Mutex<Option<SessionEngine>>>,
+    updates: broadcast::Sender<SessionUpdate>,
+    runner: std::sync::Arc<std::sync::Mutex<Option<CancellationToken>>>,
+}
+
+impl Default for SessionService {
+    fn default() -> Self {
+        let (updates, _) = broadcast::channel(64);
+        Self {
+            engine: std::sync::Arc::new(std::sync::Mutex::new(None)),
+            updates,
+            runner: std::sync::Arc::new(std::sync::Mutex::new(None)),
+        }
+    }
 }
 
 impl SessionService {
@@ -410,7 +438,13 @@ impl SessionService {
         }) {
             return Err("A session is already active".into());
         }
-        let engine = SessionEngine::new(config)?;
+        let mut engine = SessionEngine::new(config)?;
+        // Config seeds make selection reproducible, but a durable session ID
+        // must identify each run independently (including repeated test/demo
+        // runs with the same seed).
+        static SESSION_SEQUENCE: AtomicU64 = AtomicU64::new(1);
+        let sequence = SESSION_SEQUENCE.fetch_add(1, Ordering::Relaxed);
+        engine.state.session_id = format!("session-{:016x}-{sequence:016x}", engine.state.seed);
         let snapshot = engine.snapshot();
         *slot = Some(engine);
         Ok(snapshot)
@@ -421,18 +455,49 @@ impl SessionService {
             .engine
             .lock()
             .map_err(|_| "Session service is unavailable")?;
-        slot.as_mut()
+        let update = slot
+            .as_mut()
             .map(|engine| engine.dispatch(command))
-            .ok_or_else(|| "No active session".into())
+            .ok_or_else(|| "No active session".to_string())?;
+        let _ = self.updates.send(update.clone());
+        Ok(update)
+    }
+
+    fn tick_for_session(
+        &self,
+        session_id: &str,
+        monotonic_ms: u64,
+    ) -> Result<SessionUpdate, String> {
+        let mut slot = self
+            .engine
+            .lock()
+            .map_err(|_| "Session service is unavailable")?;
+        let engine = slot
+            .as_mut()
+            .ok_or_else(|| "No active session".to_string())?;
+        if engine.state.session_id != session_id {
+            return Err("Session was replaced".into());
+        }
+        let update = engine.dispatch(SessionCommand::Tick { monotonic_ms });
+        let _ = self.updates.send(update.clone());
+        Ok(update)
     }
 
     /// Starts a session through the shared application boundary and advances
     /// it immediately. Adapters never need to manufacture timestamps.
     pub fn start_running(&self, config: GameConfig) -> Result<SessionUpdate, String> {
+        if self.snapshot().is_some_and(|state| {
+            matches!(state.status, SessionStatus::Running | SessionStatus::Paused)
+        }) {
+            return Err("A session is already active".into());
+        }
+        self.stop_runner();
         self.start(config)?;
-        self.dispatch(SessionCommand::Start {
+        let update = self.dispatch(SessionCommand::Start {
             monotonic_ms: monotonic_ms(),
-        })
+        })?;
+        self.start_runner(update.state.session_id.clone());
+        Ok(update)
     }
 
     /// Converts an adapter intent to the engine command with an authoritative
@@ -441,7 +506,17 @@ impl SessionService {
     pub fn control(&self, control: SessionControl) -> Result<SessionUpdate, String> {
         let now = monotonic_ms();
         let command = match control {
-            SessionControl::Tick => SessionCommand::Tick { monotonic_ms: now },
+            // Kept as a read-compatible remote command, but the application
+            // runner alone advances authoritative time.
+            SessionControl::Tick => {
+                return self
+                    .snapshot()
+                    .map(|state| SessionUpdate {
+                        state,
+                        effects: Vec::new(),
+                    })
+                    .ok_or_else(|| "No active session".into());
+            }
             SessionControl::Pause => SessionCommand::Pause { monotonic_ms: now },
             SessionControl::Resume => SessionCommand::Resume { monotonic_ms: now },
             SessionControl::UserAction { name } => SessionCommand::UserAction { name },
@@ -452,8 +527,11 @@ impl SessionService {
             SessionControl::ChangeTempoOffset { offset_ms } => {
                 SessionCommand::ChangeTempoOffset { offset_ms }
             }
-            SessionControl::End { completed } => SessionCommand::End { completed },
-            SessionControl::Interrupt => SessionCommand::Interrupt,
+            SessionControl::End { completed } => SessionCommand::End {
+                completed,
+                monotonic_ms: now,
+            },
+            SessionControl::Interrupt => SessionCommand::Interrupt { monotonic_ms: now },
         };
         self.dispatch(command)
     }
@@ -466,7 +544,60 @@ impl SessionService {
     }
 
     pub fn interrupt_active(&self) -> Option<SessionUpdate> {
-        self.dispatch(SessionCommand::Interrupt).ok()
+        self.dispatch(SessionCommand::Interrupt {
+            monotonic_ms: monotonic_ms(),
+        })
+        .ok()
+    }
+
+    /// Consumers can render or persist every authoritative engine transition
+    /// without polling. Slow consumers may coalesce updates; timing remains
+    /// owned by the runner, not by a subscriber.
+    pub fn subscribe(&self) -> broadcast::Receiver<SessionUpdate> {
+        self.updates.subscribe()
+    }
+
+    pub fn stop_runner(&self) {
+        if let Ok(mut runner) = self.runner.lock() {
+            if let Some(cancel) = runner.take() {
+                cancel.cancel();
+            }
+        }
+    }
+
+    fn start_runner(&self, session_id: String) {
+        let Ok(handle) = tokio::runtime::Handle::try_current() else {
+            // The native Slint shell may be hosted without a Tokio runtime.
+            // Its commands still work; the application service supplies the
+            // self-advancing runner whenever it is available.
+            return;
+        };
+        let cancellation = CancellationToken::new();
+        if let Ok(mut runner) = self.runner.lock() {
+            if let Some(previous) = runner.replace(cancellation.clone()) {
+                previous.cancel();
+            }
+        }
+        let service = self.clone();
+        handle.spawn(async move {
+            let mut interval = tokio::time::interval(std::time::Duration::from_millis(50));
+            interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+            loop {
+                tokio::select! {
+                    _ = cancellation.cancelled() => break,
+                    _ = interval.tick() => {
+                        if service.snapshot().as_ref().map(|state| &state.session_id) != Some(&session_id) {
+                            break;
+                        }
+                        match service.tick_for_session(&session_id, monotonic_ms()) {
+                            Ok(update) if matches!(update.state.status, SessionStatus::Completed | SessionStatus::Cancelled | SessionStatus::Interrupted) => break,
+                            Ok(_) => {},
+                            Err(_) => break,
+                        }
+                    }
+                }
+            }
+        });
     }
 }
 
@@ -570,15 +701,24 @@ impl SessionEngine {
                 self.state.statistics.timing_corrections += 1;
                 effects.push(SessionEffect::PersistCheckpoint);
             }
-            SessionCommand::End { completed } => self.end(
-                if completed {
-                    SessionStatus::Completed
-                } else {
-                    SessionStatus::Cancelled
-                },
-                &mut effects,
-            ),
-            SessionCommand::Interrupt => self.end(SessionStatus::Interrupted, &mut effects),
+            SessionCommand::End {
+                completed,
+                monotonic_ms,
+            } => {
+                self.settle_terminal_time(monotonic_ms, &mut effects);
+                self.end(
+                    if completed {
+                        SessionStatus::Completed
+                    } else {
+                        SessionStatus::Cancelled
+                    },
+                    &mut effects,
+                );
+            }
+            SessionCommand::Interrupt { monotonic_ms } => {
+                self.settle_terminal_time(monotonic_ms, &mut effects);
+                self.end(SessionStatus::Interrupted, &mut effects);
+            }
             _ => {}
         }
         SessionUpdate {
@@ -587,21 +727,97 @@ impl SessionEngine {
         }
     }
 
+    fn settle_terminal_time(&mut self, monotonic_ms: u64, effects: &mut Vec<SessionEffect>) {
+        match self.state.status {
+            SessionStatus::Running => {
+                self.advance_running_time(monotonic_ms, effects);
+            }
+            SessionStatus::Paused => {
+                if let Some(started) = self.paused_started_ms.take() {
+                    self.state.paused_elapsed_ms = self
+                        .state
+                        .paused_elapsed_ms
+                        .saturating_add(monotonic_ms.saturating_sub(started));
+                }
+            }
+            _ => {}
+        }
+    }
+
     fn tick(&mut self, monotonic_ms: u64, effects: &mut Vec<SessionEffect>) {
         if self.state.status != SessionStatus::Running {
             return;
         }
+        let target = self.advance_running_time(monotonic_ms, effects);
+        if target >= self.config.duration.active_duration_ms {
+            self.end(SessionStatus::Completed, effects);
+        }
+    }
+
+    /// Advance accounting and scheduled milestones without deciding terminal
+    /// status. Explicit End/Interrupt commands call this before applying the
+    /// requested terminal transition.
+    fn advance_running_time(&mut self, monotonic_ms: u64, effects: &mut Vec<SessionEffect>) -> u64 {
         let previous = self
             .last_monotonic_ms
             .replace(monotonic_ms)
             .unwrap_or(monotonic_ms);
-        let elapsed = monotonic_ms.saturating_sub(previous);
-        self.state.active_elapsed_ms = self.state.active_elapsed_ms.saturating_add(elapsed);
-        self.update_phase(effects);
-        self.update_tempo(elapsed, effects);
-        if self.state.active_elapsed_ms >= self.config.duration.active_duration_ms {
-            self.end(SessionStatus::Completed, effects);
+        let target = self
+            .state
+            .active_elapsed_ms
+            .saturating_add(monotonic_ms.saturating_sub(previous))
+            .min(self.config.duration.active_duration_ms);
+        let before = self.state.active_elapsed_ms;
+        self.advance_to_active(target, effects);
+        self.update_tempo(target.saturating_sub(before), effects);
+        target
+    }
+
+    /// Move across each meaningful active-time milestone in order. This keeps
+    /// delayed scheduler ticks equivalent to a sequence of timely ticks.
+    fn advance_to_active(&mut self, target: u64, effects: &mut Vec<SessionEffect>) {
+        while self.state.active_elapsed_ms < target {
+            let current = self.state.active_elapsed_ms;
+            let event_deadline = self
+                .state
+                .current_event
+                .as_ref()
+                .map(|event| event.started_at_active_ms.saturating_add(event.duration_ms));
+            let phase_deadline = self.next_phase_boundary();
+            let next = [Some(target), event_deadline, phase_deadline]
+                .into_iter()
+                .flatten()
+                .filter(|deadline| *deadline > current)
+                .min()
+                .unwrap_or(target);
+            self.state.active_elapsed_ms = next;
+            self.update_phase(effects);
+            if event_deadline == Some(next) {
+                if let Some(event) = self.state.current_event.take() {
+                    effects.push(SessionEffect::EndEvent { event_id: event.id });
+                    if self.state.active_elapsed_ms < self.config.duration.active_duration_ms {
+                        self.schedule_phase_events(effects);
+                    }
+                }
+            }
         }
+        self.update_phase(effects);
+    }
+
+    fn next_phase_boundary(&self) -> Option<u64> {
+        let mut boundary = 0_u64;
+        for phase in self
+            .config
+            .phases
+            .iter()
+            .take(self.config.phases.len().saturating_sub(1))
+        {
+            boundary = boundary.saturating_add(phase.duration_ms);
+            if boundary > self.state.active_elapsed_ms {
+                return Some(boundary);
+            }
+        }
+        None
     }
 
     fn update_phase(&mut self, effects: &mut Vec<SessionEffect>) {
@@ -622,7 +838,13 @@ impl SessionEngine {
             effects.push(SessionEffect::StartPhase {
                 phase_id: self.state.phase.id.clone(),
             });
-            self.schedule_phase_events(effects);
+            // A configured event owns its whole active-time duration even if
+            // phase eligibility changes underneath it.
+            if self.state.current_event.is_none()
+                && self.state.active_elapsed_ms < self.config.duration.active_duration_ms
+            {
+                self.schedule_phase_events(effects);
+            }
         } else {
             self.state.phase.elapsed_ms = remaining;
         }
@@ -677,12 +899,18 @@ impl SessionEngine {
                 .iter()
                 .filter(|record| record.id == definition.id)
                 .count() as u16;
-            let cooldown_met = self.state.event_history.last().is_none_or(|record| {
-                self.state
-                    .active_elapsed_ms
-                    .saturating_sub(record.started_at_active_ms)
-                    >= definition.cooldown_ms
-            });
+            let cooldown_met = self
+                .state
+                .event_history
+                .iter()
+                .rev()
+                .find(|record| record.id == definition.id)
+                .is_none_or(|record| {
+                    self.state
+                        .active_elapsed_ms
+                        .saturating_sub(record.started_at_active_ms)
+                        >= definition.cooldown_ms
+                });
             let required = count < definition.minimum_occurrences;
             let selected = required
                 || (count < definition.maximum_occurrences
@@ -843,6 +1071,10 @@ mod tests {
         let mut invalid = config(1);
         invalid.events[0].allowed_phase_ids = vec!["missing".into()];
         assert!(SessionEngine::new(invalid).is_err());
+
+        let mut invalid = config(1);
+        invalid.phases[0].event_ids = vec!["missing".into()];
+        assert!(SessionEngine::new(invalid).is_err());
     }
 
     #[test]
@@ -886,5 +1118,178 @@ mod tests {
         assert_eq!(update.state.tempo.offset_ms, 240);
         assert_eq!(update.state.active_elapsed_ms, 2_000);
         assert_eq!(update.state.paused_elapsed_ms, 5_000);
+    }
+
+    #[test]
+    fn terminal_commands_settle_running_and_paused_intervals_once() {
+        let mut running = SessionEngine::new(config(31)).unwrap();
+        running.dispatch(SessionCommand::Start { monotonic_ms: 100 });
+        let ended = running.dispatch(SessionCommand::End {
+            completed: false,
+            monotonic_ms: 1_100,
+        });
+        assert_eq!(ended.state.active_elapsed_ms, 1_000);
+        assert_eq!(ended.state.status, SessionStatus::Cancelled);
+        assert_eq!(
+            ended
+                .effects
+                .iter()
+                .filter(|effect| matches!(effect, SessionEffect::EndSession { .. }))
+                .count(),
+            1
+        );
+        let repeated = running.dispatch(SessionCommand::End {
+            completed: false,
+            monotonic_ms: 2_100,
+        });
+        assert_eq!(repeated.state.active_elapsed_ms, 1_000);
+        assert!(repeated.effects.is_empty());
+
+        let mut paused = SessionEngine::new(config(32)).unwrap();
+        paused.dispatch(SessionCommand::Start { monotonic_ms: 100 });
+        paused.dispatch(SessionCommand::Pause {
+            monotonic_ms: 1_100,
+        });
+        let ended = paused.dispatch(SessionCommand::Interrupt {
+            monotonic_ms: 9_100,
+        });
+        assert_eq!(ended.state.active_elapsed_ms, 1_000);
+        assert_eq!(ended.state.paused_elapsed_ms, 8_000);
+        assert_eq!(ended.state.status, SessionStatus::Interrupted);
+    }
+
+    #[test]
+    fn delayed_ticks_emit_every_crossed_phase_in_order() {
+        let mut cfg = config(41);
+        cfg.phases = vec![
+            PhaseConfig {
+                id: "one".into(),
+                duration_ms: 2_000,
+                tempo_multiplier: 1.0,
+                event_ids: vec![],
+            },
+            PhaseConfig {
+                id: "two".into(),
+                duration_ms: 2_000,
+                tempo_multiplier: 1.0,
+                event_ids: vec![],
+            },
+            PhaseConfig {
+                id: "three".into(),
+                duration_ms: 6_000,
+                tempo_multiplier: 1.0,
+                event_ids: vec![],
+            },
+        ];
+        cfg.events.clear();
+        let mut engine = SessionEngine::new(cfg).unwrap();
+        engine.dispatch(SessionCommand::Start { monotonic_ms: 0 });
+        let update = engine.dispatch(SessionCommand::Tick {
+            monotonic_ms: 6_500,
+        });
+        let phases: Vec<_> = update
+            .effects
+            .iter()
+            .filter_map(|effect| match effect {
+                SessionEffect::StartPhase { phase_id } => Some(phase_id.as_str()),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(phases, ["two", "three"]);
+        assert_eq!(update.state.statistics.phase_changes, 2);
+    }
+
+    #[test]
+    fn active_event_survives_phase_change_then_expires_at_its_deadline() {
+        let mut cfg = config(51);
+        cfg.events[0].duration_ms = 6_000;
+        let mut engine = SessionEngine::new(cfg).unwrap();
+        engine.dispatch(SessionCommand::Start { monotonic_ms: 0 });
+        let boundary = engine.dispatch(SessionCommand::Tick {
+            monotonic_ms: 5_000,
+        });
+        assert_eq!(boundary.state.phase.id, "finish");
+        assert_eq!(
+            boundary
+                .state
+                .current_event
+                .as_ref()
+                .map(|event| event.id.as_str()),
+            Some("cue")
+        );
+        assert!(!boundary
+            .effects
+            .iter()
+            .any(|effect| matches!(effect, SessionEffect::EndEvent { .. })));
+        let expiry = engine.dispatch(SessionCommand::Tick {
+            monotonic_ms: 6_000,
+        });
+        assert!(expiry.state.current_event.is_none());
+        assert!(expiry.effects.iter().any(
+            |effect| matches!(effect, SessionEffect::EndEvent { event_id } if event_id == "cue")
+        ));
+    }
+
+    #[test]
+    fn cooldown_uses_the_latest_matching_event_not_an_interleaved_event() {
+        let mut cfg = config(61);
+        cfg.phases[0].event_ids = vec!["a".into()];
+        cfg.events = vec![EventDefinition {
+            id: "a".into(),
+            probability_basis_points: 10_000,
+            minimum_occurrences: 0,
+            maximum_occurrences: 3,
+            cooldown_ms: 5_000,
+            duration_ms: 1_000,
+            priority: 1,
+            allowed_phase_ids: vec!["warmup".into()],
+            instruction: None,
+        }];
+        let mut engine = SessionEngine::new(cfg).unwrap();
+        engine.state.active_elapsed_ms = 11_000;
+        engine.state.event_history = vec![
+            EventRecord {
+                id: "a".into(),
+                started_at_active_ms: 0,
+                duration_ms: 1_000,
+            },
+            EventRecord {
+                id: "other".into(),
+                started_at_active_ms: 9_000,
+                duration_ms: 1_000,
+            },
+        ];
+        let mut effects = Vec::new();
+        engine.schedule_phase_events(&mut effects);
+        assert!(effects.iter().any(
+            |effect| matches!(effect, SessionEffect::StartEvent { event_id, .. } if event_id == "a")
+        ));
+    }
+
+    #[tokio::test]
+    async fn service_runner_completes_a_started_session_without_a_client_tick() {
+        let service = SessionService::default();
+        let mut updates = service.subscribe();
+        let mut cfg = config(71);
+        cfg.duration.active_duration_ms = 1;
+        cfg.phases[0].duration_ms = 1;
+        cfg.phases.truncate(1);
+        let started = service.start_running(cfg).unwrap();
+        assert_eq!(started.state.status, SessionStatus::Running);
+        let terminal = tokio::time::timeout(std::time::Duration::from_secs(1), async {
+            loop {
+                let update = updates.recv().await.unwrap();
+                if update
+                    .effects
+                    .iter()
+                    .any(|effect| matches!(effect, SessionEffect::EndSession { .. }))
+                {
+                    return update;
+                }
+            }
+        })
+        .await
+        .expect("the 50 ms authoritative runner should complete the session");
+        assert_eq!(terminal.state.status, SessionStatus::Completed);
     }
 }

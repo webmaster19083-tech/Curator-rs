@@ -60,10 +60,15 @@ pub fn set_start_with_windows(enabled: bool) -> Result<(), String> {
     })
 }
 
+// These helpers are exercised by unit tests on every platform, but are only
+// needed by the production Host process on Windows. Keeping them out of a
+// non-Windows release build avoids dead-code failures under CI's `-D warnings`.
+#[cfg(any(windows, test))]
 fn run_value(executable: &std::path::Path) -> String {
     format!("\"{}\" --background", executable.display())
 }
 
+#[cfg(any(windows, test))]
 fn command_executable(command: &str) -> Option<String> {
     let command = command.trim();
     if let Some(rest) = command.strip_prefix('"') {
@@ -72,6 +77,7 @@ fn command_executable(command: &str) -> Option<String> {
     command.split_whitespace().next().map(ToString::to_string)
 }
 
+#[cfg(any(windows, test))]
 fn same_path(left: &str, right: &std::path::Path) -> bool {
     left.trim_matches('"')
         .eq_ignore_ascii_case(&right.to_string_lossy())
@@ -80,6 +86,7 @@ fn same_path(left: &str, right: &std::path::Path) -> bool {
 /// Pure classification seam for tests and for a clear stale-path diagnosis.
 /// `actual_executable_exists` is supplied by the caller because a Run entry
 /// can outlive an uninstalled/moved executable.
+#[cfg(any(windows, test))]
 pub fn classify_startup_command(
     actual: Option<&str>,
     expected_executable: &std::path::Path,

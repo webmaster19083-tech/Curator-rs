@@ -74,6 +74,13 @@ pub fn get_or_create_thumb_sync(media_id: i64, src: &Path, thumbs_dir: &Path) ->
     let stamp_path = thumbs_dir.join(format!("{media_id}.stamp"));
     let failed_path = thumbs_dir.join(format!("{media_id}.failed"));
     if thumb_path.is_file() && std::fs::read_to_string(&stamp_path).ok().as_ref() == Some(&stamp) {
+        // `modified` is the portable LRU signal used by Media & Storage.
+        // Ignore a touch failure: serving an otherwise valid thumbnail should
+        // never fail merely because a filesystem does not support it.
+        let _ = std::fs::OpenOptions::new()
+            .write(true)
+            .open(&thumb_path)
+            .and_then(|file| file.set_modified(SystemTime::now()));
         return Ok(std::fs::read(&thumb_path)?);
     }
     if std::fs::read_to_string(&failed_path).ok().as_ref() == Some(&stamp) {

@@ -147,7 +147,12 @@ pub async fn list(
         String::new()
     };
 
-    let mut extra = String::from(" AND m.missing=0");
+    // Retention and size-limit decisions keep a durable media row so users
+    // can see why an original is unavailable. Ordinary missing files remain
+    // hidden, preserving the historical library behavior.
+    let mut extra = String::from(
+        " AND (m.missing=0 OR COALESCE(m.retention_deleted,0)=1 OR m.skip_reason IS NOT NULL)",
+    );
     let rating_status_clause = match q.rating_status.as_deref().unwrap_or("") {
         "" | "all" => String::new(),
         "unrated" => format!(" AND m.human_rating IS NULL AND NOT ({HUMAN_PACE_TAG_SQL}) AND m.auto_rating=0 AND m.action_rating=0"),
@@ -307,7 +312,7 @@ pub async fn list(
     let limit_param = params.len();
     let pace_label = pace_label_sql();
     let query = format!(
-        "SELECT m.id,m.source_id,m.filepath,m.filename,m.type,m.added_at,m.downloaded_at,m.modified_at,{EFFECTIVE_RATING_SQL} AS rating,{pace_label} AS pace_label,m.human_rating,m.auto_rating,m.auto_rating_score,m.action_rating,m.rating_source,m.rating_reviewed,m.rating_reviewed_at,m.origin_url,m.downloaded,m.duration_secs,m.clip_parent_id,m.file_size_bytes,m.clip_start_secs,m.clip_end_secs,m.classifier_model,m.classifier_version,m.classifier_score,m.classifier_evidence,m.action_model,m.action_model_version,m.action_score,m.action_evidence,m.classification_label,m.manual_review_required,m.manual_review_reason,m.classification_updated_at,CASE WHEN m.clip_start_secs IS NOT NULL THEN (SELECT filepath FROM media parent WHERE parent.id=m.clip_parent_id) ELSE m.filepath END AS playback_filepath, {key} AS _cursor_key, s.group_id AS _source_group_id, (SELECT GROUP_CONCAT(mg.group_id, ',') FROM media_groups mg WHERE mg.media_id=m.id) AS _media_group_ids, s.name AS source, s.url AS source_url, (SELECT sm.creator FROM source_metadata sm WHERE sm.media_id=m.id ORDER BY sm.id DESC LIMIT 1) AS creator, \
+        "SELECT m.id,m.source_id,m.filepath,m.filename,m.type,m.added_at,m.downloaded_at,m.modified_at,{EFFECTIVE_RATING_SQL} AS rating,{pace_label} AS pace_label,m.human_rating,m.auto_rating,m.auto_rating_score,m.action_rating,m.rating_source,m.rating_reviewed,m.rating_reviewed_at,m.origin_url,m.downloaded,m.duration_secs,m.clip_parent_id,m.file_size_bytes,m.clip_start_secs,m.clip_end_secs,m.classifier_model,m.classifier_version,m.classifier_score,m.classifier_evidence,m.action_model,m.action_model_version,m.action_score,m.action_evidence,m.classification_label,m.manual_review_required,m.manual_review_reason,m.classification_updated_at,m.skip_reason,m.skip_limit_bytes,m.skipped_at,m.retention_deleted,CASE WHEN m.clip_start_secs IS NOT NULL THEN (SELECT filepath FROM media parent WHERE parent.id=m.clip_parent_id) ELSE m.filepath END AS playback_filepath, {key} AS _cursor_key, s.group_id AS _source_group_id, (SELECT GROUP_CONCAT(mg.group_id, ',') FROM media_groups mg WHERE mg.media_id=m.id) AS _media_group_ids, s.name AS source, s.url AS source_url, (SELECT sm.creator FROM source_metadata sm WHERE sm.media_id=m.id ORDER BY sm.id DESC LIMIT 1) AS creator, \
             (SELECT GROUP_CONCAT(t.name, ',') FROM media_tags mt \
              JOIN tags t ON t.id = mt.tag_id WHERE mt.media_id = m.id) AS tags_csv \
          FROM media m \

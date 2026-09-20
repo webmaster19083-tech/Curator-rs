@@ -29,11 +29,11 @@ const explorer = {
   layout: localStorage.getItem('curator-library-layout') || 'grid',
   sourceCollapsed: new Set(),
   activityTimer: null,
-  adminTimer: null,
-  adminAvailable: false,
   goon: null,
   sizeBackfillRequest: false,
 };
+
+let settingsAdminTimer = null;
 
 try {
   explorer.sourceCollapsed = new Set(JSON.parse(localStorage.getItem('curator-source-hierarchy-collapsed') || '[]'));
@@ -296,7 +296,8 @@ function selectAllVisible() {
 
 function explorerBuildTile(item, index) {
   const row = document.createElement('article');
-  row.className = `explorer-row${item.type === 'video' ? ' explorer-row-video' : ''}`;
+  const unavailable = mediaUnavailable(item);
+  row.className = `explorer-row${item.type === 'video' ? ' explorer-row-video' : ''}${unavailable ? ' explorer-row-unavailable' : ''}`;
   row.dataset.mediaId = item.id;
   row.dataset.index = index;
   row.tabIndex = 0;
@@ -319,9 +320,9 @@ function explorerBuildTile(item, index) {
 
   const name = document.createElement('div');
   name.className = 'explorer-name';
-  const preview = document.createElement(item.type === 'video' ? 'video' : 'img');
+  const preview = document.createElement(item.type === 'video' && !unavailable ? 'video' : 'img');
   preview.className = 'explorer-thumb';
-  if (item.type === 'video') {
+  if (item.type === 'video' && !unavailable) {
     preview.muted = true;
     preview.preload = 'metadata';
     preview.dataset.src = mediaFullSrc(item);
@@ -335,6 +336,7 @@ function explorerBuildTile(item, index) {
   const nameText = document.createElement('span');
   nameText.className = 'explorer-name-text';
   nameText.textContent = item.filename || 'Untitled media';
+  if (unavailable) nameText.title = item.skip_reason || 'Original unavailable; metadata remains.';
   name.append(preview, nameText);
   row.append(name);
 
@@ -438,7 +440,7 @@ function navigateTo(section) {
   }
   explorer.active = section; state.explorerSection = section; explorer.nav = section;
   clearExplorerSelection(); updateNavigation();
-  updateExplorerLocation(({ search: 'Search', sources: 'Sources', creators: 'Creators', groups: 'Groups', tags: 'Tags', ratings: 'Ratings', downloads: 'Downloads', admin: 'Local Admin' })[section] || 'Library');
+  updateExplorerLocation(({ search: 'Search', sources: 'Sources', creators: 'Creators', groups: 'Groups', tags: 'Tags', ratings: 'Ratings', downloads: 'Downloads' })[section] || 'Library');
   return renderExplorerPanel(section);
 }
 
@@ -984,21 +986,9 @@ function stopActivityPolling() {
 }
 
 function stopAdminPolling() {
-  if (explorer.adminTimer) { clearInterval(explorer.adminTimer); explorer.adminTimer = null; }
+  if (settingsAdminTimer) { clearInterval(settingsAdminTimer); settingsAdminTimer = null; }
 }
-
-async function configureAdminUi() {
-  const button = explorerEl('#explorer-admin-nav');
-  if (!button || window.curatorRuntime === 'viewer') return;
-  try {
-    await api('/api/admin/jobs');
-    explorer.adminAvailable = true;
-    button.hidden = false;
-  } catch (_) {
-    explorer.adminAvailable = false;
-    button.hidden = true;
-  }
-}
+window.stopLocalAdminPolling = stopAdminPolling;
 
 function adminActionButton(label, kind, confirmation, description) {
   const card = document.createElement('article'); card.className = 'explorer-card admin-action';
@@ -1010,7 +1000,7 @@ function adminActionButton(label, kind, confirmation, description) {
     try {
       await api('/api/admin/jobs', { method: 'POST', body: JSON.stringify({ kind, confirmation: typed || '' }) });
       toast('Maintenance job queued.');
-      const panel = explorerEl('#explorer-panel'); if (panel) refreshAdminPanel(panel);
+      const panel = explorerEl('#settings-local-admin'); if (panel) refreshAdminPanel(panel);
     } catch (error) { toast(`Could not start maintenance: ${error.message}`, true); }
   });
   card.append(title, detail, button); return card;
@@ -1062,7 +1052,7 @@ function renderAdminPhar(target, phar) {
   target.append(detail);
   if (!phar) return;
   const actions = document.createElement('div'); actions.className = 'explorer-card-actions';
-  const refresh = () => { const panel = target.closest('.explorer-panel'); if (panel) refreshAdminPanel(panel); };
+  const refresh = () => { const panel = target.closest('.settings-local-admin'); if (panel) refreshAdminPanel(panel); };
   const intent = panelButton(phar.requested ? 'Disable P-HAR' : 'Enable P-HAR setup');
   intent.addEventListener('click', async () => {
     try { await api('/api/admin/phar', { method: 'POST', body: JSON.stringify({ enabled: !phar.requested }) }); refresh(); }
@@ -1092,7 +1082,7 @@ function renderAdminPhar(target, phar) {
 }
 
 async function refreshAdminPanel(panel) {
-  if (explorer.active !== 'admin' || !panel.isConnected) return;
+  if (!window.isSettingsTabActive?.('local-admin') || document.hidden || !panel.isConnected) return;
   try {
     const [backups, jobs, phar] = await Promise.all([api('/api/admin/backups'), api('/api/admin/jobs'), api('/api/admin/phar')]);
     renderAdminPhar(explorerEl('#admin-phar', panel), phar);
@@ -1100,11 +1090,12 @@ async function refreshAdminPanel(panel) {
     renderAdminJobs(explorerEl('#admin-job-list', panel), jobs.jobs || []);
   } catch (error) {
     const status = explorerEl('#admin-status', panel); if (status) status.textContent = `Admin unavailable: ${error.message}`;
+    stopAdminPolling();
   }
 }
 
 function renderAdminPanel(panel) {
-  stopActivityPolling(); stopAdminPolling();
+  stopAdminPolling();
   panel.replaceChildren(makePanelHeading('Local Admin', 'Recovery and maintenance are available only on this device. Each destructive job first creates a database/configuration backup, pauses workers, and records progress below.'));
   const status = document.createElement('p'); status.id = 'admin-status'; status.className = 'muted'; panel.append(status);
   const phar = document.createElement('section'); phar.id = 'admin-phar'; phar.className = 'admin-phar'; panel.append(phar);
@@ -1128,14 +1119,15 @@ function renderAdminPanel(panel) {
     ['Reconcile library metadata', 'reconcile_library', '', 'Check the media library and restart file-size backfill.'],
     ['Factory reset database/settings', 'factory_reset', 'RESET CURATOR', 'Stages reset for restart; media, archives, P-HAR, and backups remain.'],
     ['Delete P-HAR environment', 'remove_phar_environment', 'DELETE P-HAR', 'Remove the managed P-HAR files and disable its setup request.'],
-    ['Delete archives', 'remove_archives', 'DELETE ARCHIVES', 'Remove downloaded archive files; media remains.'],
+    ['Delete archives', 'remove_archives', 'DELETE ARCHIVES', 'Remove downloaded archive files; media remains. gallery-dl may reconsider older posts on a later sync.'],
   ].forEach(([label, kind, confirmation, description]) => actions.append(adminActionButton(label, kind, confirmation, description)));
   panel.append(actions);
   const jobsHeading = document.createElement('h3'); jobsHeading.className = 'panel-subhead'; jobsHeading.textContent = 'Jobs'; panel.append(jobsHeading);
   const jobs = document.createElement('div'); jobs.id = 'admin-job-list'; jobs.className = 'admin-list'; panel.append(jobs);
   refreshAdminPanel(panel);
-  explorer.adminTimer = setInterval(() => refreshAdminPanel(panel), 1200);
+  settingsAdminTimer = setInterval(() => refreshAdminPanel(panel), 1200);
 }
+window.renderSettingsLocalAdmin = renderAdminPanel;
 async function refreshActivityPanel(panel) {
   if (explorer.active !== 'downloads' || document.hidden || !panel.isConnected) return;
   const status = explorerEl('#activity-status', panel); const list = explorerEl('#activity-source-list', panel);
@@ -1177,7 +1169,6 @@ async function renderDownloadsPanel(panel) {
 async function renderExplorerPanel(section) {
   if (!explorer.installed) return;
   if (section !== 'downloads') stopActivityPolling();
-  if (section !== 'admin') stopAdminPolling();
   if (section === 'media') return explorerLoadView();
   const request = ++explorer.panelRequest; setExplorerVisible(false);
   const panel = explorerEl('#explorer-panel'); if (!panel) return; panel.replaceChildren();
@@ -1188,7 +1179,6 @@ async function renderExplorerPanel(section) {
   else if (section === 'tags') await renderTagsPanel(panel);
   else if (section === 'ratings') renderRatingsPanel(panel);
   else if (section === 'downloads') await renderDownloadsPanel(panel);
-  else if (section === 'admin') renderAdminPanel(panel);
   if (request !== explorer.panelRequest) return;
 }
 
@@ -1235,19 +1225,11 @@ function installExplorerUi() {
   topNavigation.className = 'explorer-top-navigation';
   topNavigation.setAttribute('aria-label', 'Primary navigation');
   topNavigation.innerHTML = '<button type="button" data-top-nav="library">Library</button><button type="button" data-top-nav="discover">Discover</button><button type="button" data-top-nav="organization">Organization</button><button type="button" data-top-nav="activity">Activity <span id="topnav-download-count" class="nav-count" hidden></span></button><button type="button" data-top-nav="settings">Settings</button>';
-  const adminNavigation = document.createElement('button');
-  adminNavigation.id = 'explorer-admin-nav';
-  adminNavigation.type = 'button';
-  adminNavigation.dataset.topNav = 'admin';
-  adminNavigation.textContent = 'Admin';
-  adminNavigation.hidden = true;
-  topNavigation.append(adminNavigation);
   explorerEl('.explorer-toolbar-top', toolbar).after(topNavigation);
   const topDestinations = { library: 'all', discover: 'search', organization: 'groups', activity: 'downloads' };
   explorerAll('[data-top-nav]', topNavigation).forEach((button) => button.addEventListener('click', () => {
     const destination = button.dataset.topNav;
     if (destination === 'settings') { openSettingsModal(); return; }
-    if (destination === 'admin') { navigateTo('admin'); return; }
     navigateTo(topDestinations[destination] || 'all');
   }));
   const sizeBackfill = document.createElement('small');
@@ -1328,7 +1310,6 @@ function installExplorerUi() {
     else if (explorer.active === 'downloads') renderExplorerPanel('downloads');
   });
   void restorePlayMode(); updateNavigation(); updateBulkUI();
-  void configureAdminUi();
 }
 
 // This script is loaded after the library markup and app.js.  Installing

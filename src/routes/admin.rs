@@ -315,4 +315,15 @@ mod tests {
         let peer = Some(ConnectInfo(SocketAddr::from(([100, 88, 0, 1], 42168))));
         assert!(local_only(&state, &peer).is_err());
     }
+
+    #[test]
+    fn loopback_host_can_use_admin_but_viewer_cannot() {
+        let root = tempfile::tempdir().unwrap();
+        let state = crate::test_support::state(root.path());
+        let peer = Some(ConnectInfo(SocketAddr::from(([127, 0, 0, 1], 42168))));
+        assert!(local_only(&state, &peer).is_ok());
+        let mut viewer = (*state).clone();
+        viewer.edition = crate::edition::Edition::Viewer;
+        assert!(local_only(&viewer, &peer).is_err());
+    }
 }

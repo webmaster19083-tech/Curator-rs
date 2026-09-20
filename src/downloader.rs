@@ -212,6 +212,25 @@ pub struct PreviewItem {
     pub title: String,
     pub poster: Option<String>,
     pub source: String,
+    /// gallery-dl exposes a size for some extractors during `-j` listing.
+    /// It lets Curator mark an oversized item before a download is attempted;
+    /// absent metadata still falls back to gallery-dl's --filesize-max guard.
+    pub remote_size_bytes: Option<u64>,
+}
+
+fn preview_size_bytes(meta: Option<&serde_json::Map<String, Value>>) -> Option<u64> {
+    let value = meta?
+        .get("filesize")
+        .or_else(|| meta?.get("file_size"))
+        .or_else(|| meta?.get("size"))?;
+    value
+        .as_u64()
+        .or_else(|| value.as_i64().and_then(|number| u64::try_from(number).ok()))
+        .or_else(|| {
+            value
+                .as_str()
+                .and_then(|number| number.trim().parse::<u64>().ok())
+        })
 }
 
 pub fn preview_ext_from(meta: &Value, url: &str) -> String {
@@ -284,6 +303,7 @@ pub fn preview_walk(
                             .and_then(|m| m.get("thumbnail").or_else(|| m.get("preview")))
                             .and_then(|v| v.as_str())
                             .map(|s| s.to_string());
+                        let remote_size_bytes = preview_size_bytes(meta);
 
                         results.push(PreviewItem {
                             url: url_str.to_string(),
@@ -292,6 +312,7 @@ pub fn preview_walk(
                             title,
                             poster,
                             source: source_url.to_string(),
+                            remote_size_bytes,
                         });
                     }
                 }
@@ -488,6 +509,7 @@ pub fn index_file(state: &AppState, source_id: i64, path: &Path) -> Result<bool>
           filepath=excluded.filepath, filename=excluded.filename, downloaded=1, missing=0,
           file_stamp=excluded.file_stamp, modified_at=COALESCE(excluded.modified_at,media.modified_at),
           downloaded_at=CASE WHEN media.downloaded=0 OR media.missing=1 THEN excluded.downloaded_at ELSE media.downloaded_at END,
+          skip_reason=NULL, skip_limit_bytes=NULL, skipped_at=NULL, retention_deleted=0,
           nsfw_state='pending', nsfw_attempts=0, nsfw_retry_at=0, duration_attempted=0,
           action_rating=0, action_model=NULL, action_model_version=NULL, action_score=NULL, action_evidence=NULL,
           classifier_model=NULL, classifier_version=NULL, classifier_score=NULL, classifier_evidence=NULL,
@@ -495,6 +517,7 @@ pub fn index_file(state: &AppState, source_id: i64, path: &Path) -> Result<bool>
           duration_secs=CASE WHEN media.file_stamp=excluded.file_stamp THEN media.duration_secs ELSE NULL END
         ON CONFLICT(filepath) DO UPDATE SET downloaded=1, missing=0, file_stamp=excluded.file_stamp,
           origin_url=COALESCE(excluded.origin_url,media.origin_url), nsfw_state='pending', nsfw_attempts=0,
+          skip_reason=NULL, skip_limit_bytes=NULL, skipped_at=NULL, retention_deleted=0,
           action_rating=0, action_model=NULL, action_model_version=NULL, action_score=NULL, action_evidence=NULL,
           classifier_model=NULL, classifier_version=NULL, classifier_score=NULL, classifier_evidence=NULL,
           classification_label='unclassified', manual_review_required=0, manual_review_reason=NULL,
@@ -571,6 +594,46 @@ pub fn scan_and_index(state: &AppState, source_id: i64, dest: &Path) -> Result<(
     Ok((total, added))
 }
 
+async fn pause_after_active_storage_limit(
+    state: &Arc<AppState>,
+    source_id: i64,
+    destination: &Path,
+) {
+    if state.storage_pauses.lock().await.contains_key(&source_id) {
+        return;
+    }
+    let Some(slug) = destination
+        .file_name()
+        .and_then(|value| value.to_str())
+        .map(str::to_owned)
+    else {
+        return;
+    };
+    let settings = state.settings.read().await.clone();
+    let check_state = state.clone();
+    let pause = tokio::task::spawn_blocking(move || {
+        crate::storage::active_sync_pause(
+            &settings,
+            &check_state.data_dir,
+            &check_state.library_dir,
+            &slug,
+            true,
+        )
+    })
+    .await
+    .ok()
+    .flatten();
+    let Some(pause) = pause else { return };
+    state
+        .storage_pauses
+        .lock()
+        .await
+        .insert(source_id, pause.clone());
+    if let Some(pid) = state.active_processes.lock().await.get(&source_id).copied() {
+        kill_pid(pid).await;
+    }
+}
+
 /// A single consumer serializes event batches, recovery scans and the final scan.
 async fn index_download(
     state: Arc<AppState>,
@@ -642,23 +705,58 @@ async fn index_download(
         };
         let s = state.clone();
         let d = dest.clone();
-        let result=tokio::task::spawn_blocking(move || -> Result<()> {
+        let settings = state.settings.read().await.clone();
+        let result=tokio::task::spawn_blocking(move || -> Result<(bool, Option<crate::storage::SyncPause>)> {
             let _worker_lease = worker_lease;
-            if scan { scan_and_index(&s,source_id,&d)?; }
-            else {
-                for mut path in paths {
-                    if path.extension().is_some_and(|e| e=="json") { path.set_extension(""); }
-                    if path.is_file() { index_file(&s,source_id,&path)?; }
-                    else if let Ok(rel)=path.strip_prefix(&s.library_dir) {
-                        let conn=s.pool.get()?;
-                        conn.execute("UPDATE media SET missing=1,downloaded=0,nsfw_state='missing' WHERE filepath=?1 AND downloaded=1",[rel.to_string_lossy().replace('\\',"/")])?;
+            // Check directly after each newly indexed remote file instead of
+            // after an event batch. This keeps a source quota bounded to one
+            // file beyond its allowance even when the watcher coalesces many
+            // filesystem notifications.
+            let candidates: Vec<PathBuf> = if scan {
+                walkdir::WalkDir::new(&d)
+                    .into_iter()
+                    .filter_map(|entry| entry.ok())
+                    .filter(|entry| entry.file_type().is_file())
+                    .map(|entry| entry.path().to_path_buf())
+                    .collect()
+            } else {
+                paths.into_iter().collect()
+            };
+            let mut indexed_any = false;
+            for mut path in candidates {
+                if path.extension().is_some_and(|e| e=="json") { path.set_extension(""); }
+                if path.is_file() {
+                    let indexed = index_file(&s,source_id,&path)?;
+                    indexed_any |= indexed;
+                    if indexed {
+                        let slug = d.file_name().and_then(|value| value.to_str()).unwrap_or_default();
+                        if let Some(pause) = crate::storage::active_sync_pause(
+                            &settings, &s.data_dir, &s.library_dir, slug, true,
+                        ) {
+                            return Ok((indexed_any, Some(pause)));
+                        }
                     }
+                } else if let Ok(rel)=path.strip_prefix(&s.library_dir) {
+                    let conn=s.pool.get()?;
+                    conn.execute("UPDATE media SET missing=1,downloaded=0,nsfw_state='missing' WHERE filepath=?1 AND downloaded=1",[rel.to_string_lossy().replace('\\',"/")])?;
                 }
             }
-            Ok(())
+            Ok((indexed_any, None))
         }).await;
-        if let Ok(Err(e)) = result {
-            warn!("Indexing source {source_id} failed: {e}");
+        match result {
+            Ok(Ok((indexed_any, forced_pause))) => {
+                if let Some(pause) = forced_pause {
+                    state.storage_pauses.lock().await.insert(source_id, pause);
+                    if let Some(pid) = state.active_processes.lock().await.get(&source_id).copied()
+                    {
+                        kill_pid(pid).await;
+                    }
+                } else if indexed_any {
+                    pause_after_active_storage_limit(&state, source_id, &dest).await;
+                }
+            }
+            Ok(Err(e)) => warn!("Indexing source {source_id} failed: {e}"),
+            Err(e) => warn!("Indexing source {source_id} worker failed: {e}"),
         }
         if scan {
             // Even a scan that takes longer than the interval must leave a quiet gap.
@@ -675,13 +773,11 @@ async fn index_download(
 //
 // Pre-scans a source via `gallery-dl -j` and inserts downloaded=0 placeholder
 // rows so the UI can show "coming soon" tiles before the real download
-// finishes. Deliberately stays on plain INSERT OR IGNORE rather than the
-// ON CONFLICT ... DO UPDATE upsert scan_and_index uses: if a real download
-// already retired this origin_url into a downloaded=1 row, a placeholder
-// re-insert for the same (source_id, origin_url) must be silently dropped,
-// never regress that row back to downloaded=0. INSERT OR IGNORE guarantees
-// that unconditionally, for any conflict, without needing to reason about
-// which specific column changed.
+// finishes. Its origin-URL upsert refreshes only an undownloaded placeholder:
+// if a real download has already retired that URL into a downloaded row, the
+// `WHERE media.downloaded=0` guard leaves it untouched. This lets a later
+// larger size limit clear an old skip reason without ever regressing a real
+// file back to a placeholder.
 
 pub async fn populate_placeholders(state: Arc<AppState>, source_id: i64) {
     let (url, status) = {
@@ -766,6 +862,7 @@ pub async fn populate_placeholders(state: Arc<AppState>, source_id: i64) {
     if items.is_empty() {
         return;
     }
+    let file_size_limit = state.settings.read().await.max_download_file_size_bytes;
 
     // The listing finished outside maintenance. Re-admit its transactional
     // result only if no Admin job has begun in the meantime.
@@ -787,8 +884,13 @@ pub async fn populate_placeholders(state: Arc<AppState>, source_id: i64) {
     };
     {
         let mut stmt = match tx.prepare(
-            "INSERT OR IGNORE INTO media (source_id, filepath, filename, type, added_at, origin_url, downloaded)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, 0)"
+            "INSERT INTO media (source_id, filepath, filename, type, added_at, origin_url, downloaded,file_size_bytes,skip_reason,skip_limit_bytes,skipped_at)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, 0, ?7, ?8, ?9, ?10)
+             ON CONFLICT(source_id,origin_url) WHERE origin_url IS NOT NULL DO UPDATE SET
+               file_size_bytes=COALESCE(excluded.file_size_bytes,media.file_size_bytes),
+               skip_reason=excluded.skip_reason,skip_limit_bytes=excluded.skip_limit_bytes,
+               skipped_at=excluded.skipped_at
+             WHERE media.downloaded=0"
         ) {
             Ok(statement) => statement,
             Err(error) => {
@@ -813,8 +915,31 @@ pub async fn populate_placeholders(state: Arc<AppState>, source_id: i64) {
                 fname
             };
             let fp = pending_filepath(source_id, &item.url);
+            let oversized = file_size_limit
+                .zip(item.remote_size_bytes)
+                .filter(|(limit, size)| size > limit);
+            let skip_reason = oversized.map(|(limit, size)| {
+                format!(
+                    "Skipped: {} is larger than the {} download-size limit.",
+                    crate::storage::human_bytes(size),
+                    crate::storage::human_bytes(limit)
+                )
+            });
             if let Err(error) = stmt.execute(rusqlite::params![
-                source_id, fp, fname, item.kind, now, item.url
+                source_id,
+                fp,
+                fname,
+                item.kind,
+                now,
+                item.url,
+                item.remote_size_bytes,
+                skip_reason,
+                oversized.map(|(limit, _)| limit),
+                if oversized.is_some() {
+                    Some(now.as_str())
+                } else {
+                    None
+                }
             ]) {
                 // This scan is intentionally best-effort; one malformed
                 // listing item must not hide every other placeholder.
@@ -841,6 +966,29 @@ pub async fn populate_placeholders(state: Arc<AppState>, source_id: i64) {
 }
 
 // ─── run_download ─────────────────────────────────────────────────────────────
+
+/// Keep the gallery-dl contract in one testable place. Passing no size limit
+/// preserves every existing installation's historical unlimited behavior.
+pub fn gallery_dl_download_args(
+    url: &str,
+    destination: &Path,
+    archive: &Path,
+    max_file_size_bytes: Option<u64>,
+) -> Vec<String> {
+    let mut args = vec![
+        url.to_string(),
+        "-D".into(),
+        destination.to_string_lossy().to_string(),
+        "--download-archive".into(),
+        archive.to_string_lossy().to_string(),
+        "--write-metadata".into(),
+    ];
+    if let Some(maximum) = max_file_size_bytes.filter(|maximum| *maximum > 0) {
+        args.push("--filesize-max".into());
+        args.push(maximum.to_string());
+    }
+    args
+}
 
 pub fn run_download(
     state: Arc<AppState>,
@@ -877,11 +1025,6 @@ async fn run_download_impl(
     cancel: tokio_util::sync::CancellationToken,
 ) {
     // Fire placeholder scan concurrently — never gates the real download
-    let state2 = Arc::clone(&state);
-    state
-        .download_tasks
-        .spawn(async move { populate_placeholders(state2, source_id).await });
-
     if state
         .downloads_paused
         .load(std::sync::atomic::Ordering::SeqCst)
@@ -899,15 +1042,75 @@ async fn run_download_impl(
     // Local folder imports do not use gallery-dl and therefore have no remote
     // provider cooldown to observe.
     let provider = state.pool.get().ok().and_then(|conn| {
-        conn.query_row("SELECT url FROM sources WHERE id=?1", [source_id], |row| {
-            row.get::<_, String>(0)
-        })
+        conn.query_row(
+            "SELECT url,slug,storage_override_once FROM sources WHERE id=?1",
+            [source_id],
+            |row| {
+                Ok((
+                    row.get::<_, String>(0)?,
+                    row.get::<_, String>(1)?,
+                    row.get::<_, bool>(2)?,
+                ))
+            },
+        )
         .ok()
     });
-    let Some(provider_url) = provider else {
+    let Some((provider_url, provider_slug, permit_once)) = provider else {
         return;
     };
-    if !provider_url.starts_with("local:") {
+    let is_local_import = provider_url.starts_with("local:");
+    let settings = state.settings.read().await.clone();
+    let apply_remote_limits = !is_local_import || settings.apply_download_limits_to_local_imports;
+    let admission_state = state.clone();
+    let admission_settings = settings.clone();
+    let admission_slug = provider_slug.clone();
+    let admission = tokio::task::spawn_blocking(move || {
+        crate::storage::source_sync_admission(
+            &admission_settings,
+            &admission_state.data_dir,
+            &admission_state.library_dir,
+            &admission_slug,
+            apply_remote_limits,
+        )
+    })
+    .await
+    .ok()
+    .flatten();
+    let permit_can_bypass = permit_once
+        && matches!(
+            &admission,
+            Some(crate::storage::SyncPause::SourceQuota { .. })
+        );
+    if let Some(pause) = admission {
+        if !permit_can_bypass {
+            if let Ok(conn) = state.pool.get() {
+                let _ = conn.execute(
+                    "UPDATE sources SET status=?1,error_message=?2,progress_updated_at=?3,current_filename=NULL WHERE id=?4",
+                    rusqlite::params![pause.status(), pause.message(), now_iso(), source_id],
+                );
+            }
+            return;
+        }
+    }
+    if permit_can_bypass {
+        if let Ok(conn) = state.pool.get() {
+            let _ = conn.execute(
+                "UPDATE sources SET storage_override_once=0 WHERE id=?1",
+                [source_id],
+            );
+        }
+    }
+    state.storage_pauses.lock().await.remove(&source_id);
+
+    // A remote pre-scan records any known oversized items as durable
+    // placeholders before gallery-dl starts. Local imports do not invoke it.
+    if !is_local_import {
+        let placeholder_state = Arc::clone(&state);
+        state
+            .download_tasks
+            .spawn(async move { populate_placeholders(placeholder_state, source_id).await });
+    }
+    if !is_local_import {
         let provider = provider_key(&provider_url);
         if !wait_for_provider_cooldown(&state, &provider, &cancel).await {
             if let Ok(conn) = state.pool.get() {
@@ -1063,16 +1266,11 @@ async fn run_download_inner(
             .ok()
         })
         .unwrap_or(0);
+    let initial_size_skip_count = oversized_skip_count(&state, source_id);
     info!("Starting sync for source {} ({}): {}", source_id, name, url);
 
-    let args = vec![
-        url.clone(),
-        "-D".into(),
-        dest.to_string_lossy().to_string(),
-        "--download-archive".into(),
-        archive_path.to_string_lossy().to_string(),
-        "--write-metadata".into(),
-    ];
+    let max_file_size_bytes = state.settings.read().await.max_download_file_size_bytes;
+    let args = gallery_dl_download_args(&url, &dest, &archive_path, max_file_size_bytes);
 
     let mut child = match crate::process::command(&state.gallery_dl_bin)
         .args(&args)
@@ -1217,12 +1415,22 @@ async fn run_download_inner(
         let ids = state.paused_source_ids.lock().await;
         ids.contains(&source_id)
     };
+    let storage_pause = state.storage_pauses.lock().await.remove(&source_id);
+    let skipped_for_size = oversized_skip_count(&state, source_id);
+    let new_size_skips = (skipped_for_size - initial_size_skip_count).max(0);
 
     let mut status = if returncode == 0 { "done" } else { "error" };
     let mut delayed_retry: Option<Duration> = None;
     let mut error_msg: Option<String> = None;
 
-    if was_paused {
+    if let Some(pause) = storage_pause {
+        status = pause.status();
+        error_msg = Some(pause.message());
+        info!(
+            "Source {} ({}) paused by {} after {} new item(s), {} total",
+            source_id, name, status, new_count, total
+        );
+    } else if was_paused {
         status = "paused";
         info!(
             "Source {} ({}) paused after {} new item(s), {} total",
@@ -1242,6 +1450,19 @@ async fn run_download_inner(
             "Source {} ({}) was interrupted after {} new item(s), {} total",
             source_id, name, new_count, total
         );
+    } else if status == "error"
+        && (new_size_skips > 0 || skipped_for_size > 0 && filesize_skip_output(&combined_text))
+        && (filesize_skip_output(&combined_text)
+            || (new_count == 0 && !retryable_failure(returncode, &combined_text)))
+    {
+        // gallery-dl generally exits successfully for filtered files, but
+        // extractors differ. A size skip is a completed decision, never a
+        // source failure or an infinite retry loop.
+        status = "done";
+        error_msg = Some(format!(
+            "{} item(s) skipped by the download-size limit; raise or remove the limit and re-sync to download them.",
+            skipped_for_size
+        ));
     } else if status == "error" {
         let summary = short_error_summary(&combined_text);
         let detail = if summary.is_empty() {
@@ -1425,6 +1646,9 @@ fn rate_limited(log_text: &str) -> bool {
 }
 
 fn retryable_failure(exit_code: i32, log_text: &str) -> bool {
+    if filesize_skip_output(log_text) {
+        return false;
+    }
     if exit_code == 4 || rate_limited(log_text) {
         return true;
     }
@@ -1449,6 +1673,28 @@ fn retryable_failure(exit_code: i32, log_text: &str) -> bool {
     ]
     .iter()
     .any(|needle| lower.contains(needle))
+}
+
+fn filesize_skip_output(log_text: &str) -> bool {
+    let lower = log_text.to_ascii_lowercase();
+    (lower.contains("filesize") || lower.contains("file size"))
+        && (lower.contains("skip") || lower.contains("larger") || lower.contains("exceed"))
+}
+
+fn oversized_skip_count(state: &AppState, source_id: i64) -> i64 {
+    state
+        .pool
+        .get()
+        .ok()
+        .and_then(|conn| {
+            conn.query_row(
+                "SELECT COUNT(*) FROM media WHERE source_id=?1 AND downloaded=0 AND skip_limit_bytes IS NOT NULL",
+                [source_id],
+                |row| row.get::<_, i64>(0),
+            )
+            .ok()
+        })
+        .unwrap_or(0)
 }
 
 fn retry_delay(attempt: i64, is_rate_limited: bool) -> Duration {
@@ -1551,6 +1797,118 @@ mod tests {
         );
         assert_eq!(provider_key("https://example.test/a"), "example.test");
         assert_eq!(provider_key("local:C:\\media"), "local");
+    }
+
+    #[test]
+    fn gallery_dl_size_limit_argument_is_conditional_and_unlimited_is_unchanged() {
+        let destination = Path::new("library/source");
+        let archive = Path::new("library/source/.archive");
+        let unlimited =
+            gallery_dl_download_args("https://example.test/source", destination, archive, None);
+        assert!(!unlimited.iter().any(|arg| arg == "--filesize-max"));
+        assert!(!unlimited.iter().any(|arg| arg == "0"));
+
+        let limited = gallery_dl_download_args(
+            "https://example.test/source",
+            destination,
+            archive,
+            Some(50 * 1024 * 1024),
+        );
+        let index = limited
+            .iter()
+            .position(|arg| arg == "--filesize-max")
+            .expect("configured limit must be passed to gallery-dl");
+        assert_eq!(
+            limited.get(index + 1),
+            Some(&((50 * 1024 * 1024) as u64).to_string())
+        );
+
+        // Zero is the JSON/UI normalization for Unlimited and must never
+        // accidentally become a gallery-dl ceiling.
+        let zero = gallery_dl_download_args("url", destination, archive, Some(0));
+        assert!(!zero.iter().any(|arg| arg == "--filesize-max"));
+    }
+
+    #[test]
+    fn size_skips_are_terminal_placeholders_and_never_retryable() {
+        let output = "gallery-dl: file size 500000000 exceeds the configured filesize limit; skip";
+        assert!(filesize_skip_output(output));
+        assert!(!retryable_failure(1, output));
+        assert!(!retryable_failure(4, output));
+    }
+
+    #[cfg(windows)]
+    #[tokio::test]
+    async fn an_oversized_listing_stays_a_placeholder_and_a_later_limit_allows_it() {
+        let root = tempfile::tempdir().unwrap();
+        let mut state = crate::test_support::state(root.path());
+        Arc::get_mut(&mut state).unwrap().gallery_dl_bin = crate::test_support::fake_downloader();
+        crate::test_support::source(&state);
+        state
+            .pool
+            .get()
+            .unwrap()
+            .execute(
+                "UPDATE sources SET url='https://example.test/size-test' WHERE id=1",
+                [],
+            )
+            .unwrap();
+        state.settings.write().await.max_download_file_size_bytes = Some(50);
+
+        populate_placeholders(state.clone(), 1).await;
+        let skipped: (i64, Option<String>, Option<i64>) = state
+            .pool
+            .get()
+            .unwrap()
+            .query_row(
+                "SELECT downloaded,skip_reason,skip_limit_bytes FROM media WHERE source_id=1",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+            )
+            .unwrap();
+        assert_eq!(skipped.0, 0, "an oversize is not a completed download");
+        assert!(skipped.1.unwrap_or_default().contains("larger"));
+        assert_eq!(skipped.2, Some(50));
+        assert!(
+            !state.archives_dir.join("test.sqlite3").exists(),
+            "a listing-only size skip must not create a successful download archive"
+        );
+
+        // Make the listing eligible immediately, then raise its ceiling. The
+        // same origin row is refreshed rather than kept in an endless retry
+        // or permanent skipped state, and gallery-dl's new ceiling permits
+        // the known 100-byte item.
+        state.settings.write().await.max_download_file_size_bytes = Some(200);
+        state
+            .pool
+            .get()
+            .unwrap()
+            .execute(
+                "UPDATE placeholder_scans SET retry_at=0 WHERE source_id=1",
+                [],
+            )
+            .unwrap();
+        populate_placeholders(state.clone(), 1).await;
+        let cleared: (Option<String>, Option<i64>) = state
+            .pool
+            .get()
+            .unwrap()
+            .query_row(
+                "SELECT skip_reason,skip_limit_bytes FROM media WHERE source_id=1",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .unwrap();
+        assert_eq!(cleared, (None, None));
+        let args = gallery_dl_download_args(
+            "https://example.test/size-test",
+            &state.library_dir.join("test"),
+            &state.archives_dir.join("test.sqlite3"),
+            Some(200),
+        );
+        assert!(args
+            .windows(2)
+            .any(|pair| pair == ["--filesize-max", "200"]));
     }
 
     #[cfg(windows)]

@@ -181,6 +181,34 @@ on restart, with rollback files retained until every database/settings/config
 replacement succeeds.
 
 
+MEDIA AND STORAGE
+-----------------
+
+The Media & Storage Settings tab keeps all storage-saving controls opt-in.
+`max_download_file_size_bytes` is unlimited by default. When set, Curator
+passes the ceiling to gallery-dl as `--filesize-max`; known oversized remote
+items remain visible as unavailable placeholders with a skip reason. They are
+not entered into the successful download archive, do not fail the source, and
+can download on a later re-sync after the ceiling is raised or removed.
+
+`max_source_storage_bytes` is also unlimited by default and is checked before
+a remote source starts. A source already at its quota pauses with used and
+allowed values plus actions to increase the limit, remove old media, or permit
+one sync. An active remote sync can exceed the quota by up to one permitted
+file: Curator stops it after indexing that file. Local-folder imports ignore
+both remote file-size and source-quota limits unless the explicit local-import
+option is enabled.
+
+The minimum-free-disk reserve pauses new downloads before the disk becomes
+dangerously full. Thumbnail limits evict derived cache entries least recently
+used and never alter originals. Source retention, automatic cleanup, and
+archive-age cleanup are disabled by default; each needs its displayed typed
+confirmation. Cleanup protects favorites, human-rated media, group members,
+and source covers, leaves annotations/metadata as unavailable placeholders,
+and never recompresses originals. Removing gallery-dl archives manually or by
+age can make older posts eligible for reconsideration on a future sync.
+
+
 APPEARANCE AND SCROLLING
 ------------------------
 

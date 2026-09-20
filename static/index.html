@@ -155,159 +155,107 @@
 
 <!-- Settings modal -->
 <div id="settings-modal" class="modal-overlay" hidden>
-  <div class="modal">
-    <h2>Settings</h2>
-    <p class="muted">
-      Downloading is limited by network requests per source, not by CPU or GPU — so this
-      controls how many sources sync <em>at once</em>, not how fast any single one downloads.
-      Push it higher if your connection and the sites you use can take it; bring it back down
-      if sources start landing on "error" from rate limiting.
-    </p>
-    <label class="settings-field mono small">
-      max concurrent downloads
-      <input id="settings-max-concurrent" type="number" min="1" max="20" step="1">
-    </label>
+  <div class="modal settings-center-modal" role="dialog" aria-modal="true" aria-labelledby="settings-title">
+    <header class="settings-center-header">
+      <div><p class="explorer-kicker">Curator</p><h2 id="settings-title">Settings</h2></div>
+      <p class="muted">Changes to downloads apply to newly started work immediately.</p>
+    </header>
+    <div class="settings-center">
+      <nav class="settings-tabs" role="tablist" aria-label="Settings sections">
+        <button type="button" role="tab" aria-selected="true" data-settings-tab="general">General</button>
+        <button type="button" role="tab" aria-selected="false" data-settings-tab="media-storage">Media &amp; Storage</button>
+        <button type="button" role="tab" aria-selected="false" data-settings-tab="appearance">Appearance</button>
+        <button type="button" role="tab" aria-selected="false" data-settings-tab="playback-goon">Playback &amp; GOON</button>
+        <button type="button" role="tab" aria-selected="false" data-settings-tab="automation">Automation</button>
+        <button type="button" role="tab" aria-selected="false" data-settings-tab="local-admin" data-local-admin-tab hidden>Local Admin</button>
+      </nav>
+      <div class="settings-tab-panels">
+        <section data-settings-tab-panel="general" role="tabpanel">
+          <h3>Downloads</h3>
+          <p class="muted">This controls how many sources sync at once; it does not make one source download faster.</p>
+          <label class="settings-field mono small">concurrent downloads <input id="settings-max-concurrent" type="number" min="1" max="20" step="1"></label>
+          <section id="settings-local-startup" data-local-setting data-host-setting>
+            <h3 class="settings-subhead">Startup and tray</h3>
+            <label class="settings-checkbox mono small"><input id="settings-start-with-windows" type="checkbox"> Start Curator when Windows starts</label>
+            <label class="settings-checkbox mono small"><input id="settings-keep-running-in-tray" type="checkbox"> Keep Curator running in the system tray when the window is closed</label>
+            <p id="settings-startup-registration" class="settings-status muted" aria-live="polite">Checking Windows startup registration…</p>
+          </section>
+          <h3 class="settings-subhead">Remote Access</h3>
+          <p class="muted">Curator serves this device and approved Tailscale devices; it never listens on ordinary LAN interfaces.</p>
+          <div id="settings-remote-access" class="mono small muted" aria-live="polite">Checking server status…</div>
+        </section>
 
-    <h2 class="settings-subhead">Media</h2>
-    <p class="muted">Videos at or below this duration are Clips. Changing it only reclassifies views; it never edits source files.</p>
-    <label class="settings-field mono small">
-      maximum clip length
-      <input id="settings-max-clip-length" type="number" min="5" max="3600" step="1"> seconds
-    </label>
+        <section data-settings-tab-panel="media-storage" role="tabpanel" hidden>
+          <h3>Media</h3>
+          <p class="muted">Videos at or below this duration are Clips. Changing it only reclassifies views; it never edits source files.</p>
+          <label class="settings-field mono small">maximum clip length <span><input id="settings-max-clip-length" type="number" min="5" max="3600" step="1"> seconds</span></label>
+          <label class="settings-field mono small">default library layout <select id="settings-library-layout"><option value="grid">Grid</option><option value="table">Table</option></select></label>
+          <div id="settings-local-tools" data-local-setting>
+            <label class="settings-field mono small">ffmpeg executable <input id="settings-ffmpeg-bin" type="text" placeholder="ffmpeg"></label>
+            <p id="settings-ffmpeg-restart-notice" class="settings-restart-notice" hidden>Restart required: FFmpeg changes take effect when Curator next starts.</p>
+          </div>
+          <h3 class="settings-subhead">Download-size limits</h3>
+          <label class="settings-field mono small">maximum remote file size <select id="settings-max-download-size-preset"><option value="unlimited">Unlimited</option><option value="26214400">25 MB</option><option value="52428800">50 MB</option><option value="104857600">100 MB</option><option value="262144000">250 MB</option><option value="524288000">500 MB</option><option value="1073741824">1 GB</option><option value="custom">Custom</option></select></label>
+          <label id="settings-max-download-size-custom-wrap" class="settings-field mono small" hidden>custom maximum <span><input id="settings-max-download-size-custom" type="number" min="1" step="1"> bytes</span></label>
+          <p class="muted">Known oversized remote items stay as placeholders with a skip reason. They are not archived as downloaded and re-sync after increasing or removing the limit can fetch them.</p>
+          <label class="settings-field mono small">per-source storage quota <select id="settings-max-source-storage-preset"><option value="unlimited">Unlimited</option><option value="1073741824">1 GB</option><option value="5368709120">5 GB</option><option value="10737418240">10 GB</option><option value="53687091200">50 GB</option><option value="custom">Custom</option></select></label>
+          <label id="settings-max-source-storage-custom-wrap" class="settings-field mono small" hidden>custom source quota <span><input id="settings-max-source-storage-custom" type="number" min="1" step="1"> bytes</span></label>
+          <label class="settings-checkbox mono small"><input id="settings-apply-limits-local-imports" type="checkbox"> Also apply file-size and source-quota limits to local-folder imports</label>
+          <p class="muted">A running remote source can exceed its quota by up to one permitted file before it pauses.</p>
+          <h3 class="settings-subhead">Disk reserve and thumbnail cache</h3>
+          <label class="settings-field mono small">minimum free disk reserve <span><input id="settings-minimum-free-disk" type="number" min="0" step="1" placeholder="Unlimited"> bytes</span></label>
+          <label class="settings-field mono small">thumbnail cache limit <span><input id="settings-thumbnail-cache-limit" type="number" min="0" step="1" placeholder="Unlimited"> bytes</span></label>
+          <p class="muted">A thumbnail-cache limit uses least-recently-used eviction. It never changes originals.</p>
+          <h3 class="settings-subhead">Storage usage and cleanup</h3>
+          <div class="settings-storage-toolbar"><label class="mono small">sort sources <select id="settings-storage-sort"><option value="usage_desc">Largest first</option><option value="usage_asc">Smallest first</option><option value="name">Name</option></select></label><button id="settings-storage-refresh" type="button" class="btn btn-ghost small">Refresh usage</button><button id="settings-clear-thumbnails" type="button" class="btn btn-ghost small" data-local-setting>Clear thumbnails now</button><button id="settings-clear-archives" type="button" class="btn btn-ghost small" data-local-setting>Delete archives now</button></div>
+          <div id="settings-storage-dashboard" class="settings-storage-dashboard muted" aria-live="polite">Open this tab to calculate storage usage.</div>
+          <label class="settings-field mono small">automatic cleanup <select id="settings-automatic-cleanup-mode"><option value="never">Never</option><option value="low_disk">When low disk</option><option value="weekly">Weekly</option></select></label>
+          <label class="settings-field mono small">low-disk cleanup threshold <span><input id="settings-automatic-cleanup-low-disk" type="number" min="1" step="1" placeholder="Required for low disk"> bytes</span></label>
+          <label class="settings-field mono small">delete gallery-dl archives older than <span><input id="settings-archive-retention-days" type="number" min="1" max="36500" step="1" placeholder="Never"> days</span></label>
+          <p class="muted">Automatic cleanup only follows an enabled source retention rule and protects favorites, human-rated media, group members, and source covers. It never recompresses originals. Deleting archives can make gallery-dl reconsider older posts later.</p>
+        </section>
 
-    <h2 class="settings-subhead">Library</h2>
-    <label class="settings-field mono small">
-      default library layout
-      <select id="settings-library-layout"><option value="grid">Grid</option><option value="table">Table</option></select>
-    </label>
-    <div id="settings-local-tools" data-local-setting>
-      <label class="settings-field mono small">
-        ffmpeg executable
-        <input id="settings-ffmpeg-bin" type="text" placeholder="ffmpeg">
-      </label>
-      <p class="muted">P-HAR is opt-in and uses a pinned managed environment. Configure its setup, repair, and self-test from Local Admin; arbitrary model paths are not accepted.</p>
+        <section data-settings-tab-panel="appearance" role="tabpanel" hidden>
+          <h3>Appearance</h3>
+          <label class="settings-field mono small">theme <select id="settings-theme"><option value="system">System</option><option value="gtk-system">GTK System (local app)</option><option value="adwaita-light">Adwaita Light</option><option value="adwaita-dark">Adwaita Dark</option><option value="yaru-light">Yaru Light</option><option value="yaru-dark">Yaru Dark</option><option value="arc-light">Arc Light</option><option value="arc-dark">Arc Dark</option><option value="breeze-light">Breeze Light</option><option value="breeze-dark">Breeze Dark</option><option value="atelier-dark">Atelier Dark</option><option value="midnight">Midnight</option><option value="ember">Ember</option><option value="linen">Linen</option><option value="sage">Sage</option><option value="aurora">Aurora</option><option value="oled">OLED</option></select></label>
+        </section>
+
+        <section data-settings-tab-panel="playback-goon" role="tabpanel" hidden>
+          <h3>Slideshow defaults</h3>
+          <p class="muted">Applied whenever a new slideshow or portrait wall opens. In-session controls remain per session.</p>
+          <label class="settings-field mono small">default speed <select id="settings-default-speed"><option value="2000">2s</option><option value="3000">3s</option><option value="5000">5s</option><option value="8000">8s</option><option value="15000">15s</option><option value="30000">30s</option></select></label>
+          <label class="settings-checkbox mono small"><input id="settings-default-loop" type="checkbox"> loop by default</label>
+          <label class="settings-checkbox mono small"><input id="settings-default-shuffle" type="checkbox"> shuffle by default</label>
+          <h3 class="settings-subhead">Metronome, persona, voices, and soundtrack</h3>
+          <label class="settings-checkbox mono small"><input id="settings-metronome-enabled" type="checkbox"> metronome enabled</label>
+          <label class="settings-field mono small">metronome volume <input id="settings-metronome-volume" type="number" min="0" max="1" step="0.05"></label>
+          <label class="settings-field mono small">persona <select id="settings-goon-persona"><option value="neutral">Neutral</option><option value="mommy">Mommy</option><option value="dom">Dom</option><option value="brat">Brat</option></select></label>
+          <label class="settings-field mono small">installed speech voice <select id="settings-tts-voice"><option value="">System default</option></select></label>
+          <label class="settings-field mono small">voice rate / pitch / volume <span><input id="settings-tts-rate" type="number" min="0.1" max="3" step="0.1"> / <input id="settings-tts-pitch" type="number" min="0" max="2" step="0.1"> / <input id="settings-tts-volume" type="number" min="0" max="1" step="0.05"></span></label>
+          <label class="settings-field mono small">soundtrack provider <select id="settings-soundtrack-provider"><option value="local">Local audio</option><option value="youtube">YouTube</option><option value="soundcloud">SoundCloud</option><option value="apple_music">Apple Music</option><option value="spotify">Spotify (independent only)</option></select></label>
+        </section>
+
+        <section data-settings-tab-panel="automation" role="tabpanel" hidden>
+          <h3>NSFW classification</h3>
+          <p class="muted">NudeNet runs locally. P-HAR can suggest qualifying Fast clips; Cum remains confirmed by a person or reserved tag. Long videos and unavailable dependencies go to Review.</p>
+          <label class="settings-checkbox mono small"><input id="settings-nsfw-filter-enabled" type="checkbox"> enable NSFW auto-rating</label>
+          <p id="settings-nsfw-restart-notice" class="settings-restart-notice" hidden>Restart required: NSFW classification changes apply when Curator next starts.</p>
+          <h3 class="settings-subhead">Backup reminders and export</h3>
+          <p class="muted">The source list is the hard-to-recreate part of a library. The reminder banner is optional; Export is always available here.</p>
+          <label class="settings-field mono small">remind me every <span><input id="settings-export-reminder-days" type="number" min="1" max="365" step="1"> days</span></label>
+          <button id="settings-export-sources" type="button" class="btn btn-accent">Export source list now</button>
+        </section>
+
+        <section data-settings-tab-panel="local-admin" role="tabpanel" hidden data-local-setting>
+          <div id="settings-local-admin" class="settings-local-admin"><p class="muted">Local Admin is available only from this device.</p></div>
+          <section id="settings-local-setup" data-local-setting>
+            <h3 class="settings-subhead">Setup</h3><p class="muted">Reopen the setup wizard to re-check dependencies or change the data directory. It does not touch downloads or the database.</p>
+            <button id="settings-run-setup-again" class="btn btn-ghost small" type="button">Run Setup Again</button>
+          </section>
+        </section>
+      </div>
     </div>
-
-    <h2 class="settings-subhead">Appearance</h2>
-    <label class="settings-field mono small">
-      theme
-      <select id="settings-theme">
-        <option value="system">System</option>
-        <option value="gtk-system">GTK System (local app)</option>
-        <option value="adwaita-light">Adwaita Light</option>
-        <option value="adwaita-dark">Adwaita Dark</option>
-        <option value="yaru-light">Yaru Light</option>
-        <option value="yaru-dark">Yaru Dark</option>
-        <option value="arc-light">Arc Light</option>
-        <option value="arc-dark">Arc Dark</option>
-        <option value="breeze-light">Breeze Light</option>
-        <option value="breeze-dark">Breeze Dark</option>
-        <option value="atelier-dark">Atelier Dark</option>
-        <option value="midnight">Midnight</option>
-        <option value="ember">Ember</option>
-        <option value="linen">Linen</option>
-        <option value="sage">Sage</option>
-        <option value="aurora">Aurora</option>
-        <option value="oled">OLED</option>
-      </select>
-    </label>
-
-    <h2 class="settings-subhead">Slideshow defaults</h2>
-    <p class="muted">Applied every time you open the slideshow or portrait wall. Changing the
-      speed/loop/shuffle controls inside a slideshow only affects that session.</p>
-    <label class="settings-field mono small">
-      default speed
-      <select id="settings-default-speed">
-        <option value="2000">2s</option>
-        <option value="3000">3s</option>
-        <option value="5000">5s</option>
-        <option value="8000">8s</option>
-        <option value="15000">15s</option>
-        <option value="30000">30s</option>
-      </select>
-    </label>
-    <label class="settings-checkbox mono small">
-      <input id="settings-default-loop" type="checkbox"> loop by default
-    </label>
-    <label class="settings-checkbox mono small">
-      <input id="settings-default-shuffle" type="checkbox"> shuffle by default
-    </label>
-
-    <h2 class="settings-subhead">Backup reminders</h2>
-    <p class="muted">
-      The source list is the one thing here that's genuinely hard to recreate if lost —
-      the downloaded files are just a cache. This shows a dismissible sidebar reminder
-      once it's been this many days since your last export.
-    </p>
-    <label class="settings-field mono small">
-      remind me every
-      <input id="settings-export-reminder-days" type="number" min="1" max="365" step="1"> days
-    </label>
-
-    <h2 class="settings-subhead">NSFW auto-rating</h2>
-    <p class="muted">
-      NudeNet classifies anatomy exposure locally: 1★ SFW, 2★ Slow, and 3★ Medium.
-      Detector confidence alone never creates Fast or Cum. An optional supervised P-HAR
-      temporal model can suggest 4★ Fast for qualifying clips; 5★ Cum is always confirmed
-      by a person or a reserved <code>pace:cum</code> tag. Long videos and unavailable
-      dependencies go to Review without blocking image classification. Toggling needs a restart.
-    </p>
-    <label class="settings-checkbox mono small">
-      <input id="settings-nsfw-filter-enabled" type="checkbox"> enable NSFW auto-rating (restart required)
-    </label>
-
-    <h2 class="settings-subhead">GOON defaults</h2>
-    <label class="settings-checkbox mono small">
-      <input id="settings-metronome-enabled" type="checkbox"> metronome enabled
-    </label>
-    <label class="settings-field mono small">
-      metronome volume
-      <input id="settings-metronome-volume" type="number" min="0" max="1" step="0.05">
-    </label>
-    <label class="settings-field mono small">
-      persona
-      <select id="settings-goon-persona"><option value="neutral">Neutral</option><option value="mommy">Mommy</option><option value="dom">Dom</option><option value="brat">Brat</option></select>
-    </label>
-    <label class="settings-field mono small">
-      installed speech voice
-      <select id="settings-tts-voice"><option value="">System default</option></select>
-    </label>
-    <label class="settings-field mono small">
-      voice rate / pitch / volume
-      <input id="settings-tts-rate" type="number" min="0.1" max="3" step="0.1"> / <input id="settings-tts-pitch" type="number" min="0" max="2" step="0.1"> / <input id="settings-tts-volume" type="number" min="0" max="1" step="0.05">
-    </label>
-    <label class="settings-field mono small">
-      soundtrack provider
-      <select id="settings-soundtrack-provider"><option value="local">Local audio</option><option value="youtube">YouTube</option><option value="soundcloud">SoundCloud</option><option value="apple_music">Apple Music</option><option value="spotify">Spotify (independent only)</option></select>
-    </label>
-
-    <section id="settings-local-startup" data-local-setting data-host-setting>
-      <h2 class="settings-subhead">Startup</h2>
-      <label class="settings-checkbox mono small">
-        <input id="settings-start-with-windows" type="checkbox"> Start Curator when Windows starts
-      </label>
-      <label class="settings-checkbox mono small">
-        <input id="settings-keep-running-in-tray" type="checkbox"> Keep Curator running in the system tray when the window is closed
-      </label>
-    </section>
-
-    <h2 class="settings-subhead">Remote Access</h2>
-    <p class="muted">The same Curator server serves the desktop app, local browser fallback, and approved Tailscale devices. It never listens on ordinary LAN interfaces; addresses refresh while Curator is running.</p>
-    <div id="settings-remote-access" class="mono small muted" aria-live="polite">Checking server status…</div>
-
-    <section id="settings-local-setup" data-local-setting>
-      <h2 class="settings-subhead">Setup</h2>
-      <p class="muted">
-        Reopens the first-run setup wizard so you can re-check dependencies or change
-        the data directory. Doesn't touch your downloads, database, or other settings.
-      </p>
-      <button id="settings-run-setup-again" class="btn btn-ghost btn-block small">Run Setup Again</button>
-    </section>
-
-    <div class="modal-actions">
-      <button id="settings-cancel" class="btn btn-ghost">Cancel</button>
-      <button id="settings-save" class="btn btn-accent">Save</button>
-    </div>
+    <div class="modal-actions"><button id="settings-cancel" class="btn btn-ghost">Cancel</button><button id="settings-save" class="btn btn-accent">Save</button></div>
   </div>
 </div>
 

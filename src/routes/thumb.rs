@@ -24,7 +24,7 @@ pub async fn get_thumbnail(State(state): State<Arc<AppState>>, Path(id): Path<i6
     };
 
     let row = conn.query_row(
-        "SELECT filepath, type, downloaded, origin_url FROM media WHERE id=?1 AND missing=0",
+        "SELECT filepath, type, downloaded, origin_url, skip_reason, retention_deleted FROM media WHERE id=?1 AND missing=0",
         [id],
         |r| {
             Ok((
@@ -32,11 +32,13 @@ pub async fn get_thumbnail(State(state): State<Arc<AppState>>, Path(id): Path<i6
                 r.get::<_, String>(1)?,
                 r.get::<_, i64>(2)?,
                 r.get::<_, Option<String>>(3)?,
+                r.get::<_, Option<String>>(4)?,
+                r.get::<_, bool>(5)?,
             ))
         },
     );
 
-    let (filepath, kind, downloaded, origin_url) = match row {
+    let (filepath, kind, downloaded, origin_url, skip_reason, retention_deleted) = match row {
         Ok(v) => v,
         Err(_) => {
             return (
@@ -48,6 +50,9 @@ pub async fn get_thumbnail(State(state): State<Arc<AppState>>, Path(id): Path<i6
     };
 
     drop(conn);
+    if skip_reason.is_some() || retention_deleted {
+        return (StatusCode::NOT_FOUND, "Original is unavailable").into_response();
+    }
     // Placeholder: redirect to origin_url for the frontend to stream directly
     if downloaded == 0 {
         return if let Some(url) = origin_url {
@@ -93,15 +98,24 @@ pub async fn get_thumbnail(State(state): State<Arc<AppState>>, Path(id): Path<i6
             .into_response();
     };
     match get_or_create_thumb(id, src_path.clone(), state.thumbs_dir.clone()).await {
-        Ok(bytes) => (
-            StatusCode::OK,
-            [
-                (header::CONTENT_TYPE, "image/jpeg"),
-                (header::CACHE_CONTROL, "no-cache"),
-            ],
-            bytes,
-        )
-            .into_response(),
+        Ok(bytes) => {
+            if let Some(limit) = state.settings.read().await.thumbnail_cache_max_bytes {
+                let thumbs_dir = state.thumbs_dir.clone();
+                let _ = tokio::task::spawn_blocking(move || {
+                    crate::storage::trim_thumbnail_cache(&thumbs_dir, limit)
+                })
+                .await;
+            }
+            (
+                StatusCode::OK,
+                [
+                    (header::CONTENT_TYPE, "image/jpeg"),
+                    (header::CACHE_CONTROL, "no-cache"),
+                ],
+                bytes,
+            )
+                .into_response()
+        }
         Err(_) => {
             // Thumbnail failed — fall back to original
             serve_file_with_cache(&src_path).await

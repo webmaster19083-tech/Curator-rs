@@ -2,7 +2,14 @@ use std::{env,fs,path::PathBuf,process::{Command,Stdio},thread,time::Duration};
 fn main() {
     let args:Vec<String>=env::args().collect();
     if args.iter().any(|a|a=="--child") {loop {thread::sleep(Duration::from_secs(1));}}
-    if args.iter().any(|a|a=="-j") {println!("[]");return;}
+    if args.iter().any(|a|a=="-j") {
+        if args.iter().any(|a| a.contains("size-test")) {
+            println!("{}", r#"[["file","https://example.test/size-test/large.jpg",{"extension":"jpg","filesize":100}]]"#);
+        } else {
+            println!("[]");
+        }
+        return;
+    }
     let dest=PathBuf::from(&args[args.iter().position(|a|a=="-D").unwrap()+1]);
     fs::create_dir_all(&dest).unwrap();
     fs::write(dest.join("download.jpg"),b"completed file").unwrap();

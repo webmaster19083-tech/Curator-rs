@@ -86,6 +86,9 @@ fn default_metronome_volume() -> f64 {
 fn default_soundtrack_provider() -> String {
     "local".into()
 }
+fn default_automatic_cleanup_mode() -> String {
+    "never".into()
+}
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Settings {
@@ -103,6 +106,36 @@ pub struct Settings {
     pub last_play_mode: String,
     #[serde(default = "default_max_concurrent")]
     pub max_concurrent: u32,
+
+    /// `None` deliberately means no remote file-size ceiling.  Keeping this
+    /// optional is important for upgrades: an older settings.json must retain
+    /// the historical unlimited behavior rather than unexpectedly skipping
+    /// media on its first sync after an update.
+    #[serde(default)]
+    pub max_download_file_size_bytes: Option<u64>,
+    /// A per-source ceiling applied before a remote source begins a sync.
+    #[serde(default)]
+    pub max_source_storage_bytes: Option<u64>,
+    /// New syncs pause when the filesystem has less free space than this.
+    #[serde(default)]
+    pub minimum_free_disk_bytes: Option<u64>,
+    /// Derived thumbnails are evicted least-recently-used once this ceiling is
+    /// enabled. `None` preserves the pre-existing unbounded cache behavior.
+    #[serde(default)]
+    pub thumbnail_cache_max_bytes: Option<u64>,
+    /// Remote limits intentionally do not affect a person's local-folder
+    /// imports unless they explicitly opt in.
+    #[serde(default)]
+    pub apply_download_limits_to_local_imports: bool,
+    /// `never`, `low_disk`, or `weekly`; destructive cleanup stays opt-in.
+    #[serde(default = "default_automatic_cleanup_mode")]
+    pub automatic_cleanup_mode: String,
+    #[serde(default)]
+    pub automatic_cleanup_low_disk_bytes: Option<u64>,
+    #[serde(default)]
+    pub archive_retention_days: Option<u32>,
+    #[serde(default)]
+    pub last_automatic_cleanup_at: Option<String>,
 
     #[serde(default = "default_slideshow_speed")]
     pub default_slideshow_speed: f64,
@@ -145,6 +178,13 @@ pub struct Settings {
     // automation changes the effective rating only until a human reviews it.
     #[serde(default)]
     pub nsfw_filter_enabled: bool,
+    /// These flags survive closing/reopening Settings so a restart requirement
+    /// is not reduced to a transient toast. They are cleared once a new
+    /// backend process has started with the changed configuration.
+    #[serde(default)]
+    pub ffmpeg_restart_required: bool,
+    #[serde(default)]
+    pub nsfw_restart_required: bool,
 
     /// Library presentation is a preference, not a capability.  Grid is the
     /// default while Table remains useful for large collections and keyboard
@@ -194,6 +234,15 @@ impl Default for Settings {
             keep_running_in_tray: default_keep_running_in_tray(),
             last_play_mode: default_last_play_mode(),
             max_concurrent: default_max_concurrent(),
+            max_download_file_size_bytes: None,
+            max_source_storage_bytes: None,
+            minimum_free_disk_bytes: None,
+            thumbnail_cache_max_bytes: None,
+            apply_download_limits_to_local_imports: false,
+            automatic_cleanup_mode: default_automatic_cleanup_mode(),
+            automatic_cleanup_low_disk_bytes: None,
+            archive_retention_days: None,
+            last_automatic_cleanup_at: None,
             default_slideshow_speed: default_slideshow_speed(),
             default_slideshow_loop: default_slideshow_loop(),
             default_slideshow_shuffle: default_slideshow_shuffle(),
@@ -207,6 +256,8 @@ impl Default for Settings {
             ch_default_shuffle: default_ch_default_shuffle(),
             ch_default_media_type: default_ch_default_media_type(),
             nsfw_filter_enabled: false,
+            ffmpeg_restart_required: false,
+            nsfw_restart_required: false,
             library_layout: default_library_layout(),
             search_providers: default_search_providers(),
             metronome_enabled: false,
@@ -361,6 +412,22 @@ pub fn run_migrations(conn: &Connection) -> Result<()> {
             ))?;
         }
     }
+    // Source retention and a one-time quota override are durable source
+    // state, rather than process memory, so an intentional "permit once"
+    // remains meaningful if Curator is restarted before the queued sync runs.
+    for (name, definition) in [
+        (
+            "retention_keep_newest",
+            "INTEGER CHECK(retention_keep_newest > 0)",
+        ),
+        ("storage_override_once", "INTEGER NOT NULL DEFAULT 0"),
+    ] {
+        if !src_cols.contains(name) {
+            conn.execute_batch(&format!(
+                "ALTER TABLE sources ADD COLUMN {name} {definition};"
+            ))?;
+        }
+    }
 
     // ── media ─────────────────────────────────────────────────────────────────
     conn.execute_batch(
@@ -449,6 +516,18 @@ pub fn run_migrations(conn: &Connection) -> Result<()> {
         ("manual_review_required", "INTEGER NOT NULL DEFAULT 0"),
         ("manual_review_reason", "TEXT"),
         ("classification_updated_at", "TEXT"),
+        // A size-limited remote item remains a durable placeholder.  It is
+        // not failed and it is never written to gallery-dl's archive, so a
+        // later larger limit can download it normally.
+        ("skip_reason", "TEXT"),
+        ("skip_limit_bytes", "INTEGER CHECK(skip_limit_bytes >= 0)"),
+        ("skipped_at", "TEXT"),
+        // Retention never deletes a media row: annotations/provenance remain
+        // visible as an unavailable placeholder and can be re-downloaded.
+        ("retention_deleted", "INTEGER NOT NULL DEFAULT 0"),
+        // There was no historical favorite control, but keeping this durable
+        // guard makes cleanup safe for existing integrations and future UI.
+        ("favorite", "INTEGER NOT NULL DEFAULT 0"),
     ] {
         if !media_cols.contains(name) {
             conn.execute_batch(&format!(
@@ -1143,6 +1222,10 @@ mod tests {
         run_migrations(&conn).expect("running migrations twice must stay safe");
         assert!(column_names(&conn, "_migrations").contains("name"));
         assert!(!column_names(&conn, "_migrations_legacy").contains("applied_at"));
+        assert!(column_names(&conn, "sources").contains("retention_keep_newest"));
+        assert!(column_names(&conn, "sources").contains("storage_override_once"));
+        assert!(column_names(&conn, "media").contains("skip_reason"));
+        assert!(column_names(&conn, "media").contains("retention_deleted"));
     }
 
     /// A legacy settings.json written before OOBE existed in this codebase
@@ -1162,6 +1245,16 @@ mod tests {
             loaded.oobe_completed,
             "legacy settings.json should self-heal to completed"
         );
+        // New optional storage controls are intentionally unlimited/disabled
+        // when an older settings file omits them.
+        assert_eq!(loaded.max_download_file_size_bytes, None);
+        assert_eq!(loaded.max_source_storage_bytes, None);
+        assert_eq!(loaded.minimum_free_disk_bytes, None);
+        assert_eq!(loaded.thumbnail_cache_max_bytes, None);
+        assert!(!loaded.apply_download_limits_to_local_imports);
+        assert_eq!(loaded.automatic_cleanup_mode, "never");
+        assert_eq!(loaded.automatic_cleanup_low_disk_bytes, None);
+        assert_eq!(loaded.archive_retention_days, None);
 
         // And the repair should have been persisted, not just held in memory.
         let raw = std::fs::read_to_string(settings_path(dir.path())).unwrap();

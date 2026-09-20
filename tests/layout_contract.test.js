@@ -17,7 +17,9 @@ test('the Explorer shell keeps one bounded primary panel and an independent side
 test('modal and first-run bodies remain reachable on short dynamic-height screens', () => {
   const appCss = read('static/style.css');
   const oobeCss = read('static/oobe.css');
-  assert.match(appCss, /#settings-modal \.modal\s*\{[\s\S]*?max-height:\s*calc\(100dvh - 40px\);[\s\S]*?overflow-y:\s*auto;/);
+  assert.match(appCss, /#settings-modal \.settings-center-modal\s*\{[\s\S]*?max-height:\s*calc\(100dvh - 32px\);[\s\S]*?overflow:\s*hidden;/);
+  assert.match(appCss, /\.settings-tab-panels\s*\{[\s\S]*?overflow-y:\s*auto;/);
+  assert.match(appCss, /@media \(max-width:\s*680px\)/);
   assert.match(oobeCss, /\.oobe-shell\s*\{[\s\S]*?height:\s*100dvh;[\s\S]*?overflow:\s*hidden;/);
   assert.match(oobeCss, /\.oobe-card\s*\{[\s\S]*?max-height:\s*calc\(100dvh - 48px\);[\s\S]*?overflow-y:\s*auto;/);
   assert.match(oobeCss, /\.oobe-nav\s*\{[\s\S]*?position:\s*sticky;[\s\S]*?bottom:\s*0;/);

@@ -5,7 +5,7 @@ use axum::{
     http::StatusCode,
     Json,
 };
-use serde::Deserialize;
+use serde::{Deserialize, Deserializer};
 use serde_json::{json, Value};
 
 use crate::db::now_iso;
@@ -27,6 +27,25 @@ pub struct AddSourcesBody {
 pub struct PatchSourceBody {
     pub name: Option<String>,
     pub included: Option<bool>,
+    /// Zero disables retention. A positive value keeps that many newest
+    /// downloaded items; protected media may cause the actual retained count
+    /// to be larger.
+    /// An explicit JSON `null` also disables the rule.  Keeping it distinct
+    /// from an omitted property makes PATCH a predictable round trip for
+    /// clients that model optional settings as nullable values.
+    #[serde(default, deserialize_with = "deserialize_nullable_u32")]
+    pub retention_keep_newest: Option<Option<u32>>,
+    /// Required when automatic cleanup is already armed. A retention rule is
+    /// otherwise only a dormant preference until the later global cleanup
+    /// confirmation enables it.
+    pub retention_confirmation: Option<String>,
+}
+
+fn deserialize_nullable_u32<'de, D>(deserializer: D) -> Result<Option<Option<u32>>, D::Error>
+where
+    D: Deserializer<'de>,
+{
+    Ok(Some(Option::<u32>::deserialize(deserializer)?))
 }
 
 #[derive(Deserialize)]
@@ -122,6 +141,7 @@ pub async fn patch(
     Path(id): Path<i64>,
     Json(body): Json<PatchSourceBody>,
 ) -> Result<Json<Value>, (StatusCode, Json<Value>)> {
+    let automatic_cleanup_armed = state.settings.read().await.automatic_cleanup_mode != "never";
     let conn = state.pool.get().map_err(db_err)?;
 
     let mut fields: Vec<String> = Vec::new();
@@ -134,6 +154,32 @@ pub async fn patch(
     if let Some(included) = body.included {
         fields.push("included=?".to_string());
         values.push(Box::new(if included { 1i64 } else { 0i64 }));
+    }
+    if let Some(keep_newest) = body.retention_keep_newest {
+        let keep_newest = keep_newest.unwrap_or(0);
+        if keep_newest > 1_000_000 {
+            return Err((
+                StatusCode::BAD_REQUEST,
+                Json(json!({"error":"Retention must be at most 1,000,000 items"})),
+            ));
+        }
+        if keep_newest > 0
+            && automatic_cleanup_armed
+            && body.retention_confirmation.as_deref() != Some("ENABLE RETENTION")
+        {
+            return Err((
+                StatusCode::BAD_REQUEST,
+                Json(json!({
+                    "error":"Type ENABLE RETENTION before adding a rule while automatic cleanup is enabled."
+                })),
+            ));
+        }
+        if keep_newest == 0 {
+            fields.push("retention_keep_newest=NULL".to_string());
+        } else {
+            fields.push("retention_keep_newest=?".to_string());
+            values.push(Box::new(i64::from(keep_newest)));
+        }
     }
     if fields.is_empty() {
         return Err((
@@ -459,4 +505,89 @@ fn row_to_json(row: &rusqlite::Row<'_>) -> rusqlite::Result<Value> {
         map.insert(name, val);
     }
     Ok(Value::Object(map))
+}
+
+#[cfg(test)]
+mod tests {
+    use axum::{extract::Path, extract::State, Json};
+
+    use super::*;
+
+    #[test]
+    fn nullable_retention_rule_has_an_explicit_disable_state() {
+        let omitted: PatchSourceBody = serde_json::from_value(serde_json::json!({})).unwrap();
+        assert_eq!(omitted.retention_keep_newest, None);
+
+        let disabled: PatchSourceBody =
+            serde_json::from_value(serde_json::json!({"retention_keep_newest": null})).unwrap();
+        assert_eq!(disabled.retention_keep_newest, Some(None));
+
+        let enabled: PatchSourceBody =
+            serde_json::from_value(serde_json::json!({"retention_keep_newest": 25})).unwrap();
+        assert_eq!(enabled.retention_keep_newest, Some(Some(25)));
+    }
+
+    #[tokio::test]
+    async fn retention_rule_round_trips_and_nullable_disable_persists() {
+        let root = tempfile::tempdir().unwrap();
+        let state = crate::test_support::state(root.path());
+        crate::test_support::source(&state);
+
+        let enabled: PatchSourceBody =
+            serde_json::from_value(serde_json::json!({"retention_keep_newest": 25})).unwrap();
+        let Json(value) = patch(State(state.clone()), Path(1), Json(enabled))
+            .await
+            .unwrap();
+        assert_eq!(value["retention_keep_newest"], 25);
+        let persisted: Option<i64> = state
+            .pool
+            .get()
+            .unwrap()
+            .query_row(
+                "SELECT retention_keep_newest FROM sources WHERE id=1",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(persisted, Some(25));
+
+        let disabled: PatchSourceBody =
+            serde_json::from_value(serde_json::json!({"retention_keep_newest": null})).unwrap();
+        let _ = patch(State(state.clone()), Path(1), Json(disabled))
+            .await
+            .unwrap();
+        let cleared: Option<i64> = state
+            .pool
+            .get()
+            .unwrap()
+            .query_row(
+                "SELECT retention_keep_newest FROM sources WHERE id=1",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(cleared, None);
+    }
+
+    #[tokio::test]
+    async fn retention_rule_needs_confirmation_when_automatic_cleanup_is_armed() {
+        let root = tempfile::tempdir().unwrap();
+        let state = crate::test_support::state(root.path());
+        crate::test_support::source(&state);
+        state.settings.write().await.automatic_cleanup_mode = "weekly".into();
+
+        let missing: PatchSourceBody =
+            serde_json::from_value(serde_json::json!({"retention_keep_newest": 5})).unwrap();
+        assert!(matches!(
+            patch(State(state.clone()), Path(1), Json(missing)).await,
+            Err((StatusCode::BAD_REQUEST, _))
+        ));
+
+        let confirmed: PatchSourceBody = serde_json::from_value(serde_json::json!({
+            "retention_keep_newest": 5,
+            "retention_confirmation": "ENABLE RETENTION"
+        }))
+        .unwrap();
+        assert!(patch(State(state), Path(1), Json(confirmed)).await.is_ok());
+    }
 }

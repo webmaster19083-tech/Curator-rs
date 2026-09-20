@@ -23,6 +23,7 @@ pub mod remote;
 pub mod routes;
 mod slug;
 mod startup;
+mod storage;
 #[cfg(test)]
 mod test_support;
 mod thumb_worker;
@@ -59,7 +60,7 @@ pub use edition::{API_PROTOCOL, PRODUCT_VERSION};
 
 pub type GroupTagCache = Arc<RwLock<Option<Arc<HashMap<i64, HashSet<String>>>>>>;
 
-pub use startup::set_start_with_windows;
+pub use startup::{set_start_with_windows, StartupRegistration};
 
 /// Apply the Windows Run registration and persist the matching Curator
 /// preference as one operation. Keeping this in the backend prevents the tray,
@@ -75,6 +76,32 @@ pub async fn set_start_with_windows_preference(
     settings.start_with_windows = enabled;
     db::save_settings(&state.data_dir, &settings);
     Ok(())
+}
+
+/// Re-read the real Windows Run entry whenever the local Settings center
+/// opens. A moved/uninstalled executable cannot be represented truthfully by
+/// the JSON preference alone, so keep the saved checkbox synchronized with the
+/// actual registration while preserving an actionable repair status.
+pub async fn reconcile_start_with_windows_preference(state: &AppState) -> StartupRegistration {
+    let registration = tokio::task::spawn_blocking(startup::inspect_startup_registration)
+        .await
+        .unwrap_or_else(|_| StartupRegistration {
+            supported: cfg!(windows),
+            registered: false,
+            state: "unavailable".into(),
+            message: "Windows startup reconciliation did not complete.".into(),
+            actual_command: None,
+            expected_command: None,
+            repair_available: false,
+        });
+    if registration.supported && registration.state != "unavailable" {
+        let mut settings = state.settings.write().await;
+        if settings.start_with_windows != registration.registered {
+            settings.start_with_windows = registration.registered;
+            db::save_settings(&state.data_dir, &settings);
+        }
+    }
+    registration
 }
 
 /// Shared application state passed to every Axum route handler.
@@ -109,6 +136,9 @@ pub struct AppState {
     /// source_id → PID of the running gallery-dl process.
     pub active_processes: Arc<Mutex<HashMap<i64, u32>>>,
     pub paused_source_ids: Arc<Mutex<HashSet<i64>>>,
+    /// A sync that crossed a quota or the free-space reserve records its
+    /// reason here until its owning task persists the final source status.
+    pub storage_pauses: Arc<Mutex<HashMap<i64, storage::SyncPause>>>,
     /// Swapped out when max_concurrent changes (same semantics as Python's approach).
     pub download_semaphore: Arc<Mutex<Arc<Semaphore>>>,
     /// Limits concurrent populate_placeholder scans to 3, independent of real downloads.
@@ -293,6 +323,15 @@ pub async fn initialize_with_options(options: InitializeOptions) -> Result<AppSt
 
     // Settings (loaded from settings.json with DEFAULT_SETTINGS fallback)
     let mut settings = db::load_settings(&data_dir);
+    // Restart-required notices are durable while a process is still running,
+    // but this fresh process is already using the changed bootstrap/worker
+    // configuration. Clear the acknowledgement point now rather than leaving
+    // a stale warning forever after a successful restart.
+    if settings.ffmpeg_restart_required || settings.nsfw_restart_required {
+        settings.ffmpeg_restart_required = false;
+        settings.nsfw_restart_required = false;
+        db::save_settings(&data_dir, &settings);
+    }
     let max_concurrent = settings.max_concurrent as usize;
     // Construct the maintenance coordinator before any startup workers.  The
     // workers receive clones of this exact controller, so a maintenance job
@@ -438,6 +477,7 @@ pub async fn initialize_with_options(options: InitializeOptions) -> Result<AppSt
         download_control: Arc::new(Mutex::new(())),
         active_processes: Arc::new(Mutex::new(HashMap::new())),
         paused_source_ids: Arc::new(Mutex::new(HashSet::new())),
+        storage_pauses: Arc::new(Mutex::new(HashMap::new())),
         download_semaphore: Arc::new(Mutex::new(Arc::new(Semaphore::new(max_concurrent)))),
         placeholder_semaphore: Arc::new(Semaphore::new(3)),
         download_cooldowns: Arc::new(Mutex::new(HashMap::new())),
@@ -475,6 +515,14 @@ pub async fn initialize_with_options(options: InitializeOptions) -> Result<AppSt
         )
         .await;
     });
+
+    // A disabled cleanup policy costs only this cancellable timer. Once a
+    // person explicitly enables one, cleanup remains conservative and is
+    // serialized against local Admin jobs by the helper itself.
+    let cleanup_state = Arc::new(state.clone());
+    state
+        .download_tasks
+        .spawn(storage::automatic_cleanup_loop(cleanup_state));
 
     // Recover completed files whose final event was lost before a crash.
     let startup_state = state.clone();

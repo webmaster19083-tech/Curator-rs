@@ -56,6 +56,8 @@ pub async fn status(State(state): State<Arc<AppState>>) -> Json<Value> {
             "indexing" => "indexing",
             "retrying" => "retrying",
             "paused" => "paused",
+            "storage_limit" => "storage_limit",
+            "low_disk" => "low_disk",
             "done" => "completed",
             "error" => "failed",
             _ => "queued",
@@ -208,7 +210,7 @@ pub async fn resume_source(State(state): State<Arc<AppState>>, Path(id): Path<i6
         return Json(json!({"id":id,"error":"Downloads are globally paused"}));
     }
     let changed = state.pool.get().ok().and_then(|conn| conn.execute(
-        "UPDATE sources SET status='pending',queued_at=?1,progress_updated_at=?1,current_filename=NULL WHERE id=?2 AND status IN ('paused','error','done','retrying')",
+        "UPDATE sources SET status='pending',queued_at=?1,progress_updated_at=?1,current_filename=NULL WHERE id=?2 AND status IN ('paused','storage_limit','low_disk','error','done','retrying')",
         rusqlite::params![crate::db::now_iso(),id],
     ).ok()).unwrap_or(0);
     if changed == 0 {

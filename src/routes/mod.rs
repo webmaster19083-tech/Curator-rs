@@ -14,6 +14,7 @@ pub mod search;
 pub mod settings;
 pub mod source_tags;
 pub mod sources;
+pub mod storage;
 pub mod system;
 pub mod tags;
 pub mod thumb;
@@ -174,6 +175,23 @@ pub fn build_router(state: Arc<AppState>) -> Router {
         // ── Settings ───────────────────────────────────────────────────────
         .route("/api/settings", get(settings::get).patch(settings::patch))
         .route("/api/remote-access", get(remote::status))
+        .route("/api/storage", get(storage::dashboard))
+        .route(
+            "/api/storage/sources/:id/permit-once",
+            post(storage::permit_one_sync),
+        )
+        .route(
+            "/api/storage/sources/:id/cleanup",
+            post(storage::cleanup_source),
+        )
+        .route(
+            "/api/storage/thumbnails/clear",
+            post(storage::clear_thumbnails),
+        )
+        .route(
+            "/api/storage/archives/cleanup",
+            post(storage::cleanup_archives),
+        )
         // ── Export / Import ────────────────────────────────────────────────
         .route("/api/export", get(export::export_sources))
         .route("/api/export/chpack", post(export::export_chpack))

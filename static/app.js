@@ -111,10 +111,17 @@ function reportVideoDuration(video, item) {
 // path. These two helpers are the ONLY place that distinction should be
 // checked — every render site below calls one of these instead of
 // building a /library or /api/thumb URL directly, specifically so this
-// stays a one-line difference from a real downloaded item rather than a
-// visibly different code path (that's the whole point: nothing about
-// how it's displayed should reveal which one it is).
+// stays a one-line difference from a real downloaded item. Size-limit and
+// retention placeholders intentionally use a local card: fetching the remote
+// original would defeat the user's storage decision.
+function mediaUnavailable(item) {
+  return !!item.retention_deleted || !!item.skip_reason;
+}
+function mediaUnavailableSrc() {
+  return 'data:image/svg+xml,' + encodeURIComponent('<svg xmlns="http://www.w3.org/2000/svg" width="640" height="420" viewBox="0 0 640 420"><rect width="640" height="420" fill="#202329"/><path d="M286 154h68v68h-68z" fill="none" stroke="#aab1bb" stroke-width="8"/><path d="M320 116v144M248 188h144" stroke="#aab1bb" stroke-width="8"/><text x="320" y="306" text-anchor="middle" fill="#d5d9df" font-family="sans-serif" font-size="22">Original unavailable</text></svg>');
+}
 function mediaFullSrc(item) {
+  if (mediaUnavailable(item)) return '';
   return item.downloaded === 0 ? item.origin_url : `/library/${encodeURI(item.filepath)}`;
 }
 function mediaThumbSrc(item) {
@@ -123,6 +130,7 @@ function mediaThumbSrc(item) {
   // loads the actual full-size remote image instead of a small cached
   // JPEG. Once scan_and_index retires this row it gets the real, fast
   // thumbnail like everything else automatically.
+  if (mediaUnavailable(item)) return mediaUnavailableSrc();
   return item.downloaded === 0 ? item.origin_url : `/api/thumb/${item.id}`;
 }
 
@@ -193,6 +201,16 @@ const ss = {
 
 let appSettings = {
   max_concurrent: 6,
+  max_download_file_size_bytes: null,
+  max_source_storage_bytes: null,
+  minimum_free_disk_bytes: null,
+  thumbnail_cache_max_bytes: null,
+  apply_download_limits_to_local_imports: false,
+  automatic_cleanup_mode: 'never',
+  automatic_cleanup_low_disk_bytes: null,
+  archive_retention_days: null,
+  ffmpeg_restart_required: false,
+  nsfw_restart_required: false,
   default_slideshow_speed: 3000,
   default_slideshow_loop: true,
   default_slideshow_shuffle: false,
@@ -208,6 +226,9 @@ let appSettings = {
   tts_volume: 1,
   soundtrack_provider: 'local',
 };
+
+let activeSettingsTab = 'general';
+let settingsVoiceListenerInstalled = false;
 
 // ---------------------------------------------------------------------
 // bootstrap
@@ -364,6 +385,23 @@ function bindGlobalUI() {
   el('#settings-save').addEventListener('click', saveSettings);
   el('#settings-modal').addEventListener('click', (e) => { if (e.target.id === 'settings-modal') closeSettingsModal(); });
   el('#settings-run-setup-again').addEventListener('click', runSetupAgain);
+  el('#settings-export-sources').addEventListener('click', exportSources);
+  document.querySelectorAll('[data-settings-tab]').forEach((button) => {
+    button.addEventListener('click', () => setSettingsTab(button.dataset.settingsTab));
+  });
+  el('#settings-max-download-size-preset').addEventListener('change', syncSettingsLimitInputs);
+  el('#settings-max-source-storage-preset').addEventListener('change', syncSettingsLimitInputs);
+  el('#settings-storage-refresh').addEventListener('click', loadStorageDashboard);
+  el('#settings-storage-sort').addEventListener('change', loadStorageDashboard);
+  el('#settings-clear-thumbnails').addEventListener('click', clearThumbnailCacheNow);
+  el('#settings-clear-archives').addEventListener('click', clearArchivesNow);
+  document.addEventListener('visibilitychange', () => {
+    if (document.hidden) {
+      window.stopLocalAdminPolling?.();
+    } else if (isSettingsTabActive('local-admin')) {
+      window.renderSettingsLocalAdmin?.(el('#settings-local-admin'));
+    }
+  });
 
   el('#export-btn').addEventListener('click', exportSources);
   el('#chpack-export-btn').addEventListener('click', exportChpack);
@@ -1001,14 +1039,110 @@ function announceAddResult(data) {
 // settings (download concurrency)
 // ---------------------------------------------------------------------
 
-function populateTtsVoiceSelect(selected) {
+
+function optionalWholeNumber(input) {
+  const value = Number(input?.value);
+  return Number.isSafeInteger(value) && value > 0 ? value : null;
+}
+
+function boundedNumber(input, minimum, maximum, fallback) {
+  const value = Number(input?.value);
+  return Number.isFinite(value) ? Math.max(minimum, Math.min(maximum, value)) : fallback;
+}
+
+function configureByteLimit(presetId, customId, customWrapId, value) {
+  const preset = el(`#${presetId}`);
+  const custom = el(`#${customId}`);
+  const wrap = el(`#${customWrapId}`);
+  const normalized = Number.isSafeInteger(Number(value)) && Number(value) > 0 ? String(value) : 'unlimited';
+  if ([...preset.options].some((option) => option.value === normalized)) {
+    preset.value = normalized;
+    custom.value = '';
+  } else if (normalized === 'unlimited') {
+    preset.value = 'unlimited';
+    custom.value = '';
+  } else {
+    preset.value = 'custom';
+    custom.value = normalized;
+  }
+  wrap.hidden = preset.value !== 'custom';
+}
+
+function readByteLimit(presetId, customId) {
+  const preset = el(`#${presetId}`).value;
+  if (preset === 'unlimited') return null;
+  if (preset === 'custom') return optionalWholeNumber(el(`#${customId}`));
+  const value = Number(preset);
+  return Number.isSafeInteger(value) && value > 0 ? value : null;
+}
+
+function syncSettingsLimitInputs() {
+  el('#settings-max-download-size-custom-wrap').hidden = el('#settings-max-download-size-preset').value !== 'custom';
+  el('#settings-max-source-storage-custom-wrap').hidden = el('#settings-max-source-storage-preset').value !== 'custom';
+}
+
+function populateTtsVoiceSelect(selected = appSettings.tts_voice) {
   const select = el('#settings-tts-voice');
   if (!select) return;
+  const preserved = selected ?? select.value ?? '';
   const voices = 'speechSynthesis' in window ? window.speechSynthesis.getVoices() : [];
   select.replaceChildren(new Option('System default', ''));
   voices.forEach((voice) => select.add(new Option(`${voice.name} (${voice.lang})`, voice.name)));
-  if (selected && ![...select.options].some((option) => option.value === selected)) select.add(new Option(`${selected} (unavailable)`, selected));
-  select.value = selected || '';
+  if (preserved && ![...select.options].some((option) => option.value === preserved)) {
+    select.add(new Option(`${preserved} (unavailable)`, preserved));
+  }
+  select.value = preserved || '';
+}
+
+function installSpeechVoiceListener() {
+  if (settingsVoiceListenerInstalled || !('speechSynthesis' in window)) return;
+  settingsVoiceListenerInstalled = true;
+  const repopulate = () => {
+    const current = el('#settings-tts-voice')?.value || appSettings.tts_voice || '';
+    // Browser voice catalogs often arrive after the first modal paint.
+    Promise.resolve().then(() => populateTtsVoiceSelect(current));
+  };
+  window.speechSynthesis.addEventListener('voiceschanged', repopulate);
+}
+
+function renderStartupRegistration(registration) {
+  const status = el('#settings-startup-registration');
+  if (!status) return;
+  if (!registration) {
+    status.textContent = 'Windows startup registration is unavailable in this runtime.';
+    return;
+  }
+  status.textContent = registration.message || 'Windows startup registration could not be checked.';
+  status.classList.toggle('settings-status-warning', registration.state === 'stale' || registration.state === 'missing');
+}
+
+function renderRestartNotices() {
+  const ffmpeg = el('#settings-ffmpeg-restart-notice');
+  const nsfw = el('#settings-nsfw-restart-notice');
+  if (ffmpeg) ffmpeg.hidden = !appSettings.ffmpeg_restart_required;
+  if (nsfw) nsfw.hidden = !appSettings.nsfw_restart_required;
+}
+
+function isSettingsTabActive(tab) {
+  return !el('#settings-modal').hidden && activeSettingsTab === tab;
+}
+window.isSettingsTabActive = isSettingsTabActive;
+
+function setSettingsTab(tab) {
+  const button = document.querySelector(`[data-settings-tab="${tab}"]`);
+  if (!button || button.hidden) tab = 'general';
+  activeSettingsTab = tab;
+  document.querySelectorAll('[data-settings-tab]').forEach((item) => {
+    const selected = item.dataset.settingsTab === tab;
+    item.classList.toggle('active', selected);
+    item.setAttribute('aria-selected', String(selected));
+  });
+  document.querySelectorAll('[data-settings-tab-panel]').forEach((panel) => {
+    panel.hidden = panel.dataset.settingsTabPanel !== tab;
+  });
+  if (tab !== 'local-admin') window.stopLocalAdminPolling?.();
+  if (tab === 'media-storage') void loadStorageDashboard();
+  if (tab === 'local-admin') window.renderSettingsLocalAdmin?.(el('#settings-local-admin'));
 }
 
 async function renderRemoteAccessStatus() {
@@ -1016,55 +1150,185 @@ async function renderRemoteAccessStatus() {
   if (!target) return;
   try {
     const info = await api('/api/remote-access');
-    if (!info.running) {
-      target.textContent = 'Local server is stopped.';
-      return;
-    }
+    if (!info.running) { target.textContent = 'Local server is stopped.'; return; }
     const urls = [...(info.local_urls || []), ...(info.tailscale_urls || [])];
     if (info.magicdns_hostname && info.port) urls.push(`http://${info.magicdns_hostname}:${info.port}`);
-    target.textContent = urls.length
-      ? `Server running · ${urls.join(' · ')}`
-      : `Server running on port ${info.port}`;
+    target.textContent = urls.length ? `Server running - ${urls.join(' - ')}` : `Server running on port ${info.port}`;
   } catch (_) {
     target.textContent = 'Server status is unavailable.';
   }
+}
+
+function storageLabel(key) {
+  return ({
+    original_media: 'Original media', thumbnail_cache: 'Thumbnail cache', metadata_sidecars: 'Metadata sidecars',
+    backups: 'Backups', phar_environment: 'P-HAR environment', gallery_dl_archives: 'gallery-dl archives',
+  })[key] || key;
+}
+
+function localSettingsAvailable() {
+  return appSettings.local_integration_settings_local_only !== true;
+}
+
+function settingsActionButton(label, action, className = 'btn btn-ghost small') {
+  const button = document.createElement('button');
+  button.type = 'button'; button.className = className; button.textContent = label;
+  button.addEventListener('click', action);
+  return button;
+}
+
+async function saveSourceRetention(sourceId, input) {
+  const keep = Math.max(0, Math.min(1_000_000, Math.floor(Number(input.value) || 0)));
+  let confirmation = '';
+  if (keep > 0) {
+    confirmation = prompt('Type ENABLE RETENTION to allow future cleanup of older unprotected originals for this source:');
+    if (confirmation !== 'ENABLE RETENTION') { toast('Retention was not enabled.', true); return; }
+  }
+  try {
+    const body = { retention_keep_newest: keep };
+    if (confirmation) body.retention_confirmation = confirmation;
+    await api(`/api/sources/${sourceId}`, { method: 'PATCH', body: JSON.stringify(body) });
+    toast(keep ? `Retention keeps the newest ${keep} item(s) for this source.` : 'Source retention disabled.');
+    void loadStorageDashboard();
+  } catch (error) { toast(`Could not save retention: ${error.message}`, true); }
+}
+
+function renderStorageDashboard(snapshot) {
+  const target = el('#settings-storage-dashboard');
+  if (!target) return;
+  target.replaceChildren();
+  const categories = document.createElement('div'); categories.className = 'settings-storage-categories';
+  Object.entries(snapshot.categories || {}).forEach(([key, value]) => {
+    const item = document.createElement('div'); item.className = 'settings-storage-category';
+    const label = document.createElement('span'); label.textContent = storageLabel(key);
+    const amount = document.createElement('strong'); amount.className = 'mono'; amount.textContent = formatBytes(value);
+    item.append(label, amount); categories.append(item);
+  });
+  target.append(categories);
+  const disk = snapshot.disk || {};
+  const diskNote = document.createElement('p'); diskNote.className = 'muted';
+  diskNote.textContent = `Disk: ${formatBytes(disk.free_bytes)} free of ${formatBytes(disk.total_bytes)}${disk.minimum_free_disk_bytes ? `; reserve ${formatBytes(disk.minimum_free_disk_bytes)}` : ''}.`;
+  target.append(diskNote);
+  const note = document.createElement('p'); note.className = 'muted'; note.textContent = snapshot.note || '';
+  target.append(note);
+  const heading = document.createElement('h4'); heading.textContent = 'Usage by source'; target.append(heading);
+  const list = document.createElement('div'); list.className = 'settings-source-usage-list';
+  const local = localSettingsAvailable();
+  (snapshot.sources || []).forEach((source) => {
+    const row = document.createElement('article'); row.className = 'settings-source-usage';
+    const title = document.createElement('strong'); title.textContent = source.name || `Source ${source.id}`;
+    const usage = document.createElement('span'); usage.className = 'mono'; usage.textContent = `${formatBytes(source.used_bytes)} / ${source.allowed_bytes ? formatBytes(source.allowed_bytes) : 'Unlimited'}`;
+    const status = document.createElement('small'); status.className = source.at_or_over_limit ? 'settings-status-warning' : 'muted';
+    status.textContent = source.at_or_over_limit ? 'At quota - increase it, remove old media, or permit one sync.' : (source.status || '');
+    const retention = document.createElement('label'); retention.className = 'mono small'; retention.textContent = 'keep newest ';
+    const input = document.createElement('input'); input.type = 'number'; input.min = '0'; input.max = '1000000'; input.step = '1'; input.value = source.retention_keep_newest || '';
+    input.placeholder = 'Never'; retention.append(input);
+    const actions = document.createElement('div'); actions.className = 'settings-source-usage-actions';
+    actions.append(settingsActionButton('Save retention', () => saveSourceRetention(source.id, input)));
+    if (local) {
+      actions.append(settingsActionButton('Increase limit', () => {
+        el('#settings-max-source-storage-preset').value = 'custom';
+        el('#settings-max-source-storage-custom').value = String(Math.max(Number(source.used_bytes || 0) + 1073741824, Number(appSettings.max_source_storage_bytes || 0)));
+        syncSettingsLimitInputs(); el('#settings-max-source-storage-custom').focus();
+      }));
+      actions.append(settingsActionButton('Permit one sync', async () => {
+        try { const result = await api(`/api/storage/sources/${source.id}/permit-once`, { method: 'POST' }); toast(result.message || 'One sync permitted.'); void loadStorageDashboard(); }
+        catch (error) { toast(`Could not permit sync: ${error.message}`, true); }
+      }));
+      actions.append(settingsActionButton('Remove old media', async () => {
+        const confirmation = prompt('Type DELETE OLD MEDIA to remove unprotected originals for this source:');
+        if (confirmation !== 'DELETE OLD MEDIA') { toast('Confirmation did not match.', true); return; }
+        const keepNewest = Math.max(0, Math.floor(Number(input.value) || 0));
+        try { const result = await api(`/api/storage/sources/${source.id}/cleanup`, { method: 'POST', body: JSON.stringify({ confirmation, keep_newest: keepNewest }) }); toast(`Removed ${result.removed_items || 0} item(s); unavailable placeholders remain.`); void loadStorageDashboard(); }
+        catch (error) { toast(`Could not remove old media: ${error.message}`, true); }
+      }));
+    }
+    row.append(title, usage, status, retention, actions); list.append(row);
+  });
+  if (!list.childElementCount) { const empty = document.createElement('p'); empty.className = 'muted'; empty.textContent = 'No sources yet.'; list.append(empty); }
+  target.append(list);
+}
+
+async function loadStorageDashboard() {
+  if (!isSettingsTabActive('media-storage')) return;
+  const target = el('#settings-storage-dashboard');
+  if (target) target.textContent = 'Calculating storage usage…';
+  try {
+    const sort = encodeURIComponent(el('#settings-storage-sort').value || 'usage_desc');
+    const snapshot = await api(`/api/storage?sort=${sort}`);
+    if (isSettingsTabActive('media-storage')) renderStorageDashboard(snapshot);
+  } catch (error) {
+    if (target) target.textContent = `Storage usage is unavailable: ${error.message}`;
+  }
+}
+
+async function clearThumbnailCacheNow() {
+  const confirmation = prompt('Type CLEAR THUMBNAILS to delete cached thumbnails. Originals will not be changed:');
+  if (confirmation !== 'CLEAR THUMBNAILS') { toast('Confirmation did not match.', true); return; }
+  try { const result = await api('/api/storage/thumbnails/clear', { method: 'POST', body: JSON.stringify({ confirmation }) }); toast(`Cleared ${result.removed_items || 0} thumbnail cache item(s).`); void loadStorageDashboard(); }
+  catch (error) { toast(`Could not clear thumbnails: ${error.message}`, true); }
+}
+
+async function clearArchivesNow() {
+  const confirmation = prompt('Type DELETE ARCHIVES to delete gallery-dl archives. Older posts may be reconsidered on a future sync:');
+  if (confirmation !== 'DELETE ARCHIVES') { toast('Confirmation did not match.', true); return; }
+  try { const result = await api('/api/storage/archives/cleanup', { method: 'POST', body: JSON.stringify({ confirmation, age_days: null }) }); toast(`Deleted ${result.removed_items || 0} archive file(s). ${result.warning || ''}`); void loadStorageDashboard(); }
+  catch (error) { toast(`Could not delete archives: ${error.message}`, true); }
 }
 
 async function openSettingsModal() {
   try {
     const data = await api('/api/settings');
     appSettings = { ...appSettings, ...data };
-  } catch (e) {
-    toast('Could not load current settings: ' + e.message, true);
+  } catch (error) {
+    toast('Could not load current settings: ' + error.message, true);
   }
-  const localIntegrations = appSettings.local_integration_settings_local_only !== true;
-  const hostIntegrations = localIntegrations && appSettings.host_integration_settings_available === true;
-  document.querySelectorAll('[data-local-setting]').forEach((node) => { node.hidden = !localIntegrations; });
-  document.querySelectorAll('[data-host-setting]').forEach((node) => { node.hidden = !hostIntegrations; });
+  const local = localSettingsAvailable();
+  const host = local && appSettings.host_integration_settings_available === true;
+  document.querySelectorAll('[data-local-setting]').forEach((node) => { node.hidden = !local; });
+  document.querySelectorAll('[data-host-setting]').forEach((node) => { node.hidden = !host; });
+  const adminTab = el('[data-local-admin-tab]');
+  if (adminTab) adminTab.hidden = !local || window.curatorRuntime === 'viewer';
   el('#settings-max-concurrent').value = appSettings.max_concurrent;
   el('#settings-max-clip-length').value = appSettings.max_clip_length_secs || 60;
   el('#settings-library-layout').value = appSettings.library_layout || 'grid';
   el('#settings-ffmpeg-bin').value = appSettings.ffmpeg_bin || 'ffmpeg';
-  el('#settings-theme').value = appSettings.theme;
+  el('#settings-theme').value = appSettings.theme || 'system';
   el('#settings-default-speed').value = appSettings.default_slideshow_speed;
   el('#settings-default-loop').checked = !!appSettings.default_slideshow_loop;
   el('#settings-default-shuffle').checked = !!appSettings.default_slideshow_shuffle;
-  el('#settings-export-reminder-days').value = appSettings.export_reminder_days;
+  el('#settings-export-reminder-days').value = appSettings.export_reminder_days || 30;
   el('#settings-nsfw-filter-enabled').checked = !!appSettings.nsfw_filter_enabled;
   el('#settings-metronome-enabled').checked = !!appSettings.metronome_enabled;
   el('#settings-metronome-volume').value = appSettings.metronome_volume ?? 0.55;
   el('#settings-goon-persona').value = appSettings.goon_persona || 'neutral';
+  installSpeechVoiceListener();
   populateTtsVoiceSelect(appSettings.tts_voice);
   el('#settings-tts-rate').value = appSettings.tts_rate ?? 1;
   el('#settings-tts-pitch').value = appSettings.tts_pitch ?? 1;
   el('#settings-tts-volume').value = appSettings.tts_volume ?? 1;
   el('#settings-soundtrack-provider').value = appSettings.soundtrack_provider || 'local';
-  el('#settings-start-with-windows').checked = !!appSettings.start_with_windows;
+  el('#settings-start-with-windows').checked = appSettings.startup_registration?.supported ? !!appSettings.startup_registration.registered : !!appSettings.start_with_windows;
   el('#settings-keep-running-in-tray').checked = appSettings.keep_running_in_tray !== false;
-  renderRemoteAccessStatus();
+  configureByteLimit('settings-max-download-size-preset', 'settings-max-download-size-custom', 'settings-max-download-size-custom-wrap', appSettings.max_download_file_size_bytes);
+  configureByteLimit('settings-max-source-storage-preset', 'settings-max-source-storage-custom', 'settings-max-source-storage-custom-wrap', appSettings.max_source_storage_bytes);
+  el('#settings-minimum-free-disk').value = appSettings.minimum_free_disk_bytes || '';
+  el('#settings-thumbnail-cache-limit').value = appSettings.thumbnail_cache_max_bytes || '';
+  el('#settings-apply-limits-local-imports').checked = !!appSettings.apply_download_limits_to_local_imports;
+  el('#settings-automatic-cleanup-mode').value = appSettings.automatic_cleanup_mode || 'never';
+  el('#settings-automatic-cleanup-low-disk').value = appSettings.automatic_cleanup_low_disk_bytes || '';
+  el('#settings-archive-retention-days').value = appSettings.archive_retention_days || '';
+  renderStartupRegistration(appSettings.startup_registration);
+  renderRestartNotices();
   el('#settings-modal').hidden = false;
+  setSettingsTab('general');
+  void renderRemoteAccessStatus();
 }
-function closeSettingsModal() { el('#settings-modal').hidden = true; }
+
+function closeSettingsModal() {
+  window.stopLocalAdminPolling?.();
+  el('#settings-modal').hidden = true;
+}
 
 async function saveSettings() {
   const rawConcurrent = parseInt(el('#settings-max-concurrent').value, 10);
@@ -1072,14 +1336,20 @@ async function saveSettings() {
   const rawReminderDays = parseInt(el('#settings-export-reminder-days').value, 10);
   const reminderDays = Number.isFinite(rawReminderDays) ? Math.max(1, Math.min(365, rawReminderDays)) : 30;
   const nsfwFilterEnabled = el('#settings-nsfw-filter-enabled').checked;
-  const nsfwFilterChanged = !!appSettings.nsfw_filter_enabled !== nsfwFilterEnabled;
   const externalToolsLocal = appSettings.external_tool_settings_local_only !== true;
-  const localIntegrations = appSettings.local_integration_settings_local_only !== true;
-  const hostIntegrations = localIntegrations && appSettings.host_integration_settings_available === true;
-  const externalToolsChanged = externalToolsLocal && (appSettings.ffmpeg_bin || 'ffmpeg') !== el('#settings-ffmpeg-bin').value.trim();
+  const local = localSettingsAvailable();
+  const host = local && appSettings.host_integration_settings_available === true;
   const body = {
     max_concurrent: maxConcurrent,
     max_clip_length_secs: Math.max(5, Math.min(3600, parseInt(el('#settings-max-clip-length').value, 10) || 60)),
+    max_download_file_size_bytes: readByteLimit('settings-max-download-size-preset', 'settings-max-download-size-custom'),
+    max_source_storage_bytes: readByteLimit('settings-max-source-storage-preset', 'settings-max-source-storage-custom'),
+    minimum_free_disk_bytes: optionalWholeNumber(el('#settings-minimum-free-disk')),
+    thumbnail_cache_max_bytes: optionalWholeNumber(el('#settings-thumbnail-cache-limit')),
+    apply_download_limits_to_local_imports: el('#settings-apply-limits-local-imports').checked,
+    automatic_cleanup_mode: el('#settings-automatic-cleanup-mode').value,
+    automatic_cleanup_low_disk_bytes: optionalWholeNumber(el('#settings-automatic-cleanup-low-disk')),
+    archive_retention_days: optionalWholeNumber(el('#settings-archive-retention-days')),
     library_layout: el('#settings-library-layout').value,
     theme: el('#settings-theme').value,
     default_slideshow_speed: parseInt(el('#settings-default-speed').value, 10),
@@ -1088,20 +1358,33 @@ async function saveSettings() {
     export_reminder_days: reminderDays,
     nsfw_filter_enabled: nsfwFilterEnabled,
     metronome_enabled: el('#settings-metronome-enabled').checked,
-    metronome_volume: Math.max(0, Math.min(1, Number(el('#settings-metronome-volume').value) || 0)),
+    metronome_volume: boundedNumber(el('#settings-metronome-volume'), 0, 1, 0.55),
     goon_persona: el('#settings-goon-persona').value,
     tts_voice: el('#settings-tts-voice').value,
-    tts_rate: Math.max(0.5, Math.min(2, Number(el('#settings-tts-rate').value) || 1)),
-    tts_pitch: Math.max(0.5, Math.min(2, Number(el('#settings-tts-pitch').value) || 1)),
-    tts_volume: Math.max(0, Math.min(1, Number(el('#settings-tts-volume').value) || 0)),
+    tts_rate: boundedNumber(el('#settings-tts-rate'), 0.1, 3, 1),
+    tts_pitch: boundedNumber(el('#settings-tts-pitch'), 0, 2, 1),
+    tts_volume: boundedNumber(el('#settings-tts-volume'), 0, 1, 1),
     soundtrack_provider: el('#settings-soundtrack-provider').value,
   };
-  // Executable paths are intentionally omitted from Tailnet requests. The
-  // backend only exposes these fields to loopback/in-process clients.
+  const cleanupWasEnabled = appSettings.automatic_cleanup_mode && appSettings.automatic_cleanup_mode !== 'never';
+  const cleanupWillBeEnabled = body.automatic_cleanup_mode !== 'never';
+  if (cleanupWillBeEnabled && !cleanupWasEnabled) {
+    const confirmation = prompt('Type ENABLE AUTOMATIC CLEANUP to allow confirmed retention/cache/archive cleanup:');
+    if (confirmation !== 'ENABLE AUTOMATIC CLEANUP') { toast('Automatic cleanup remains disabled.', true); return; }
+    // Keep the typed acknowledgment in the request too. The backend refuses
+    // to arm cleanup without it, so direct API callers cannot bypass this
+    // destructive-feature guard.
+    body.automatic_cleanup_confirmation = confirmation;
+  }
+  if (body.archive_retention_days && !appSettings.archive_retention_days) {
+    const confirmation = prompt('Type ENABLE ARCHIVE RETENTION to delete gallery-dl archives older than the selected age:');
+    if (confirmation !== 'ENABLE ARCHIVE RETENTION') { toast('Archive age cleanup remains disabled.', true); return; }
+    body.archive_retention_confirmation = confirmation;
+  }
   if (externalToolsLocal && Object.prototype.hasOwnProperty.call(appSettings, 'ffmpeg_bin')) {
     body.ffmpeg_bin = el('#settings-ffmpeg-bin').value.trim() || 'ffmpeg';
   }
-  if (hostIntegrations) {
+  if (host) {
     body.start_with_windows = el('#settings-start-with-windows').checked;
     body.keep_running_in_tray = el('#settings-keep-running-in-tray').checked;
   }
@@ -1111,12 +1394,12 @@ async function saveSettings() {
     applyTheme(appSettings.theme);
     configureClipLengthControls();
     if (typeof setExplorerLayout === 'function') setExplorerLayout(appSettings.library_layout, false);
-    closeSettingsModal();
-    toast(nsfwFilterChanged ? 'Settings saved — restart Curator for NSFW auto-rating to take effect' : 'Settings saved');
+    renderRestartNotices();
     renderExportReminderBanner();
-    if (externalToolsChanged) toast('ffmpeg changes take effect after restarting Curator.');
-  } catch (e) {
-    toast('Could not save settings: ' + e.message, true);
+    toast((appSettings.ffmpeg_restart_required || appSettings.nsfw_restart_required) ? 'Settings saved. Restart required settings are marked in their tabs.' : 'Settings saved.');
+    if (isSettingsTabActive('media-storage')) void loadStorageDashboard();
+  } catch (error) {
+    toast('Could not save settings: ' + error.message, true);
   }
 }
 
@@ -1585,10 +1868,11 @@ const videoLazyObserver = new IntersectionObserver((entries) => {
 
 function buildTile(item, index) {
   const tile = document.createElement('div');
-  tile.className = 'tile' + (item.type === 'video' ? ' tile-video' : '');
+  const unavailable = mediaUnavailable(item);
+  tile.className = 'tile' + (item.type === 'video' ? ' tile-video' : '') + (unavailable ? ' tile-unavailable' : '');
 
   let mediaEl;
-  if (item.type === 'video') {
+  if (item.type === 'video' && !unavailable) {
     mediaEl = document.createElement('video');
     reportVideoDuration(mediaEl, item);
     mediaEl.dataset.src = mediaFullSrc(item);
@@ -1619,11 +1903,19 @@ function buildTile(item, index) {
     tile.appendChild(badge);
   }
 
-  if (item.type === 'video') {
+  if (item.type === 'video' && !unavailable) {
     const play = document.createElement('span');
     play.className = 'tile-play';
     play.textContent = '▶';
     tile.appendChild(play);
+  }
+
+  if (unavailable) {
+    const notice = document.createElement('span');
+    notice.className = 'tile-unavailable-notice mono';
+    notice.textContent = item.skip_reason || 'Original removed; metadata remains.';
+    notice.title = notice.textContent;
+    tile.appendChild(notice);
   }
 
   tile.addEventListener('click', () => openLightbox(index));
@@ -1702,6 +1994,20 @@ function renderLightboxItem() {
   const stage = el('#lightbox-stage');
   stage.innerHTML = '';
   const src = mediaFullSrc(item);
+
+  if (mediaUnavailable(item)) {
+    const notice = document.createElement('section');
+    notice.className = 'media-unavailable-detail';
+    const heading = document.createElement('h3'); heading.textContent = 'Original unavailable';
+    const detail = document.createElement('p'); detail.textContent = item.skip_reason || 'This original was removed by retention. Its annotations and metadata remain available.';
+    notice.append(heading, detail);
+    stage.appendChild(notice);
+    const source = state.sourcesById[item.source_id];
+    el('#lightbox-meta').textContent = `${pad4(state.lightboxIndex + 1)} / ${pad4(state.currentItems.length)}  —  ${item.filename}  —  ${source ? source.name : ''}`;
+    renderStarRating(el('#lightbox-rating'), item.rating || 0, (rating) => rateMedia(item, rating));
+    renderTagRow(item);
+    return;
+  }
 
   let mediaEl;
   if (item.type === 'video') {

@@ -901,7 +901,7 @@ checksum = "52560adf09603e58c9a7ee1fe1dcb95a16927b17c127f0ac02d6e768a0e25bc1"
 
 [[package]]
 name = "curator"
-version = "0.2.0"
+version = "0.3.0"
 dependencies = [
  "anyhow",
  "async-compression",
@@ -950,7 +950,7 @@ dependencies = [
 
 [[package]]
 name = "curator-desktop"
-version = "0.2.0"
+version = "0.3.0"
 dependencies = [
  "axum",
  "curator",
@@ -969,7 +969,7 @@ dependencies = [
 
 [[package]]
 name = "curator-viewer"
-version = "0.2.0"
+version = "0.3.0"
 dependencies = [
  "curator",
  "reqwest 0.12.28",

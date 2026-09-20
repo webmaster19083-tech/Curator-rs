@@ -1,4 +1,4 @@
-CURATOR 0.2.0 — operational reference
+CURATOR 0.3.0 — operational reference
 ======================================
 
 Curator is a self-hosted gallery-dl frontend. It stores sources, media

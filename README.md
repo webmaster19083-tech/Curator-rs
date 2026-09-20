@@ -1,4 +1,4 @@
-# Curator 0.2.0
+# Curator 0.3.0
 
 Curator is a self-hosted gallery-dl library: download media you are entitled to
 access, organize it with groups/tags/ratings, and browse it locally in a

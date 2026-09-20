@@ -75,6 +75,31 @@ test('the desktop bridge sends OOBE API requests through Tauri', async () => {
   assert.equal(invocation[1].path, '/api/oobe/status');
   assert.equal(invocation[1].method, 'GET');
   assert.equal(invocation[1].body, null);
+
+  assert.equal(typeof context.window.curatorNative.importLocalFolder, 'function');
+  await context.window.curatorNative.mediaAction(42, 'reveal');
+  assert.equal(invocation[0], 'media_action');
+  assert.equal(invocation[1].id, 42);
+  assert.equal(invocation[1].action, 'reveal');
+});
+
+test('the Viewer runtime never receives Host-native file capabilities', () => {
+  const context = {
+    Response,
+    Uint8Array,
+    MutationObserver: class { observe() {} },
+    document: { documentElement: {}, addEventListener() {} },
+    navigator: { userAgent: 'Windows' },
+  };
+  context.window = {
+    __CURATOR_RUNTIME__: 'remote',
+    __TAURI__: { core: { invoke: async () => { throw new Error('must not invoke'); } }, event: { listen: async () => {} } },
+    fetch: async () => new Response('{}'),
+  };
+  context.window.window = context.window;
+
+  new vm.Script(read('static/desktop.js'), { filename: 'static/desktop.js' }).runInNewContext(context);
+  assert.equal(context.window.curatorNative, undefined);
 });
 
 test('packaged browser assets parse and do not depend on remote UI libraries', () => {
@@ -86,4 +111,7 @@ test('packaged browser assets parse and do not depend on remote UI libraries', (
   for (const file of ['static/desktop.js', 'static/oobe.js', 'static/virtual-clips.js', 'static/app.js', 'static/library.js']) {
     assert.doesNotThrow(() => new vm.Script(read(file), { filename: file }));
   }
+  assert.match(read('static/desktop.js'), /window\.curatorNative = Object\.freeze/);
+  assert.match(read('static/app.js'), /function nativeMediaAction\(action\)/);
+  assert.match(read('static/library.js'), /function goonRecordTimingCorrection\(session, kind\)/);
 });

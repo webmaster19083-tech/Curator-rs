@@ -24,6 +24,7 @@ use crate::AppState;
 
 const METER: u8 = 4;
 const COUNT_IN_BEATS: u32 = 4;
+const MAX_SESSION_STAGES: usize = 128;
 
 #[derive(Debug, Clone, Serialize)]
 pub struct SessionStage {
@@ -415,6 +416,12 @@ pub async fn start(
     } else {
         body.pace_stages.clone()
     };
+    if inputs.len() > MAX_SESSION_STAGES {
+        return Err((
+            StatusCode::BAD_REQUEST,
+            Json(json!({"error": format!("At most {MAX_SESSION_STAGES} pace stages are allowed")})),
+        ));
+    }
     let mut stages = build_stages(&inputs, bpm, &persona)
         .map_err(|error| (StatusCode::BAD_REQUEST, Json(json!({"error":error}))))?;
     let (mut candidates, skipped_sfw) =
@@ -669,6 +676,32 @@ mod tests {
         assert_eq!(stages[3].pace, "succubus");
         assert_eq!(stages[3].media_rating, None);
         assert_eq!(stages[4].media_rating, Some(5));
+    }
+
+    #[tokio::test]
+    async fn rejects_an_unbounded_custom_stage_plan() {
+        let root = tempfile::tempdir().unwrap();
+        let state = crate::test_support::state(root.path());
+        let stages = (0..=MAX_SESSION_STAGES)
+            .map(|_| PaceStageInput {
+                id: None,
+                pace: "slow".into(),
+                beats: Some(1),
+                duration_s: None,
+            })
+            .collect();
+        let error = start(
+            State(state),
+            Json(StartSessionBody {
+                pace_stages: stages,
+                ..Default::default()
+            }),
+        )
+        .await
+        .unwrap_err();
+        let (status, Json(body)) = error;
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+        assert_eq!(body["error"], "At most 128 pace stages are allowed");
     }
 
     #[tokio::test]
